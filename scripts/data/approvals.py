@@ -146,3 +146,48 @@ def require_mapping_approval(root: Path, record_id: str, mapping_rel: str, sha25
 def require_seeds_approval(root: Path, record_id: str, seeds_rel: str, sha256: str) -> dict:
     """The data_seeds stage_approval of exactly this seeds.json path and sha256."""
     return _require_artifact_approval(root, record_id, "data_seeds", seeds_rel, sha256)
+
+
+def _ode_mapping_outputs(root: Path, rel: str) -> tuple[str | None, set]:
+    """(ODE session, measurement ids used by rules + fitted names) of an ode_mapping.json, tolerant of shape."""
+    state = _state()
+    try:
+        data = json.loads(state.artifact(Path(root), rel).read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"cannot read {rel}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{rel} must be a JSON object")
+    model = (data.get("inputs") or {}).get("model") if isinstance(data.get("inputs"), dict) else None
+    session = model.get("ode_session") if isinstance(model, dict) else None
+    names = set()
+    for rule in data.get("rules") if isinstance(data.get("rules"), list) else ():
+        ids = rule.get("measurements") if isinstance(rule, dict) else None
+        if isinstance(ids, list):
+            names.update(i for i in ids if isinstance(i, str))
+    for item in data.get("fit") if isinstance(data.get("fit"), list) else ():
+        if isinstance(item, dict) and isinstance(item.get("name"), str):
+            names.add(item["name"])
+    return session, names
+
+
+def require_ode_mapping_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
+    """The ode_mapping stage_approval of exactly this ode_mapping.json path and sha256.
+
+    session_id is the ODE session of the mapping and outputs are exactly the measurement ids the
+    rules use plus the fitted parameter names.
+    """
+    record = _require_artifact_approval(root, record_id, "ode_mapping", rel, sha256)
+    session, expected = _ode_mapping_outputs(root, rel)
+    if record.get("session_id") != session:
+        raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
+                         f"but the mapping binds ODE session {session!r}")
+    outputs = record.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) != len(set(outputs)) or set(outputs) != expected:
+        raise ValueError(f"decision {record_id} outputs must equal the measurement ids used by rules plus "
+                         f"the fitted parameter names: {sorted(expected)}")
+    return record
+
+
+def require_calibration_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
+    """The ode_calibration stage_approval of exactly this artifact path and sha256."""
+    return _require_artifact_approval(root, record_id, "ode_calibration", rel, sha256)

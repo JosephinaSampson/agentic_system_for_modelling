@@ -294,6 +294,26 @@ class ManifestTests(unittest.TestCase):
         errs = self.set_proposal("perturbations", "maboss", self.PERT + row)
         self.assertTrue(any("scenario_id" in e for e in errs), errs)
 
+    ODE = ("measurement_id,readout,condition,time,time_unit,dose,dose_unit,value,value_unit,error,error_kind,n,use,"
+           "source,locator\n"
+           "M1,pR,ligand,30,min,,,1.0,a.u.,,,,fit,proposal,Fig. 1\n"
+           "M2,pR,ligand,30,min,1,uM,0.5,fraction,0.1,sd,3,holdout,proposal,Fig. 2\n")
+
+    def test_ode_measurements_schema(self):
+        self.assertEqual(self.set_proposal("ode_measurements", "biomass", self.ODE), [])
+        errs = self.set_proposal("ode_measurements", "maboss", self.ODE)
+        self.assertTrue(any("target_layer" in e for e in errs), errs)
+        errs = self.set_proposal("ode_measurements", "biomass", self.ODE.replace(",fit,", ",train,"))
+        self.assertTrue(any("use" in e for e in errs), errs)
+        errs = self.set_proposal("ode_measurements", "biomass", self.ODE.replace(",sd,", ",var,"))
+        self.assertTrue(any("error_kind" in e for e in errs), errs)
+        errs = self.set_proposal("ode_measurements", "biomass", self.ODE.replace("M2", "M1"))
+        self.assertTrue(any("measurement_id" in e for e in errs), errs)
+        errs = self.set_proposal("ode_measurements", "biomass", self.ODE.replace("a.u.", ""))
+        self.assertTrue(any("value_unit" in e for e in errs), errs)
+        errs = self.set_proposal("ode_measurements", "biomass", self.ODE.replace("measurement_id,", "id,", 1))
+        self.assertTrue(any("measurement_id" in e for e in errs), errs)
+
     def test_wrong_layer_rejected(self):
         errs = self.set_proposal("seed_genes", "maboss", self.SEED)
         self.assertTrue(any("target_layer" in e for e in errs), errs)
