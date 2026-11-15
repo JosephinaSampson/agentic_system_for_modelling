@@ -176,6 +176,7 @@ class _Checker:
         self.readouts: set[str] = set()
         self.conditions: set[str] = set()
         self.fit_names: set[str] = set()
+        self.fit_kinds: dict[str, object] = {}
         self.uses: dict[str, list[str]] = {}
 
     def error(self, message: str) -> None:
@@ -375,6 +376,7 @@ class _Checker:
             if name in self.fit_names:
                 self.error(f"{label}: fitted twice")
             self.fit_names.add(name)
+            self.fit_kinds[name] = kind if isinstance(kind, str) else None
             if kind not in FIT_KINDS:
                 self.error(f"{label}: kind must be one of {FIT_KINDS}")
             elif self.names is not None:
@@ -420,11 +422,11 @@ class _Checker:
                 self.error(f"duplicate rule id {rid}")
             else:
                 seen.add(rid)
-            handler = getattr(self, f"rule_{kind}", None) if isinstance(kind, str) else None
+            handler = self.RULE_TYPES.get(kind) if isinstance(kind, str) else None
             if handler is None:
                 self.error(f"{label}: type must be one of time_course, endpoint_contrast, dose_response")
                 continue
-            handler(label, item, rid)
+            handler(self, label, item, rid)
 
     def keys(self, label: str, item: dict, extra: set) -> bool:
         base = BASE_RULE_KEYS | extra
@@ -532,8 +534,11 @@ class _Checker:
                 self.error(f"{label}: drug_entry parameter {entry['parameter']!r} is not a parameter of the model")
             k = entry["K"]
             if isinstance(k, dict) and set(k) == {"fit"}:
-                if k["fit"] not in self.fit_names:
-                    self.error(f"{label}: drug_entry K fits {k['fit']!r}, which is not under fit")
+                fitted = k["fit"]
+                if not isinstance(fitted, str) or fitted not in self.fit_names:
+                    self.error(f"{label}: drug_entry K fits {fitted!r}, which is not under fit")
+                elif self.fit_kinds[fitted] != "parameter":
+                    self.error(f"{label}: drug_entry K fits {fitted!r}, which must be a fit entry of kind parameter")
             elif not _is_number(k) or k <= 0:
                 self.error(f"{label}: drug_entry K must be a positive number or {{\"fit\": name}}")
         elif form == "inhibitor_species" and set(entry) == {"form", "species"}:
@@ -542,6 +547,9 @@ class _Checker:
         else:
             self.error(f"{label}: drug_entry must be {{form: target_activity_scaling, parameter, K}} "
                        "or {form: inhibitor_species, species}")
+
+    RULE_TYPES = {"time_course": rule_time_course, "endpoint_contrast": rule_endpoint_contrast,
+                  "dose_response": rule_dose_response}
 
     # -- unmapped and coverage
     def unmapped_section(self, items) -> None:

@@ -6,6 +6,7 @@ keep working when run as a script.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -148,11 +149,17 @@ def require_seeds_approval(root: Path, record_id: str, seeds_rel: str, sha256: s
     return _require_artifact_approval(root, record_id, "data_seeds", seeds_rel, sha256)
 
 
-def _ode_mapping_outputs(root: Path, rel: str) -> tuple[str | None, set]:
-    """(ODE session, measurement ids used by rules + fitted names) of an ode_mapping.json, tolerant of shape."""
+def _ode_mapping_outputs(root: Path, rel: str, sha256: str) -> tuple[str | None, set]:
+    """(ODE session, measurement ids used by rules + fitted names) of an ode_mapping.json, tolerant of shape.
+
+    The bytes are read once; their digest must equal `sha256` and the outputs come from those same bytes.
+    """
     state = _state()
+    raw = state.artifact(Path(root), rel).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != sha256:
+        raise ValueError(f"{rel} changed during approval check (sha256 mismatch)")
     try:
-        data = json.loads(state.artifact(Path(root), rel).read_text(encoding="utf-8"))
+        data = json.loads(raw.decode("utf-8"))
     except ValueError as exc:
         raise ValueError(f"cannot read {rel}: {exc}") from exc
     if not isinstance(data, dict):
@@ -175,9 +182,13 @@ def require_ode_mapping_approval(root: Path, record_id: str, rel: str, sha256: s
 
     session_id is the ODE session of the mapping and outputs are exactly the measurement ids the
     rules use plus the fitted parameter names.
+
+    This binds hash, session and outputs only; it does not validate the mapping. Run
+    `scripts/ode/ode_mapping.py check` and have it pass before the researcher approves (the
+    downstream build and gate run the full check again).
     """
     record = _require_artifact_approval(root, record_id, "ode_mapping", rel, sha256)
-    session, expected = _ode_mapping_outputs(root, rel)
+    session, expected = _ode_mapping_outputs(root, rel, sha256)
     if record.get("session_id") != session:
         raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
                          f"but the mapping binds ODE session {session!r}")

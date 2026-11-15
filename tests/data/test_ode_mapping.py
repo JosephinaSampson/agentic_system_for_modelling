@@ -306,6 +306,28 @@ class CheckTests(OdeFixture):
         self.assertEqual(self.mutated(lambda d: d["rules"][2].update(
             drug_entry={"form": "inhibitor_species", "species": "ER"})), [])
 
+    def test_rule_type_is_not_a_method_name(self):
+        for kind in ("rows", "keys", "condition", "forbid_dose"):
+            errors = self.mutated(lambda d, k=kind: d["rules"][0].update(type=k))
+            self.assertError(errors, "type must be one of")
+
+    def test_rule_without_measurements_is_an_error_not_an_exception(self):
+        for n in range(3):
+            data = copy.deepcopy(self.data)
+            del data["rules"][n]["measurements"]
+            self.assertError(self.errors(data), "keys")
+        data = copy.deepcopy(self.data)
+        data["rules"][0] = {"rule_id": "R1", "type": "rows"}
+        self.assertTrue(self.errors(data))
+        self.assertError(self.mutated(lambda d: d["rules"][2]["drug_entry"].update(K={"fit": ["kf1"]})), "K")
+
+    def test_k_fit_must_name_a_parameter_fit(self):
+        def initial(d):
+            d["fit"].append({"name": "E", "kind": "initial", "lower": 1.0, "upper": 5.0, "unit": "nM",
+                             "justification": {"text": "range"}})
+            d["rules"][2]["drug_entry"]["K"] = {"fit": "E"}
+        self.assertError(self.mutated(initial), "kind parameter")
+
     def test_relative_to_condition_reference_must_be_a_condition(self):
         def ok(d):
             d["rules"][0] = {"rule_id": "R1", "type": "time_course", "method": "relative_to_condition",
