@@ -36,7 +36,7 @@ multicellular-configurator, ode-modeler), before any registry or state write, ru
 `python3 scripts/capture/recover.py --specialist <name> --agent-id <agentId> [--session <id>]`
 and proceed only once it prints `RECOVERED ...`; on `RECOVER FAILED` relay the reason
 verbatim and never repair files. It also saves the run's server exports under
-`runs/<specialist>/<session>/exports/<agentId>/` (MCP sessions end with the run). data-analyst uses `receive.py` below, which includes recovery.
+`runs/<specialist>/<session>/exports/<agentId>/` (MCP sessions end with the run) and, for MaBoSS, removes orphaned `maboss-run-*` temp dirs. data-analyst uses `receive.py` below, which includes recovery.
 
 Data retrieval and analysis are delegated to `data-analyst`. The orchestrator never
 runs `vendor/scientific-agent-skills` scripts or `.venv-data`. data-analyst invocations

@@ -283,6 +283,28 @@ exports for older runs that have no `exports/` directory yet; an existing captur
 amended (details in the capture README). data-analyst uses `receive.py`,
 which calls it.
 
+After a `boolean-dynamics-modeler` recovery, recover.py also removes orphaned MaBoSS
+temp directories and prints one `TMP CLEANUP: removed N maboss-run dirs (X MiB), skipped M`
+line after `RECOVERED` (a cleanup error prints `TMP CLEANUP WARNING: ...` and never fails
+the recovery). The MaBoSS server writes a 100–300 MB `maboss-run-*` directory per
+simulation and leaves it behind after copying the results into its artifact store; on WSL
+`/tmp` is a small RAM tmpfs that these directories filled ("No space left on device").
+Setup therefore renders a disk-backed `TMPDIR` (`<cache>/mcp-biomodelling/tmp/<server>`,
+mode 0700) into every modelling server's transport ([automatic setup](automatic-setup.md));
+rerun setup to get it. Both that directory and `/tmp` are cleaned. A directory is removed
+only if it is a real `maboss-run-*` directory owned by you, no process has a file or working
+directory open inside it, its newest entry is older than 10 minutes, and either no
+`mcp-maboss-server` process is running (parallel runs may still need theirs) or it is older
+than 24 hours. Manual use:
+
+```bash
+python3 scripts/capture/server_tmp.py status                 # free space per root, candidate size
+python3 scripts/capture/server_tmp.py clean --dry-run        # what would be removed, and why not
+python3 scripts/capture/server_tmp.py clean [--min-age SECONDS]
+```
+
+Both print `WARNING: <root> has <N> MiB free` when a root has less than 2 GiB free.
+
 See [validation commands](../scripts/validate/README.md) for explicit criteria,
 safe bounded Boolean analyses, trajectory metrics, seed planning and time-scaling
 proposals. Initialize VALIDATION_CRITERIA.yaml only when starting a model. The
