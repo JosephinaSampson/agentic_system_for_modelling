@@ -23,6 +23,7 @@ def mapping(rules, conditions=None, **extra):
     conds = conditions or [{"condition": c, "parameters": [], "initials": []} for c in ("ctrl", "drug", "ref")]
     m = {"kind": "ode_mapping", "schema_version": 1, "time": {"model_unit": "min", "factors": {"min": 1, "h": 60}},
          "readouts": [{"readout": "r", "observable": "obs"}], "conditions": conds, "rules": rules,
+         "dose": {"model_unit": "nM", "factors": {"uM": 1000.0, "nM": 1.0}},
          "fit": [{"name": "k1", "kind": "parameter", "lower": 0.01, "upper": 100.0, "unit": "1/min",
                   "justification": {"text": "t"}}], "unmapped": []}
     m.update(extra)
@@ -103,7 +104,7 @@ class CompareTests(unittest.TestCase):
         rows = [row("d1", "drug", 48.0, 0.5, dose=2.0, dose_unit="uM"),
                 row("d2", "drug", 48.0, 0.9, dose=0.0, dose_unit="uM", use="holdout")]
         entry = {"form": "target_activity_scaling", "parameter": "kp", "K": 1000.0}
-        spec = compare.resolve(mapping([self._dose_rule(entry)], dose_factors={"uM": 1000.0}), rows)
+        spec = compare.resolve(mapping([self._dose_rule(entry)]), rows)
         spec = json.loads(json.dumps(spec))
         name = spec["measurements"]["d1"]["dose_condition"]
         self.assertEqual(spec["measurements"]["d1"]["dose"], 2000.0)
@@ -121,7 +122,7 @@ class CompareTests(unittest.TestCase):
         conds = [{"condition": c, "parameters": [ov("kp", 6.0)] if c == "drug" else [], "initials": []}
                  for c in ("ctrl", "drug")]
         entry = {"form": "target_activity_scaling", "parameter": "kp", "K": {"fit": "k1"}}
-        rows = [row("d1", "drug", 48.0, 0.5, dose=3.0, dose_unit="uM")]
+        rows = [row("d1", "drug", 48.0, 0.5, dose=3.0, dose_unit="nM")]
         rule = self._dose_rule(entry)
         rule["measurements"] = ["d1"]
         spec = compare.resolve(mapping([rule], conds), rows)
@@ -131,8 +132,62 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(cond["parameters"], {"kp": 1.5})
         self.assertEqual(cond["scales"], {})
 
+    def test_missing_dose_factor_raises(self):
+        rows = [row("d1", "drug", 48.0, 0.5, dose=2.0, dose_unit="mM")]
+        rule = self._dose_rule({"form": "inhibitor_species", "species": "I"})
+        rule["measurements"] = ["d1"]
+        with self.assertRaisesRegex(ValueError, "mM"):
+            compare.resolve(mapping([rule]), rows)
+        m = mapping([rule])
+        del m["dose"]
+        with self.assertRaises((KeyError, ValueError)):
+            compare.resolve(m, rows)
+
+    def test_um_to_nm_factor_and_shared_dose_condition(self):
+        rows = [row("d1", "drug", 48.0, 0.5, dose=2.0, dose_unit="uM"),
+                row("d2", "drug", 48.0, 0.6, dose=2000.0, dose_unit="nM"),
+                row("d3", "drug", 48.0, 0.7, dose=1.0, dose_unit="uM")]
+        entry = {"form": "target_activity_scaling", "parameter": "kp", "K": 1000.0}
+        rule = self._dose_rule(entry)
+        rule["measurements"] = ["d1", "d2", "d3"]
+        spec = compare.resolve(mapping([rule]), rows)
+        ms = spec["measurements"]
+        self.assertEqual((ms["d1"]["dose"], ms["d2"]["dose"], ms["d3"]["dose"]), (2000.0, 2000.0, 1000.0))
+        self.assertEqual(ms["d1"]["dose_condition"], ms["d2"]["dose_condition"])
+        self.assertNotEqual(ms["d1"]["dose_condition"], ms["d3"]["dose_condition"])
+        self.assertEqual(len(spec["dose_conditions"]), 2)
+
+    def test_nonpositive_fitted_k_gives_nan_not_error(self):
+        rows = [row("d1", "drug", 48.0, 0.5, dose=2.0, dose_unit="nM")]
+        rule = self._dose_rule({"form": "target_activity_scaling", "parameter": "kp", "K": {"fit": "k1"}})
+        rule["measurements"] = ["d1"]
+        spec = compare.resolve(mapping([rule]), rows)
+        name = spec["measurements"]["d1"]["dose_condition"]
+        for k in (0.0, -1.0):
+            self.assertTrue(math.isnan(compare.condition_overrides(spec, name, {"k1": k})["scales"]["kp"]))
+
+    def test_dose_rows_are_evaluated_at_viability_time(self):
+        rows = [row("d1", "drug", 48.0, 0.5, dose=2.0, dose_unit="nM")]
+        rule = self._dose_rule({"form": "inhibitor_species", "species": "I"})
+        rule["measurements"] = ["d1"]
+        spec = compare.resolve(mapping([rule]), rows)
+        self.assertEqual(spec["measurements"]["d1"]["time"], 48.0)
+        self.assertEqual(spec["times_model"][spec["measurements"]["d1"]["dose_condition"]], [0.0, 48.0])
+
+    def test_endpoint_reference_uses_same_use_only(self):
+        rows = [row("a", "drug", 60.0, 6.0), row("b", "ref", 60.0, 2.0),
+                row("c", "drug", 60.0, 9.0, use="holdout"), row("e", "ref", 60.0, 3.0, use="holdout"),
+                row("f", "drug", 60.0, 4.0, use="holdout", readout="r2")]
+        m = mapping([{"rule_id": "ec", "type": "endpoint_contrast", "method": "ratio", "test": "drug",
+                      "reference": "ref", "time": 60.0, "measurements": ["a", "b", "c", "e", "f"]}])
+        m["readouts"].append({"readout": "r2", "observable": "obs2"})
+        ms = compare.resolve(m, rows)["measurements"]
+        self.assertEqual(ms["a"]["target"], 3.0)
+        self.assertEqual(ms["c"]["target"], 3.0)
+        self.assertTrue(math.isnan(ms["f"]["target"]))  # no reference of that readout and use: nan, no raise
+
     def test_inhibitor_species(self):
-        rows = [row("d1", "drug", 48.0, 0.5, dose=2.0, dose_unit="uM")]
+        rows = [row("d1", "drug", 48.0, 0.5, dose=2.0, dose_unit="nM")]
         rule = self._dose_rule({"form": "inhibitor_species", "species": "I"})
         rule["measurements"] = ["d1"]
         spec = compare.resolve(mapping([rule]), rows)

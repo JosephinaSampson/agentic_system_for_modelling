@@ -16,6 +16,9 @@ Schema (schema_version 1; every key below is required unless marked optional):
   inputs.sources: [{id, path, sha256}]                   researcher files under inputs/, cited by rows and fit
   time: {model_unit, factors: {unit: positive float}}    measurement time_unit -> multiplier into model_unit
                                                          (model_unit itself has factor 1)
+  dose: {model_unit, factors: {unit: positive float}}    measurement dose_unit -> multiplier into the model dose
+                                                         unit (K of a target_activity_scaling is in that unit);
+                                                         factors may be empty when no row has a dose
   readouts: [{readout, observable}]
   conditions: [{condition, parameters: [override], initials: [override]}]
       override: {name, value, value_unit, model_unit, factor}  model value = value * factor
@@ -26,6 +29,8 @@ Schema (schema_version 1; every key below is required unless marked optional):
       dose_response: drug_entry = {form: target_activity_scaling, parameter, K: number | {fit: name}}
                                 or {form: inhibitor_species, species}
                      viability = {observable, untreated (condition), time (model time unit)}
+                     every dose row's time, converted, must equal viability.time (dose rows are evaluated there)
+      endpoint_contrast: every test row needs a reference row of the same readout and the same `use`
   fit: [{name, kind: parameter|initial, lower, upper, unit, justification: {source, locator} | {text}}]
   unmapped: [{measurement_id, reason}]
 
@@ -55,7 +60,7 @@ from scripts.data import sources as user_sources  # noqa: E402
 from scripts.data.common import RUNS_ROOT, project_root, reject_symlinks, sha256_file, strict_json  # noqa: E402
 from scripts.ode import measurements as table, model_zip  # noqa: E402
 
-KEYS = ("kind", "schema_version", "inputs", "time", "readouts", "conditions", "rules", "fit", "unmapped")
+KEYS = ("kind", "schema_version", "inputs", "time", "dose", "readouts", "conditions", "rules", "fit", "unmapped")
 ORCHESTRATOR = ("runs", "orchestrator")
 ODE_RUNS = ("runs", "ode-modeler")
 MODEL_KEYS = {"ode_session", "revision", "bundle", "sha256"}
@@ -132,6 +137,7 @@ def draft(root: Path, purpose: str, *, ode_session: str, revision, bundle_rel: s
             raise ValueError(f"source id {source_id} is listed twice (source ids must be unique in a mapping)")
         declared.append(user_sources.entry(root, source_id, rel))
     conditions = list(dict.fromkeys(row["condition"] for row in rows))
+    dose_units = list(dict.fromkeys(row["dose_unit"] for row in rows if row["dose"] is not None and row["dose_unit"]))
     units = list(dict.fromkeys(row["time_unit"] for row in rows if row["time_unit"]))
     mapping = {
         "kind": "ode_mapping",
@@ -141,6 +147,7 @@ def draft(root: Path, purpose: str, *, ode_session: str, revision, bundle_rel: s
                    "measurements": {"path": measurements_rel, "sha256": sha256_file(meas)},
                    "sources": declared},
         "time": {"model_unit": "TODO", "factors": {unit: None for unit in units}},
+        "dose": {"model_unit": "TODO", "factors": {unit: None for unit in dose_units}},
         "readouts": [],
         "conditions": [{"condition": c, "parameters": [], "initials": []} for c in conditions],
         "rules": [],
@@ -173,6 +180,8 @@ class _Checker:
         self.row_order: list[str] = []
         self.sources = user_sources.Sources(root, self.error)
         self.units: set[str] = set()
+        self.time_factors: dict = {}
+        self.dose_factors: dict = {}
         self.readouts: set[str] = set()
         self.conditions: set[str] = set()
         self.fit_names: set[str] = set()
@@ -283,12 +292,36 @@ class _Checker:
                 self.error(f"time.factors[{name!r}] must be a positive number")
             else:
                 self.units.add(name)
+                self.time_factors[name] = factor
         if model_ok and factors.get(unit) != 1:
             self.error(f"time.factors must map the model_unit {unit!r} to 1")
         for mid in self.row_order:
             row_unit = self.rows[mid]["time_unit"]
             if row_unit and row_unit not in self.units:
                 self.error(f'measurement {mid}: time_unit "{row_unit}" has no positive factor in time.factors')
+
+    def dose(self, value) -> None:
+        if not isinstance(value, dict) or set(value) != {"model_unit", "factors"}:
+            self.error("dose must have exactly model_unit and factors")
+            return
+        unit, factors = value["model_unit"], value["factors"]
+        if not isinstance(unit, str):
+            self.error("dose.model_unit must be a string (the model dose unit)")
+        if not isinstance(factors, dict):
+            self.error("dose.factors must be an object of measurement dose unit -> positive factor")
+            return
+        for name, factor in factors.items():
+            if not _is_number(factor) or factor <= 0:
+                self.error(f"dose.factors[{name!r}] must be a positive number")
+            else:
+                self.dose_factors[name] = factor
+        dosed = [self.rows[mid] for mid in self.row_order if self.rows[mid]["dose"] is not None]
+        if dosed and (not _is_text(unit) or unit.strip().upper() == "TODO"):
+            self.error("dose.model_unit must be a real unit when measurements have a dose")
+        for row in dosed:
+            if not row["dose_unit"] or row["dose_unit"] not in self.dose_factors:
+                self.error(f'measurement {row["measurement_id"]}: dose_unit "{row["dose_unit"]}" has no '
+                           "positive factor in dose.factors")
 
     # -- readouts and conditions
     def readouts_section(self, items) -> None:
@@ -505,6 +538,11 @@ class _Checker:
             for what in ("test", "reference"):
                 if item[what] not in present:
                     self.error(f"{label}: no measurement of the {what} condition {item[what]!r}")
+            refs = {(row["readout"], row["use"]) for row in rows if row["condition"] == item["reference"]}
+            for row in rows:
+                if row["condition"] == item["test"] and (row["readout"], row["use"]) not in refs:
+                    self.error(f"{label}: test measurement {row['measurement_id']} ({row['readout']}, "
+                               f"use={row['use']}) needs a reference measurement of the same readout and use")
 
     def rule_dose_response(self, label: str, item: dict, rid) -> None:
         if not self.keys(label, item, {"drug_entry", "viability"}):
@@ -518,6 +556,12 @@ class _Checker:
                            "dose_response needs dosed rows")
         self.drug_entry(label, item["drug_entry"])
         via = item["viability"]
+        if isinstance(via, dict) and _is_number(via.get("time")):
+            for row in rows:
+                factor = self.time_factors.get(row["time_unit"])
+                if row["dose"] is not None and factor is not None and row["time"] * factor != via["time"]:
+                    self.error(f"{label}: measurement {row['measurement_id']} time {row['time'] * factor!r} "
+                               f"(model unit) must equal viability.time {via['time']!r}")
         if not isinstance(via, dict) or set(via) != {"observable", "untreated", "time"}:
             self.error(f"{label}: viability must have exactly observable, untreated, time")
             return
@@ -603,6 +647,7 @@ def load_and_check(root: Path, rel: str) -> tuple[dict, str, list[str]]:
         checker.conditions_section(data["conditions"])
         checker.fit_section(data["fit"])
         checker.time(data["time"])
+        checker.dose(data["dose"])
         checker.rules_section(data["rules"])
         checker.unmapped_section(data["unmapped"])
         checker.coverage()

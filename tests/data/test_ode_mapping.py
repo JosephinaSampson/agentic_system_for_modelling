@@ -23,7 +23,7 @@ HEADER = ",".join(measurements.COLUMNS)
 ROWS = [
     "M1,pR,ligand,0,min,,,1.0,a.u.,0.1,sd,3,fit,s1,Fig. 1A",
     "M2,pR,ligand,30,min,,,3.0,a.u.,0.2,sd,3,fit,s1,Fig. 1A",
-    "M3,pR,ctrl,30,min,,,1.0,a.u.,0.1,sem,3,fit,s1,Fig. 1B",
+    "M3,pR,ctrl,30,min,,,1.0,a.u.,0.1,sem,3,holdout,s1,Fig. 1B",
     "M4,pR,ligand,30,min,,,2.8,a.u.,0.3,sem,3,holdout,s1,Fig. 1B",
     "M5,pR,ligand,30,min,0.1,uM,0.8,fraction,,,,fit,s1,Fig. 2",
     "M6,pR,ligand,30,min,1,uM,0.4,fraction,,,,holdout,s1,Fig. 2",
@@ -83,6 +83,7 @@ class OdeFixture(unittest.TestCase):
                           measurements_rel=MEAS, sources=[("s1", SOURCE)])
         data = self.load()
         data["time"] = {"model_unit": "min", "factors": {"min": 1.0}}
+        data["dose"] = {"model_unit": "nM", "factors": {"uM": 1000.0}}
         data["readouts"] = [{"readout": "pR", "observable": "pR"}]
         override = {"name": "kf1", "value": 2.0, "value_unit": "x", "model_unit": "x", "factor": 1.0}
         data["conditions"] = [
@@ -305,6 +306,32 @@ class CheckTests(OdeFixture):
             drug_entry={"form": "inhibitor_species", "species": "Z"})), "Z")
         self.assertEqual(self.mutated(lambda d: d["rules"][2].update(
             drug_entry={"form": "inhibitor_species", "species": "ER"})), [])
+
+    def test_dose_factors_required_for_dosed_rows(self):
+        self.assertError(self.mutated(lambda d: d["dose"].update(factors={})), "M5", "dose_unit")
+        self.assertError(self.mutated(lambda d: d["dose"]["factors"].update(uM=0)), "dose.factors")
+        self.assertError(self.mutated(lambda d: d["dose"].update(model_unit="TODO")), "dose.model_unit")
+        self.assertError(self.mutated(lambda d: d.pop("dose")), "keys")
+
+    def rewrite(self, d, rows):
+        self.write_rows(rows)
+        d["inputs"]["measurements"]["sha256"] = sha(self.root / MEAS)
+
+    def test_empty_dose_block_is_fine_without_dosed_rows(self):
+        def drop(d):
+            self.rewrite(d, [r for r in ROWS if "uM" not in r])
+            d["dose"] = {"model_unit": "", "factors": {}}
+            d["rules"].pop()
+        self.assertEqual(self.mutated(drop), [])
+        self.assertError(self.mutated(lambda d: d.update(dose={"model_unit": 3, "factors": {}})), "dose.model_unit")
+
+    def test_endpoint_reference_must_match_use(self):
+        def leak(d):
+            self.rewrite(d, [r.replace("holdout", "fit") if r.startswith("M3") else r for r in ROWS])
+        self.assertError(self.mutated(leak), "M4", "same readout and use")
+
+    def test_dose_row_time_must_equal_viability_time(self):
+        self.assertError(self.mutated(lambda d: d["rules"][2]["viability"].update(time=60.0)), "viability.time")
 
     def test_rule_type_is_not_a_method_name(self):
         for kind in ("rows", "keys", "condition", "forbid_dose"):

@@ -35,10 +35,16 @@ Rules (per measurement; a missing sim, solver failure or zero denominator gives 
   absolute                v(t)
   endpoint_contrast       the rows of the test condition are predicted as ratio v_test(T)/v_ref(T) or
                           difference v_test(T)-v_ref(T); their target is the same contrast of the data
-                          (test value vs the mean of the reference rows of the same readout). Reference
+                          (test value vs the mean of the reference rows of the same readout AND the same
+                          `use`, so fit targets never see hold-out references; none gives a nan target). Reference
                           rows are role "reference": no prediction, no term in the objective.
   dose_response           viability = obs(treated at dose D, T) / obs(untreated, T), T = viability.time;
-                          D = dose * mapping["dose_factors"][dose_unit] (optional key, default factor 1).
+                          D = dose * mapping["dose"]["factors"][dose_unit] (required; ValueError when a unit
+                          has no positive factor); K is in the model dose unit mapping["dose"]["model_unit"].
+                          A fitted K <= 0 gives a nan scale (hence nan predictions and PENALTY).
+                          Every dose row is evaluated at viability.time (the mapping check requires each dose
+                          row's converted time to equal it); rows of one condition with the same converted
+                          dose share one dose condition.
                           target_activity_scaling multiplies the parameter by 1/(1 + D/K);
                           inhibitor_species sets the species' initial amount to D.
 
@@ -63,11 +69,9 @@ def _times(spec_times: dict, condition: str, *times: float) -> None:
 
 
 def _dose_factor(mapping: dict, unit) -> float:
-    factors = mapping.get("dose_factors")
-    if not factors:
-        return 1.0
-    if unit not in factors:
-        raise ValueError(f"dose_unit {unit!r} has no factor in dose_factors")
+    factors = mapping["dose"]["factors"]
+    if unit not in factors or not factors[unit] > 0:
+        raise ValueError(f"dose_unit {unit!r} has no positive factor in dose.factors")
     return float(factors[unit])
 
 
@@ -118,7 +122,8 @@ def resolve(mapping: dict, rows: list[dict]) -> dict:
             for mid in rule["measurements"]:
                 if meas[mid]["role"] == "fit_target":
                     refs = [meas[r]["value"] for r in rule["measurements"] if meas[r]["role"] == "reference"
-                            and by_id[r]["readout"] == by_id[mid]["readout"]]
+                            and by_id[r]["readout"] == by_id[mid]["readout"]
+                            and by_id[r]["use"] == by_id[mid]["use"]]
                     meas[mid]["target"] = _contrast(rule["method"], meas[mid]["value"],
                                                     sum(refs) / len(refs) if refs else None)
     fit = [{"name": f["name"], "kind": f["kind"], "lower": float(f["lower"]), "upper": float(f["upper"]),
@@ -140,7 +145,7 @@ def condition_overrides(spec: dict, name: str, fitted: dict) -> dict:
     if "scale_parameter" in dose:
         k = dose["K"]
         k = fitted[k["fit"]] if isinstance(k, dict) else k
-        factor = 1.0 / (1.0 + dose["dose"] / k)
+        factor = 1.0 / (1.0 + dose["dose"] / k) if k > 0 else math.nan
         target = dose["scale_parameter"]
         if target in parameters:
             parameters[target] *= factor
