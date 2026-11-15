@@ -165,7 +165,8 @@ A `stage_approval` with stage `ode_mapping` binds the mapping's path and sha256.
 - `workers` per restart;
 - parallel restarts for ssh/local;
 - SLURM time limit and CPUs per task;
-- the good-fit margin used at import.
+- the good-fit margin used at import;
+- `reproduce_rtol` (default 1e-3), the import's score-reproduction tolerance.
 
 **Bundle contents:**
 - **`model/`:** the exported model package. Its `observable.py`, `search_param.py` and,
@@ -237,7 +238,7 @@ A `stage_approval` with stage `ode_mapping` binds the mapping's path and sha256.
 - every restart's seed is the recorded one;
 - every fitted value lies within bounds;
 - re-running the best fit locally through `run.py validate` reproduces the reported
-  score within a stated tolerance.
+  score within `reproduce_rtol` (ODE solvers differ slightly across machines).
 
 **Proposal:** the import writes
 `runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json` and `report.md`.
