@@ -260,11 +260,16 @@ DATA_SESSION_PATH = re.compile(r"runs[\\/]+data-analyst[\\/]+([A-Za-z0-9][A-Za-z
 DATA_SESSION_ID = re.compile(r"data-\d{8}T\d{6}Z-[0-9a-f]{8}", re.I)
 DATA_INPUT_MENTION = re.compile(r"DATA[_-]?INPUT", re.I)
 # Payload-like mentions (an attempt at a second or miswritten DATA_INPUT line): one that
-# starts its line after optional whitespace, quote marks, `>`, `-` or `*`, or one followed,
-# after optional whitespace, quote marks, `:` or `=`, by `{`. Other mentions are prose.
+# starts its line after optional whitespace, quote marks, `>`, `-` or `*`; one with a `{`
+# within the next PAYLOAD_WINDOW characters of its line (`DATA_INPUT => {`, `DATA_INPUTS {`,
+# `| DATA_INPUT | {`); or one ending its line (only punctuation after it) whose next
+# non-blank line starts with `{` after optional markup. Other mentions are prose.
 QUOTES = "`'\"\u2018\u2019\u201c\u201d"
+PAYLOAD_WINDOW = 16
 PAYLOAD_PREFIX = re.compile(rf"[\s>*{QUOTES}-]*")
-PAYLOAD_SUFFIX = re.compile(rf"[\s:={QUOTES}]*\{{")
+PAYLOAD_SUFFIX = re.compile(rf"[^\n]{{0,{PAYLOAD_WINDOW}}}\{{")
+LINE_END = re.compile(r"[\W_]*")
+MARKUP = re.compile(rf"[\s>*|{QUOTES}-]*")
 QUOTE_CHARS = 60
 DATA_REFUSAL = "brief references data-analyst artifacts without a DATA_INPUT line; see CLAUDE.md"
 # Specialist -> (0-based line index of its DATA_INPUT line, human label).
@@ -673,14 +678,23 @@ def _payload_mentions(lines, canonical):
     ``canonical`` is the 0-based index of the canonical line, or None. Its leading
     `DATA_INPUT ` introduces the payload; any further mention on that line counts.
     """
+    normalised = [_detection_text(raw) for raw in lines]
+
+    def next_starts_object(number):
+        for following in normalised[number + 1:]:
+            rest = following[MARKUP.match(following).end():]
+            if rest:  # the first line with content beyond markup (code fences, quotes, `>`)
+                return rest.startswith("{")
+        return False
+
     found = []
-    for number, raw in enumerate(lines):
-        line = _detection_text(raw)
+    for number, line in enumerate(normalised):
         for match in DATA_INPUT_MENTION.finditer(line):
             if number == canonical and match.start() == 0:
                 continue
             if (number == canonical or PAYLOAD_PREFIX.fullmatch(line, 0, match.start())
-                    or PAYLOAD_SUFFIX.match(line, match.end())):
+                    or PAYLOAD_SUFFIX.match(line, match.end())
+                    or (LINE_END.fullmatch(line, match.end()) and next_starts_object(number))):
                 found.append((number + 1, _quote(line, match)))
     return found
 
@@ -692,7 +706,8 @@ def check_data_input(root, specialist, task):
     literal DATA_INPUT line (line 1 for network-curator, line 2 after STAGE_GATE for
     boolean-dynamics-modeler); data are never pasted or pointed at in prose. Only that
     line may carry a DATA_INPUT payload: a payload-like mention elsewhere (one starting
-    its line or followed by `{`) is refused with its line number and a quote, while a
+    its line, or with `{` within 16 characters or on the next non-blank line) is refused
+    with its line number and a quote, while a
     prose mention ("as defined in the DATA_INPUT mapping") is allowed. Returns None when
     the prompt has no DATA_INPUT line and no data-analyst path, data session id or
     seeds/mapping file (a prose-only mention carries no data).
@@ -719,7 +734,7 @@ def check_data_input(root, specialist, task):
                  else "but there is no canonical DATA_INPUT line")
         raise ValueError(f'{placement}; line {number}: "{quote}" is a DATA_INPUT payload {where}. '
                          "Only that line may carry a DATA_INPUT payload; a prose mention must not "
-                         "start a line or precede `{`")
+                         "start a line or have `{` soon after it")
     if canonical is None:
         if DATA_PATH.search(text) or DATA_SESSION_ID.search(text):
             raise ValueError(DATA_REFUSAL)

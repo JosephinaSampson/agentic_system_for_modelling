@@ -304,9 +304,11 @@ fresh `data_mapping` approval.
 **Brief strictness.** For both specialists, only the single canonical line may carry a
 `DATA_INPUT` payload. After normalisation (NFKC, format characters removed), any
 case-insensitive `DATA[_-]?INPUT` elsewhere that starts its line (after optional whitespace,
-`>`, `-`, `*`, backticks or quotes) or is followed (after optional whitespace, backticks,
-quotes, `:` or `=`) by `{` is refused as a second or miswritten line; the refusal names the
-line number and quotes up to 60 characters of it. A prose mention such as "as defined in the
+`>`, `-`, `*`, backticks or quotes), has a `{` within the next 16 characters of its line
+(`DATA_INPUT => {`, `DATA_INPUTS {`, `| DATA_INPUT | {`), or ends its line (only punctuation
+after it) before a next non-blank line starting with `{` (after optional `>`, `-`, `*`, `|`,
+backticks or quotes; code-fence lines are skipped) is refused as a second or miswritten line;
+the refusal names the line number and quotes up to 60 characters of it. A prose mention such as "as defined in the
 DATA_INPUT mapping" is allowed, with or without a canonical line (it carries no data). A brief that mentions `runs/data-analyst` in any form, or a
 data session id, without the `DATA_INPUT` line is refused. Seeds and mapping files may be named
 only on the `DATA_INPUT` line: the hook reads every `runs/orchestrator/...` path the brief

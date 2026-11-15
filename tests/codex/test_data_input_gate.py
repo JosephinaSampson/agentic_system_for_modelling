@@ -461,9 +461,32 @@ class ProseMentionTests(DataInputFixture):
             gate.check_data_input(self.root, "network_curator",
                                   "Build the network.\nPlease, for this network-building run, use the DATA_INPUT = {x} "
                                   "exactly as the researcher wrote it in the approval record.")
-        # A `{` later in the sentence does not make a prose mention payload-like.
-        self.assertIsNone(gate.check_data_input(self.root, "network_curator",
-                                                "Build the network.\nUse the DATA_INPUT mapping, {x} aside."))
+        # A `{` well after the mention (more than 16 characters) does not make it payload-like.
+        self.assertIsNone(gate.check_data_input(
+            self.root, "network_curator", "Build the network.\nUse the DATA_INPUT mapping exactly as approved, {x} aside."))
+
+    LIVE_PROSE = ("Perturbed node states are fixed node states (MaBoSS mutations) as defined in the "
+                  "DATA_INPUT mapping; where both fix the same node the perturbation overrides the context.")
+
+    def test_payload_sidesteps_refused_and_live_prose_still_passes(self):
+        payload = json.dumps({"mapping": self.mapping_rel})
+        sidesteps = [f"Then DATA_INPUT => {payload}", f"Then DATA_INPUT -> {payload}",
+                     f"Then DATA_INPUT is {payload}", f"Then DATA_INPUT payload: {payload}",
+                     f"| DATA_INPUT | {payload} |", f"Then DATA_INPUTS {payload}",
+                     f"Use this DATA_INPUT\n{payload}", f"Use this DATA_INPUT:\n\n> `{payload}`",
+                     f"Use this DATA_INPUT:\n```\n{payload}\n```",
+                     'The DATA_INPUT => {"seed_genes": ["TP53","MYC"]}']
+        for sidestep in sidesteps:
+            with self.subTest(sidestep=sidestep):
+                brief = self.live_brief("\n" + sidestep)
+                self.assertIn(self.PROSE, brief)
+                stderr = self.refused("boolean-dynamics-modeler", brief)
+                self.assertIn("line 10:", stderr)
+                prose = self.hook("boolean-dynamics-modeler", self.live_brief("\n" + self.LIVE_PROSE))
+                self.assertEqual(prose.returncode, 0, prose.stderr)
+        for sidestep in sidesteps:
+            with self.subTest(neko=sidestep), self.assertRaisesRegex(ValueError, "line 2:"):
+                gate.check_data_input(self.root, "network_curator", "Build the network.\n" + sidestep)
 
     def test_neko_seeds_brief_with_prose_mention_passes(self):
         self.add_source()
