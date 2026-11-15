@@ -293,9 +293,14 @@ Setup therefore renders a disk-backed `TMPDIR` (`<cache>/mcp-biomodelling/tmp/<s
 mode 0700) into every modelling server's transport ([automatic setup](automatic-setup.md));
 rerun setup to get it. Both that directory and `/tmp` are cleaned. A directory is removed
 only if it is a real `maboss-run-*` directory owned by you, no process has a file or working
-directory open inside it, its newest entry is older than 10 minutes, and either no
-`mcp-maboss-server` process is running (parallel runs may still need theirs) or it is older
-than 24 hours. Manual use:
+directory open inside it or names it on its command line, its newest entry is older than 10
+minutes, and either it was last modified before the earliest start of every running MaBoSS
+server (a process whose argv has an element `mcp-maboss-server` or `.../mcp-maboss-server`;
+shell command lines merely mentioning the name do not count) or it is older than 24 hours.
+Parallel runs keep their own directories; earlier runs' directories are orphans. A directory
+that disappears meanwhile is reported as `vanished`. If the MaBoSS `TMPDIR` is missing at
+recover time it is recreated (0700, refusing symlinks) with a `TMP CLEANUP WARNING` that the
+server fell back to `/tmp` for that run. Manual use:
 
 ```bash
 python3 scripts/capture/server_tmp.py status                 # free space per root, candidate size

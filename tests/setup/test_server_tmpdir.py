@@ -112,6 +112,15 @@ class ServerTmpdirTests(unittest.TestCase):
         with self.assertRaisesRegex(SetupError, "symlink"):
             self.execute(["--client", "claude", "--manager", "venv", "--non-interactive"])
 
+    def test_setup_refuses_a_symlinked_cache_component(self):
+        elsewhere = self.directory / "elsewhere"
+        elsewhere.mkdir()
+        self.cache.mkdir()
+        (self.cache / "mcp-biomodelling").symlink_to(elsewhere)
+        with self.assertRaisesRegex(SetupError, "symlink"):
+            self.execute(["--client", "claude", "--manager", "venv", "--non-interactive"])
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
     def test_check_reports_missing_and_mismatched_tmpdir(self):
         self.assertTrue(self.execute(["--client", "claude", "--manager", "venv", "--non-interactive"])["passed"])
         agent = self.root / ".claude/agents/boolean-dynamics-modeler.md"
@@ -123,6 +132,9 @@ class ServerTmpdirTests(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertTrue(any("TMPDIR missing" in error and "boolean-dynamics-modeler.md" in error
                             for error in report["errors"]), report["errors"])
+        # One error per file: the stale report carries the TMPDIR reason.
+        self.assertEqual(len([e for e in report["errors"] if "boolean-dynamics-modeler.md" in e]), 1,
+                         report["errors"])
         agent.write_text(text.replace(line, '        TMPDIR: "/tmp"\n'))
         report = self.execute(["--client", "claude", "--manager", "venv", "--check"])
         self.assertTrue(any("TMPDIR mismatch" in error and '"/tmp"' in error

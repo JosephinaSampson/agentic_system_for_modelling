@@ -114,37 +114,54 @@ def rendered_tmpdirs(outputs: dict[Path, str]) -> dict[Path, str]:
     return found
 
 
+def ensure_private_tmpdir(path: Path) -> bool:
+    """Create ``<cache>/mcp-biomodelling/tmp/<server>`` as a private (0700) real directory.
+
+    Refuses a symlinked ``mcp-biomodelling``, ``tmp`` or server directory. Returns
+    True when the server directory had to be created.
+    """
+    path = Path(path)
+    created = False
+    for candidate in (path.parent.parent, path.parent, path):
+        if candidate.is_symlink():
+            raise SetupError(f"Refusing symlink server TMPDIR component: {candidate}")
+        if not candidate.exists():
+            candidate.mkdir(parents=True, mode=0o700)
+            os.chmod(candidate, 0o700)
+            created = candidate == path
+        elif not candidate.is_dir():
+            raise SetupError(f"Server TMPDIR component is not a directory: {candidate}")
+    os.chmod(path, 0o700)
+    return created
+
+
 def ensure_server_tmpdirs(outputs: dict[Path, str]) -> list[str]:
     """Create every rendered TMPDIR as a private (0700) real directory."""
     created = []
     for directory in sorted(set(rendered_tmpdirs(outputs).values())):
-        path = Path(directory)
-        for candidate in (path.parent, path):
-            if candidate.is_symlink():
-                raise SetupError(f"Refusing symlink server TMPDIR: {candidate}")
-            if not candidate.exists():
-                candidate.mkdir(parents=True, mode=0o700)
-                os.chmod(candidate, 0o700)
-            elif not candidate.is_dir():
-                raise SetupError(f"Server TMPDIR is not a directory: {candidate}")
-        os.chmod(path, 0o700)
+        ensure_private_tmpdir(Path(directory))
         created.append(directory)
     return created
 
 
-def server_tmpdir_problems(outputs: dict[Path, str]) -> list[str]:
-    """Check mode: rendered files carry the expected TMPDIR and it exists privately."""
-    errors = []
+def server_tmpdir_file_problems(outputs: dict[Path, str]) -> dict[Path, str]:
+    """Check mode: per rendered file, a missing or mismatched TMPDIR in its current text."""
+    problems = {}
     for path, expected in rendered_tmpdirs(outputs).items():
         try:
             current = rendered_tmpdirs({path: path.read_text(encoding="utf-8")}).get(path)
         except OSError:
             current = None
         if current is None:
-            errors.append(f"TMPDIR missing from {path}; expected {json.dumps(expected)}; rerun setup")
+            problems[path] = f"TMPDIR missing; expected {json.dumps(expected)}"
         elif current != expected:
-            errors.append(f"TMPDIR mismatch in {path}: found {json.dumps(current)}, "
-                          f"expected {json.dumps(expected)}; rerun setup")
+            problems[path] = f"TMPDIR mismatch: found {json.dumps(current)}, expected {json.dumps(expected)}"
+    return problems
+
+
+def server_tmpdir_dir_problems(outputs: dict[Path, str]) -> list[str]:
+    """Check mode: every rendered TMPDIR exists as a private (0700) real directory."""
+    errors = []
     for directory in sorted(set(rendered_tmpdirs(outputs).values())):
         path = Path(directory)
         if path.is_symlink() or not path.is_dir():

@@ -21,6 +21,7 @@ For every other specialist ``RECOVERED`` is the last line.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -28,7 +29,6 @@ from pathlib import Path
 if __package__ in (None, ""):  # run as a script: make the repo importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.capture import server_tmp
 from scripts.capture.exports import capture_exports
 from scripts.capture.index import SPECIALISTS
 from scripts.capture.record_invocation import _index_registers, record, session_ids
@@ -105,6 +105,14 @@ def recover(root: Path, specialist: str, agent_id: str, session: str | None,
 def _clean_server_tmp() -> None:
     """Remove the MaBoSS server's orphaned run directories; never raises."""
     try:
+        # Imported here so that even an import failure cannot fail a recovery.
+        server_tmp = importlib.import_module("scripts.capture.server_tmp")
+        try:
+            missing = server_tmp.ensure_server_tmpdir()
+            if missing:
+                print(f"TMP CLEANUP WARNING: {missing}")
+        except Exception as exc:
+            print(f"TMP CLEANUP WARNING: cannot prepare the MaBoSS TMPDIR: {exc}")
         summary = server_tmp.clean(server_tmp.default_roots())
         print(server_tmp.summary_line(summary))
         for line in summary.get("warnings", []):

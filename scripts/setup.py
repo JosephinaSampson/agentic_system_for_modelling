@@ -305,10 +305,12 @@ def execute(args, root: Path = ROOT) -> dict:
             report["errors"].extend(report["data_environment"]["errors"])
             return report
     if args.check:
+        tmpdir_problems = environment.server_tmpdir_file_problems(outputs)
         for path, text in outputs.items():
             if not path.is_file() or path.read_text(encoding="utf-8") != text:
-                errors.append(f"Configuration missing or stale: {path}; rerun setup")
-        errors.extend(environment.server_tmpdir_problems(outputs))
+                reason = f" ({tmpdir_problems[path]})" if path in tmpdir_problems else ""
+                errors.append(f"Configuration missing or stale: {path}{reason}; rerun setup")
+        errors.extend(environment.server_tmpdir_dir_problems(outputs))
         if errors:
             return report
     else:
