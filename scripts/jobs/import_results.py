@@ -50,11 +50,14 @@ if __package__ in (None, ""):
 
 from scripts.data.common import project_root, reject_symlinks, sha256_file, strict_json  # noqa: E402
 from scripts.jobs import launch  # noqa: E402
+from scripts.jobs.runtime.compare import PENALTY  # noqa: E402
 
 POORLY_CONSTRAINED_LOG10_SPAN = 1.0
 PIN_PYTHON = "3.12."
 PIN_BIOMASS = "0.14.0"
 MAX_MEMBER_BYTES = 512 * 1024 * 1024
+MAX_TOTAL_BYTES = 2 * 1024 ** 3
+FIGURE = re.compile(r"\Afigures/[A-Za-z0-9._-]+\.png\Z")
 BOUND_RTOL = 1e-9  # gene2val's 10**(...) can land a rounding error beyond a bound
 SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
 HEURISTICS = ("Good restarts are the successful restarts whose score is within good_fit_margin of the best. "
@@ -92,6 +95,7 @@ def extract(archive: Path, dest: Path) -> dict[str, Path]:
             members = tf.getmembers()
         except (tarfile.TarError, EOFError, OSError) as exc:
             raise ValueError(f"results.tar.gz is not readable: {exc}") from exc
+        total = 0
         for m in members:
             if not _safe_name(m.name):
                 raise ValueError(f"results.tar.gz member {m.name!r} has an unsafe path")
@@ -102,11 +106,19 @@ def extract(archive: Path, dest: Path) -> dict[str, Path]:
                 raise ValueError(f"results.tar.gz member {m.name!r} is larger than {MAX_MEMBER_BYTES} bytes")
             if m.name in out:
                 raise ValueError(f"results.tar.gz has a duplicate member {m.name!r}")
+            if m.name.startswith("figures/") and not FIGURE.fullmatch(m.name):
+                raise ValueError(f"results.tar.gz member {m.name!r}: only figures/<name>.png files "
+                                 "([A-Za-z0-9._-] names) are accepted under figures/")
+            total += m.size
+            if total > MAX_TOTAL_BYTES:
+                raise ValueError(f"results.tar.gz is larger than {MAX_TOTAL_BYTES} bytes uncompressed")
             target = dest / m.name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            source = tf.extractfile(m)
-            with target.open("xb") as handle:
-                shutil.copyfileobj(source, handle)
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("xb") as handle:
+                    shutil.copyfileobj(tf.extractfile(m), handle)
+            except (FileExistsError, NotADirectoryError, IsADirectoryError) as exc:
+                raise ValueError(f"results.tar.gz member {m.name!r} collides with another member: {exc}") from exc
             out[m.name] = target
     return out
 
@@ -155,14 +167,22 @@ def check_restarts(results: dict, settings: dict, fit: list[dict]) -> list[dict]
                              f"{settings['restarts']} restarts)")
         seen.add(n)
         expected = settings["seeds"][n - 1]
+        if type(r.get("seed")) is not int:
+            raise ValueError(f"restart {n}: seed {r.get('seed')!r} must be an integer")
+        wall = r.get("wall_time_s")
+        if wall is not None and not (_number(wall) and wall >= 0):
+            raise ValueError(f"restart {n}: wall_time_s {wall!r} must be a finite number >= 0 or null")
+        score = r.get("score")
+        if score is not None and not _number(score):
+            raise ValueError(f"restart {n}: score {score!r} must be a finite number or null")
         if r.get("seed") != expected:
             raise ValueError(f"seed {r.get('seed')!r} of restart {n} differs from the settings seed {expected}")
         if r.get("status") not in ("ok", "failed"):
             raise ValueError(f"restart {n} has status {r.get('status')!r} (expected ok or failed)")
         if r["status"] != "ok":
             continue
-        if not _number(r.get("score")):
-            raise ValueError(f"restart {n} is ok but has no finite score")
+        if not _number(r.get("score")) or r["score"] < 0:
+            raise ValueError(f"restart {n} is ok but its score {r.get('score')!r} is not a finite number >= 0")
         params = r.get("params")
         if not isinstance(params, dict) or set(params) != set(names):
             raise ValueError(f"restart {n} params must be exactly the fitted names {names}")
@@ -172,6 +192,21 @@ def check_restarts(results: dict, settings: dict, fit: list[dict]) -> list[dict]
             if not _number(value) or not lo * (1 - BOUND_RTOL) <= value <= hi * (1 + BOUND_RTOL):
                 raise ValueError(f"restart {n}: fitted {f['name']} = {value!r} is outside its bounds [{lo}, {hi}]")
     return sorted(restarts, key=lambda r: r["restart"])
+
+
+def cross_check(members: dict[str, Path], restarts: list[dict]) -> None:
+    """Each restarts/restart-N/result.json must agree with its results.json entry."""
+    for r in restarts:
+        name = f"restarts/restart-{r['restart']}/result.json"
+        if name not in members:
+            raise ValueError(f"{name} is missing from results.tar.gz (results.json lists restart {r['restart']})")
+        try:
+            own = strict_json(members[name].read_bytes())
+        except ValueError as exc:
+            raise ValueError(f"{name} is not valid JSON: {exc}") from exc
+        for key in ("restart", "seed", "status", "score", "params"):
+            if not isinstance(own, dict) or own.get(key) != r.get(key):
+                raise ValueError(f"{name} {key} differs from the results.json entry of restart {r['restart']}")
 
 
 def default_reproduce(root: Path, job_id: str, params_file: Path) -> float:
@@ -213,23 +248,32 @@ def _g(value) -> str:
     return "n/a" if value is None else f"{value:.6g}"
 
 
+def _cell(value) -> str:
+    """Text for a markdown table cell: no pipes, backticks, angle brackets or line breaks."""
+    text = " ".join(str(value).split())
+    for ch in "|`<>[]!":
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
 def report_md(proposal: dict) -> str:
-    lines = [f"# Calibration proposal for {proposal['job_id']}", "",
-             f"Model: ODE session {proposal['model']['ode_session']}, revision {proposal['model']['revision']}  ",
-             f"Mapping: {proposal['mapping']['path']} (approval {proposal['mapping']['approval']})  ",
+    lines = [f"# Calibration proposal for {_cell(proposal['job_id'])}", "",
+             f"Model: ODE session {_cell(proposal['model']['ode_session'])}, "
+             f"revision {_cell(proposal['model']['revision'])}  ",
+             f"Mapping: {_cell(proposal['mapping']['path'])} (approval {_cell(proposal['mapping']['approval'])})  ",
              f"Best restart: {proposal['best_restart']}; good restarts: "
              f"{', '.join(map(str, proposal['good_restarts']))}", ""]
     if proposal["partial"]:
         lines += ["**PARTIAL results:** not every restart returned a successful result.", ""]
     lines += ["## Restarts", "", "| restart | seed | score | status | wall time (s) |", "|---|---|---|---|---|"]
     for r in proposal["restarts"]:
-        lines.append(f"| {r['restart']} | {r['seed']} | {_g(r['score'])} | {r['status']} | {_g(r['wall_time_s'])} |")
+        lines.append(f"| {r['restart']} | {r['seed']} | {_g(r['score'])} | {_cell(r['status'])} | {_g(r['wall_time_s'])} |")
     lines += ["", "## Parameters", "",
               "| name | kind | unit | start | lower | upper | best | good min | good median | good max "
               "| poorly constrained |", "|---|---|---|---|---|---|---|---|---|---|---|"]
     for p in proposal["parameters"]:
         flag = "YES" if p["poorly_constrained"] else "no"
-        lines.append(f"| {p['name']} | {p['kind']} | {p['unit']} | {_g(p['start'])} | {_g(p['lower'])} | "
+        lines.append(f"| {_cell(p['name'])} | {_cell(p['kind'])} | {_cell(p['unit'])} | {_g(p['start'])} | {_g(p['lower'])} | "
                      f"{_g(p['upper'])} | {_g(p['best'])} | {_g(p['good_min'])} | {_g(p['good_median'])} | "
                      f"{_g(p['good_max'])} | {flag} |")
     lines += ["", proposal["heuristics_note"], ""]
@@ -270,11 +314,15 @@ def import_results(root, job_id: str, *, reproduce=None) -> Path:
         verify_members(members, results)
         check_env(members)
         restarts = check_restarts(results, settings, fit)
+        cross_check(members, restarts)
         ok = [r for r in restarts if r["status"] == "ok"]
         if not ok:
             raise ValueError("zero successful restarts: nothing to import "
                              f"({len(restarts)} restart(s), all failed)")
         best = min(ok, key=lambda r: (r["score"], r["restart"]))
+        if best["score"] >= PENALTY:
+            raise ValueError(f"the best score {best['score']!r} is the penalty value ({PENALTY:g}): "
+                             "no restart found a meaningful fit")
         params_file = tmp / "best-params.json"
         params_file.write_text(json.dumps(best["params"], indent=2) + "\n", encoding="utf-8")
         reproduced = reproduce(root, job_id, params_file)

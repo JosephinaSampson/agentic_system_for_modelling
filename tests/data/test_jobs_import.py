@@ -276,6 +276,75 @@ class ProposalTests(ImportFixture):
         self.assertEqual(sorted(p.name for p in self.archive_path.parent.iterdir()), ["results.tar.gz"])
 
 
+class HardeningTests(ImportFixture):
+    def test_restart_fields_are_validated(self):
+        cases = [("score", "1.0", "score"), ("score", [1], "score"), ("score", {"a": 1}, "score"),
+                 ("wall_time_s", "fast", "wall_time_s"), ("wall_time_s", [1], "wall_time_s"),
+                 ("wall_time_s", -1.0, "wall_time_s"), ("seed", "11", "seed"), ("seed", [11], "seed")]
+        for key, value, pattern in cases:
+            with self.subTest(key=key, value=value):
+                bad = self.restart(3, None, status="failed")
+                bad[key] = value
+                self.write_archive([self.restart(1, 1.0), bad])
+                self.refuses(pattern)
+
+    def test_failed_restart_with_null_wall_time_is_fine(self):
+        bad = self.restart(3, None, status="failed")
+        bad["wall_time_s"] = None
+        self.write_archive([self.restart(1, 1.0), bad])
+        self.assertTrue(self.proposal()["partial"])
+
+    def test_figures_only_plain_png_names(self):
+        for name in ("figures/plot.svg", "figures/a)![x](http:__evil).png", "figures/sub/x.png",
+                     "figures/x y.png", "figures/<script>.png", "figures/x.png.html"):
+            with self.subTest(name=name):
+                info = tarfile.TarInfo(name)
+                info.size = 1
+                self.write_archive(extra=[(info, b"x")])
+                self.refuses("figures/")
+
+    def test_cell_escaping_helper(self):
+        text = import_results._cell("a|b`c<d>\n[e]!")
+        self.assertNotRegex(text.replace("\\|", "").replace("\\`", ""), r"[|`\n]")
+        self.assertNotIn("<", text.replace("\\<", ""))
+
+    def test_total_size_cap(self):
+        self.write_archive()
+        with mock.patch.object(import_results, "MAX_TOTAL_BYTES", 10):
+            self.refuses("uncompressed")
+
+    def test_member_name_collisions_are_value_errors(self):
+        a, ab = tarfile.TarInfo("zz"), tarfile.TarInfo("zz/b")
+        a.size = ab.size = 1
+        self.write_archive(extra=[(a, b"x"), (ab, b"y")])
+        self.refuses("collides")
+
+    def test_restart_result_json_must_match_results_json(self):
+        for key, value in (("score", 0.9), ("seed", 12), ("status", "failed"), ("params", {"kf1": 1.0, "kf2": 0.2})):
+            with self.subTest(key=key):
+                own = self.restart(1, 1.0)
+                own[key] = value
+                self.write_archive([self.restart(1, 1.0), self.restart(2, 1.05)],
+                                   tamper={"restarts/restart-1/result.json": dump(own)},
+                                   results_edit=lambda r: r["files"].update(
+                                       {"restarts/restart-1/result.json": sha(dump(own))}))
+                self.refuses(f"result.json {key} differs")
+
+    def test_restart_result_json_missing(self):
+        self.write_archive(drop=["restarts/restart-2/result.json"],
+                           results_edit=lambda r: r["files"].pop("restarts/restart-2/result.json"))
+        self.refuses("restart-2/result.json is missing")
+
+    def test_negative_score_refused(self):
+        self.write_archive([self.restart(1, -1.0)])
+        self.refuses("score")
+
+    def test_penalty_best_score_refused(self):
+        self.write_archive([self.restart(1, 1e12), self.restart(2, 1e12)])
+        self.refuses("penalty")
+        self.assertEqual(self.calls, [])
+
+
 class DefaultReproduceTests(ImportFixture):
     def test_default_reproduce_runs_launch_validate_with_best_params(self):
         self.write_archive()
