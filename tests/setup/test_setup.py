@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 class SetupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        # Server TMPDIRs are created under the cache root; keep them inside the fixture.
+        self.enterContext(mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(Path(self.temp.name) / "xdg-cache")}))
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)/"project with spaces"
         self.root.mkdir()

@@ -108,6 +108,9 @@ uvx --from mcp-biomodelling-servers==2.5.2 mcp-<server>-server
 - **Managed or reused environment:** an absolute `<env>/bin/mcp-<server>-server`
   with `CONDA_PREFIX` and `PATH`.
 
+Both add a private disk-backed `TMPDIR` (`<cache>/mcp-biomodelling/tmp/<server>`)
+so engine scratch files never fill a RAM-backed `/tmp`.
+
 See [automatic setup](automatic-setup.md).
 
 ### 4.2 Why the marketplace plugins are not enabled here

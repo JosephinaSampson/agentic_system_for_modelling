@@ -52,7 +52,7 @@ def frontmatter(text: str) -> str:
 
 
 class SpecialistMcpAccessTests(unittest.TestCase):
-    def check_transport(self, metadata: str, server: str, executable: str) -> None:
+    def check_transport(self, metadata: str, server: str, executable: str, *, generated: bool = False) -> None:
         self.assertIn(f"mcpServers:\n  - {server}-agent:\n", metadata)
         block = metadata.split("mcpServers:\n", 1)[1].split("\ntools:", 1)[0]
         self.assertEqual(re.findall(r"^  - ([\w-]+):$", block, re.MULTILINE), [server + "-agent"])
@@ -77,6 +77,11 @@ class SpecialistMcpAccessTests(unittest.TestCase):
             self.assertEqual(command, str(prefix / "bin" / executable))
             self.assertEqual(value("PATH").split(":")[0], str(prefix / "bin"))
         self.assertNotIn("${MCP_MODELLING_ENV}", metadata)
+        if generated:
+            # Setup gives each server a private disk-backed TMPDIR (engine scratch files).
+            tmpdir = Path(value("TMPDIR"))
+            self.assertTrue(tmpdir.is_absolute())
+            self.assertEqual(tmpdir.parts[-3:], ("mcp-biomodelling", "tmp", server))
 
     def test_agents_define_isolated_inline_servers(self) -> None:
         for filename, (server, executable, _) in AGENTS.items():
@@ -90,7 +95,8 @@ class SpecialistMcpAccessTests(unittest.TestCase):
             shutil.copytree(ROOT / ".claude/agents", root / ".claude/agents")
             rendered = configure_claude.render(root, root / "another environment", with_biomass=True)
             for filename, (server, executable, _) in AGENTS.items():
-                self.check_transport(frontmatter(rendered[root / ".claude/agents" / filename]), server, executable)
+                self.check_transport(frontmatter(rendered[root / ".claude/agents" / filename]), server, executable,
+                                     generated=True)
 
     def test_generated_plugin_transports_pin_the_released_launch(self) -> None:
         import tomllib as toml
@@ -102,7 +108,8 @@ class SpecialistMcpAccessTests(unittest.TestCase):
             plugin = {"uvx": "/opt/uv tools/bin/uvx", "manifest": manifest}
             rendered = configure_claude.render(root, None, with_biomass=True, plugin=plugin)
             for filename, (server, executable, _) in AGENTS.items():
-                self.check_transport(frontmatter(rendered[root / ".claude/agents" / filename]), server, executable)
+                self.check_transport(frontmatter(rendered[root / ".claude/agents" / filename]), server, executable,
+                                     generated=True)
             hook = rendered[root / ".claude/agents/literature-reviewer.md"]
             self.assertIn('          command: "python3"\n', hook)
             for path, text in rendered.items():

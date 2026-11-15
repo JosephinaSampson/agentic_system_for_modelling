@@ -158,7 +158,8 @@ mcpServers:
 Setup rewrites this to an absolute `uvx` and a fixed PATH, because desktop clients
 often start without your login shell's PATH. To use an existing environment instead,
 run `python scripts/setup.py --environment-mode reuse --env-prefix <env>`, which
-writes `command`, `CONDA_PREFIX` and `PATH`. Inline commands are not run by a shell,
+writes `command`, `CONDA_PREFIX` and `PATH`. Both also set a disk-backed `TMPDIR`
+(`~/.cache/mcp-biomodelling/tmp/<server>`) for engine scratch files. Inline commands are not run by a shell,
 so never use `${...}` placeholders. These setup edits are machine-specific; review
 them before committing. The literature reviewer's file guard runs `python3` by
 default; set its hook `command` in `.claude/agents/literature-reviewer.md` if needed.

@@ -179,6 +179,14 @@ changing it.
 Claude's three base modelling agent files, plus `ode-modeler` when selected,
 receive a regenerated transport block: command, CONDA_PREFIX and PATH for an
 environment, or the absolute `uvx`, the plugin arguments and PATH in plugin mode.
+Every rendered modelling server (Claude agents and Codex profiles) also gets
+`TMPDIR` = `<cache>/mcp-biomodelling/tmp/<server>`, where `<cache>` is an absolute
+`$XDG_CACHE_HOME` or else `~/.cache`, rendered as an absolute path at setup time.
+Servers write engine scratch files through Python's `tempfile` (MaBoSS keeps a
+100–300 MB `maboss-run-*` directory per simulation), and the system `/tmp` may be a
+small RAM-backed tmpfs, as on WSL. Setup creates these directories with mode 0700 and
+refuses symlinks; `scripts/capture/server_tmp.py` cleans orphaned MaBoSS run
+directories (see [agentic operations](agentic-operations.md)).
 The literature-reviewer Python hook receives the environment's Python path; plugin
 mode keeps the portable `python3` (the hook uses only the standard library). Agent bodies, tool permissions, skills, and scientific rules are preserved.
 The adapter accepts the repository's existing inline YAML structure and rejects
@@ -207,7 +215,9 @@ writing configuration, or starting MCP servers. It does run client version check
   scientific sessions or calling modelling tools;
 - expected domain tools and absence of other domains' sentinel tools;
 - Codex plugin presence and the existing specialist/parent inventory checks;
-- Claude CLI MCP-list availability and exact managed configuration paths.
+- Claude CLI MCP-list availability and exact managed configuration paths;
+- each rendered server's `TMPDIR` (reported as missing or mismatched per file) and
+  that its directory exists with mode 0700.
 
 Standalone Codex diagnostics can include the optional profile with
 `python scripts/codex/check_environment.py --with-biomass --expected-branch <branch>`.

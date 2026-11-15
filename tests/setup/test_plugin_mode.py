@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 import tomllib
@@ -20,6 +21,8 @@ UVX = "/tools/uv bin/uvx"
 class PluginModeTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
+        # Server TMPDIRs are created under the cache root; keep them inside the fixture.
+        self.enterContext(mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(Path(temporary.name) / "xdg-cache")}))
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name) / "project"
         self.root.mkdir()

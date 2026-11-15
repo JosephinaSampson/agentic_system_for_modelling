@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import stat
 import tempfile
 from pathlib import Path
 
@@ -84,14 +86,85 @@ def plugin_arguments(manifest: dict, server: str) -> list[str]:
     return ["--from", plugin_requirement(manifest), f"mcp-{server}-server"]
 
 
+def cache_root() -> Path:
+    """$XDG_CACHE_HOME when absolute (relative values are invalid per XDG), else ~/.cache."""
+    configured = os.environ.get("XDG_CACHE_HOME", "")
+    return Path(configured) if os.path.isabs(configured) else Path.home()/".cache"
+
+
+def server_tmpdir(server: str) -> Path:
+    """Disk-backed temporary directory for one modelling server.
+
+    Servers write large engine scratch files (MaBoSS ``maboss-run-*`` directories)
+    through ``tempfile``; the system /tmp may be a small RAM-backed tmpfs.
+    """
+    return cache_root()/"mcp-biomodelling"/"tmp"/server
+
+
+_TMPDIR = re.compile(r'"?TMPDIR"?\s*[:=]\s*("(?:[^"\\]|\\.)*")')
+
+
+def rendered_tmpdirs(outputs: dict[Path, str]) -> dict[Path, str]:
+    """The TMPDIR each rendered configuration file assigns (YAML or TOML string)."""
+    found = {}
+    for path, text in outputs.items():
+        match = _TMPDIR.search(text)
+        if match:
+            found[path] = json.loads(match[1])
+    return found
+
+
+def ensure_server_tmpdirs(outputs: dict[Path, str]) -> list[str]:
+    """Create every rendered TMPDIR as a private (0700) real directory."""
+    created = []
+    for directory in sorted(set(rendered_tmpdirs(outputs).values())):
+        path = Path(directory)
+        for candidate in (path.parent, path):
+            if candidate.is_symlink():
+                raise SetupError(f"Refusing symlink server TMPDIR: {candidate}")
+            if not candidate.exists():
+                candidate.mkdir(parents=True, mode=0o700)
+                os.chmod(candidate, 0o700)
+            elif not candidate.is_dir():
+                raise SetupError(f"Server TMPDIR is not a directory: {candidate}")
+        os.chmod(path, 0o700)
+        created.append(directory)
+    return created
+
+
+def server_tmpdir_problems(outputs: dict[Path, str]) -> list[str]:
+    """Check mode: rendered files carry the expected TMPDIR and it exists privately."""
+    errors = []
+    for path, expected in rendered_tmpdirs(outputs).items():
+        try:
+            current = rendered_tmpdirs({path: path.read_text(encoding="utf-8")}).get(path)
+        except OSError:
+            current = None
+        if current is None:
+            errors.append(f"TMPDIR missing from {path}; expected {json.dumps(expected)}; rerun setup")
+        elif current != expected:
+            errors.append(f"TMPDIR mismatch in {path}: found {json.dumps(current)}, "
+                          f"expected {json.dumps(expected)}; rerun setup")
+    for directory in sorted(set(rendered_tmpdirs(outputs).values())):
+        path = Path(directory)
+        if path.is_symlink() or not path.is_dir():
+            errors.append(f"TMPDIR directory missing: {directory}; rerun setup")
+        elif stat.S_IMODE(path.stat().st_mode) != 0o700:
+            errors.append(f"TMPDIR directory {directory} is not private (mode 0700); rerun setup")
+    return errors
+
+
 def server_transport(server: str, *, prefix: Path | None = None, plugin: dict | None = None,
                      graphviz_path: str | None = None) -> tuple[str, list[str], dict[str, str]]:
     """Command, arguments and environment for one isolated specialist transport."""
+    tmpdir = str(server_tmpdir(server))
     if plugin:
         return (plugin["uvx"], plugin_arguments(plugin["manifest"], server),
-                {"PATH": transport_path(None, graphviz_path=graphviz_path, uvx=plugin["uvx"])})
+                {"PATH": transport_path(None, graphviz_path=graphviz_path, uvx=plugin["uvx"]),
+                 "TMPDIR": tmpdir})
     return (str(prefix/"bin"/f"mcp-{server}-server"), [],
-            {"CONDA_PREFIX": str(prefix), "PATH": transport_path(prefix, graphviz_path=graphviz_path)})
+            {"CONDA_PREFIX": str(prefix), "PATH": transport_path(prefix, graphviz_path=graphviz_path),
+             "TMPDIR": tmpdir})
 
 
 def runtime_env(prefix: Path, *, graphviz_path: str | None = None) -> dict:

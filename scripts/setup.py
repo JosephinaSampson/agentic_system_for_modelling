@@ -308,9 +308,12 @@ def execute(args, root: Path = ROOT) -> dict:
         for path, text in outputs.items():
             if not path.is_file() or path.read_text(encoding="utf-8") != text:
                 errors.append(f"Configuration missing or stale: {path}; rerun setup")
+        errors.extend(environment.server_tmpdir_problems(outputs))
         if errors:
             return report
     else:
+        # Disk-backed scratch space for the servers (the system /tmp may be a small tmpfs).
+        report["server_tmpdirs"] = environment.ensure_server_tmpdirs(outputs)
         report["writes"] = [write_config(path, text, root/".setup/backups") for path, text in outputs.items()]
         saved = {key: resolved[key] for key in INPUT_KEYS if resolved.get(key)}
         saved.update({name + "_path": path for name, path in resolved["clients"].items()})
