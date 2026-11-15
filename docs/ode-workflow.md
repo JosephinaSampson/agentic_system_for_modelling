@@ -120,7 +120,12 @@ Calibration is a portable job the researcher approves step by step; no specialis
    proposal short hash and approval id. The new revision needs the usual review and approval.
 8. **Hold-out.** `score_holdout.py <job-id> --approval <id>` scores the held-out rows once with the accepted
    parameters at their best values and every other fitted parameter at its start value, and writes
-   `holdout_score.json`. It never overwrites; a null start for a non-accepted parameter refuses.
+   `holdout_score.json`. It never overwrites; a null start for a non-accepted parameter refuses. It runs
+   the bundled model with the accepted values, so it is independent of when the ode-modeler applies them:
+   run it once, after the calibration approval.
+
+The dispatch hook also refuses an ODE brief that names a data-analyst path or session id, or an orchestrator seeds/mapping/ode_mapping/calibration file other than the `DATA_INPUT` artifact, without a `DATA_INPUT` line. The hook records a malformed or ambiguous
+`record_session_id` (any case or separator, joined to another id) as a refusal.
 
 ## Dispatch and isolation
 

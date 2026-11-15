@@ -197,9 +197,13 @@ runs as portable jobs outside this skill; sensitivity analysis and ODE-to-PhysiC
 ## Apply an approved calibration
 
 Only with a hook-checked line 1 `DATA_INPUT {"calibration": "runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json", "sha256": "...", "approval": "<record id>"}`
-and `record_session_id` set to that proposal's ODE session (the brief names exactly that one).
+and `record_session_id` set to that proposal's ODE session (the brief names exactly that one, written
+`record_session_id <session>` or as JSON; phrasings such as `is`, or joining it to another id, are refused).
+The Codex runtime has no dispatcher check for the calibration `DATA_INPUT` yet, so under Codex the
+specialist returns `blocked` for such a request.
 1. Read the proposal and the approval `outputs`: the accepted parameters. Ignore the others.
-2. Read the session's current configuration (`get_model_configuration` or the equivalent inspect tool).
+2. Read the session's current configuration with `inspect_model`. The proposal's `unit` of each accepted
+   parameter must equal that parameter's configured unit; otherwise return `blocked` (never infer units).
 3. Apply exactly the accepted parameters at their `best` values through the server. `configure_model`
    replaces the whole configuration, so send it with every other configured value re-applied unchanged.
 4. Read back the stored values and compare each with the proposal; execution success is not enough.

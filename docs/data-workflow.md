@@ -340,7 +340,9 @@ ode-modeler `DATA_INPUT {"calibration": ..., "sha256": ..., "approval": ...}` on
 proposal sha256, approval id). Caveats for the researcher: BioMASS differential-evolution defaults stop
 early with few fitted parameters (raise `popsize`/`maxiter`); restart agreement and the
 `poorly_constrained` flag are heuristics; the hold-out is scored once. A calibration proposal or an
-`ode_mapping.json` may be named only on the `DATA_INPUT` line of its dispatch.
+`ode_mapping.json` may be named only on the `DATA_INPUT` line of its dispatch. The dispatch hook also refuses an ODE brief that names a data-analyst path or session id, or an orchestrator seeds/mapping/ode_mapping/calibration file other than the `DATA_INPUT` artifact, without a `DATA_INPUT` line.
+Hold-out scoring uses the bundled model with the accepted values, so it does not depend on when the
+ode-modeler applies them: run it once, after the calibration approval.
 
 ## Provenance checks
 

@@ -920,10 +920,6 @@ class OrchestratorMentionTests(DataInputFixture):
         self.assertIn("blocked", result.stderr)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class OdeCalibrationInputTests(HoldoutFixture):
     """The ode-modeler DATA_INPUT: an approved calibration proposal, applied to its own ODE session."""
 
@@ -1007,3 +1003,25 @@ class OdeCalibrationInputTests(HoldoutFixture):
                      'DATA_INPUT {"calibration": "x", "sha256": "y", "approval": "z", "more": 1}'):
             self.refused(self.task(line=line), "blocked")
         self.assertEqual(self.hook("ode-modeler", ["x"]).returncode, 2)
+
+    def test_record_session_id_spellings_and_joins(self):
+        bad = ("RECORD_SESSION_ID other-session", "Record_Session_Id other-session",
+               "record session id other-session", "record-session-id: other-session",
+               f"record_session_id {ODE_SESSION}, other-session", f"record_session_id {ODE_SESSION}/other-session",
+               f"record_session_id {ODE_SESSION} & other-session", f"record_session_id {ODE_SESSION}+other-session",
+               f"record_session_id {ODE_SESSION} and other-session", "record_session_id is " + ODE_SESSION,
+               "Record\u200b_session_id other-session")
+        for extra in bad:
+            with self.subTest(extra=extra):
+                self.refused(self.task(tail=f" {extra}."), "record_session_id")
+        good = (f"record_session_id={ODE_SESSION}", f'{{"record_session_id": "{ODE_SESSION}", "x": 1}}',
+                f"record_session_id: {ODE_SESSION}", f"`record_session_id` `{ODE_SESSION}`",
+                f"record_session_id {ODE_SESSION};", f"(record_session_id {ODE_SESSION})",
+                f"record_session_id\n{ODE_SESSION}", f"Record_Session_Id {ODE_SESSION}")
+        for extra in good:
+            with self.subTest(extra=extra):
+                self.assertEqual(self.hook("ode-modeler", self.task(tail=f"\n{extra}")).returncode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

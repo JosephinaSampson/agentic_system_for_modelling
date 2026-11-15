@@ -506,7 +506,30 @@ def _check_maboss_data_input(root, value, first_line):
     return {"mapping": rel, "sha256": digest, "approval_id": approval_id, anchor_key: anchor}, sessions
 
 
-RECORD_SESSION = re.compile(r"record_session_id(?![\w-])[\s\"'`:=]*([\w-]+(?:\.[\w-]+)*)")
+# Any spelling of record_session_id (case, space, `_` or `-` separators) on the NFKC-normalised text.
+RECORD_MENTION = re.compile(r"record[\s_-]*session[\s_-]*id(?!\w)", re.I)
+RECORD_VALUE = re.compile(r"[\s\"'`:=]*([\w-]+(?:\.[\w-]+)*)([\"'`]*)")
+RECORD_JOINED = re.compile(r"\s*(?:[/&+]|and\s+\S)", re.I)
+RECORD_END = re.compile(r"(?:\Z|\s|[.;)\]}])")
+
+
+def _record_session_values(text):
+    """(mention count, values): the value after each record_session_id mention; a value must end at
+    whitespace, the end of the text or `. ; ) ] }` (or `,` after a closing quote), and not be joined
+    to another id by `,` `/` `&` `+` or `and`. A mention with no value, or a joined value, is returned
+    as None (never equal to a session)."""
+    values, mentions = [], 0
+    for mention in RECORD_MENTION.finditer(text):
+        mentions += 1
+        match = RECORD_VALUE.match(text, mention.end())
+        if not match:
+            values.append(None)
+            continue
+        end = match.end()
+        closed = bool(match.group(2))
+        ok = RECORD_END.match(text, end) or (closed and text.startswith(",", end))
+        values.append(match.group(1) if ok and not RECORD_JOINED.match(text, end) else None)
+    return mentions, values
 CALIBRATION_REL = re.compile(r"runs/orchestrator/[\w.-]+/jobs/[\w.-]+/calibration_proposal\.json")
 
 
@@ -544,10 +567,11 @@ def _check_ode_calibration_input(root, value, text):
     if record.get("session_id") != session:
         raise ValueError(f"calibration approval {approval_id} has session_id {record.get('session_id')!r}; "
                          f"it must be the proposal's ODE session {session}")
-    named = RECORD_SESSION.findall(text)
-    if len(named) != len(re.findall(r"record_session_id", text)) or set(named) != {session}:
+    mentions, named = _record_session_values(text)
+    if not mentions or set(named) != {session}:
         raise ValueError(f"the brief must contain record_session_id {session} (the proposal's ODE session) and "
-                         f"no other record_session_id value; found {sorted(set(named))}")
+                         f"no other record_session_id value, written as `record_session_id {session}` or JSON; "
+                         f"found {sorted(set(map(str, named)))}")
     return {"calibration": rel, "sha256": digest, "approval_id": approval_id, "ode_session": session,
             "outputs": outputs}, set()
 

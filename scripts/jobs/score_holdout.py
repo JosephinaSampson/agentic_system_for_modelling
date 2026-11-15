@@ -22,6 +22,8 @@ import argparse
 import json
 import math
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -64,17 +66,25 @@ def score_holdout(root, job_id: str, approval_id: str, *, runner=None) -> Path:
     digest = sha256_file(proposal_path)
     record = approvals.require_calibration_approval(root, approval_id, rel, digest)
     proposal = strict_json(proposal_path.read_bytes())
-    rows = {r["name"]: r for r in proposal["parameters"]}
+    try:
+        if proposal.get("kind") != "calibration_proposal":
+            raise ValueError("not a calibration_proposal")
+        rows = {r["name"]: r for r in proposal["parameters"]}
+        ode_session = proposal["model"]["ode_session"]
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(f"{rel} is not a valid calibration proposal ({type(exc).__name__}: {exc})") from None
     accepted = record.get("outputs")
     if (not isinstance(accepted, list) or not accepted or len(accepted) != len(set(accepted))
             or not all(isinstance(a, str) and a in rows for a in accepted)):
         raise ValueError(f"approval {approval_id} outputs must be a nonempty list of the proposal's parameter "
                          f"names ({', '.join(rows)})")
-    if record.get("session_id") != proposal["model"]["ode_session"]:
+    if record.get("session_id") != ode_session:
         raise ValueError(f"approval {approval_id} session_id is not the proposal's ODE session")
     params, source = {}, {}
     for name, row in rows.items():
         if name in accepted:
+            if not _number(row.get("best")):
+                raise ValueError(f"accepted parameter {name} has no finite best value in the proposal")
             params[name], source[name] = row["best"], "accepted best"
         elif _number(row.get("start")):
             params[name], source[name] = row["start"], "start"
@@ -88,9 +98,7 @@ def score_holdout(root, job_id: str, approval_id: str, *, runner=None) -> Path:
         params_file.write_text(json.dumps(params, indent=2) + "\n", encoding="utf-8")
         score = runner(root, job_id, params_file)
     finally:
-        for child in tmp.iterdir():
-            child.unlink()
-        tmp.rmdir()
+        shutil.rmtree(tmp, ignore_errors=True)
     if not _number(score):
         raise ValueError("the hold-out score is not a finite number")
     result = {"kind": "holdout_score", "schema_version": 1, "job_id": job_id,
@@ -117,8 +125,8 @@ def main(argv: list[str] | None = None) -> int:
     root = project_root().resolve()
     try:
         path = score_holdout(root, args.job_id, args.approval)
-    except (ValueError, OSError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except (ValueError, OSError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     print(f"holdout score: {path.relative_to(root).as_posix()}")
     return 0

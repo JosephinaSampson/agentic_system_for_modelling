@@ -1,5 +1,7 @@
+import io
 import json
 import unittest
+from unittest import mock
 from pathlib import Path
 
 try:
@@ -89,6 +91,38 @@ class HoldoutTests(HoldoutFixture):
             with self.assertRaises(ValueError):
                 self.score(record)
         self.assertEqual(self.seen, [])
+
+    def test_malformed_or_wrong_kind_proposal_refuses_cleanly(self):
+        path = self.make_proposal()
+        self.approve_calibration()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for n, edit in enumerate((lambda d: d.update(kind="other"), lambda d: d.pop("parameters"),
+                                  lambda d: d.update(parameters=[1]))):
+            broken = json.loads(json.dumps(data))
+            edit(broken)
+            path.write_text(json.dumps(broken), encoding="utf-8")
+            self.approve_calibration(f"cal-x{n}")
+            with self.assertRaises(ValueError):
+                self.score(f"cal-x{n}")
+        self.assertEqual(self.seen, [])
+
+    def test_non_finite_best_for_an_accepted_parameter_refuses(self):
+        path = self.make_proposal()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["parameters"][0]["best"] = None
+        path.write_text(json.dumps(data), encoding="utf-8")
+        self.approve_calibration()
+        with self.assertRaisesRegex(ValueError, "kf1.*finite best"):
+            self.score()
+
+    def test_main_reports_malformed_input_without_traceback(self):
+        path = self.make_proposal()
+        self.approve_calibration()
+        path.write_text("[]", encoding="utf-8")
+        with mock.patch.object(score_holdout, "project_root", return_value=self.root), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(score_holdout.main([self.job_id, "--approval", "cal-1"]), 1)
+        self.assertIn("error:", err.getvalue())
 
     def test_failed_runner_writes_nothing(self):
         self.make_proposal()
