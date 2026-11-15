@@ -134,20 +134,23 @@ class PrintTests(LauncherFixture):
         bundle = (self.job_dir / "bundle.tar.gz").resolve()
         j, rd = self.job_id, "~/jobs"
         ssh = "ssh -o BatchMode=yes labpc"
-        self.assertEqual(out.splitlines(), [
-            f"1. scp -o BatchMode=yes {bundle} labpc:{rd}/",
-            f"2. {ssh} 'cd {rd} && tar xzf {j}.tar.gz && cd {j} && ./launch/remote.sh setup'",
-            f"3. {ssh} 'cd {rd}/{j} && ./launch/remote.sh start --parallel {k}'",
-            f"4. {ssh} 'cd {rd}/{j} && ./launch/remote.sh status'",
-            f"5. {ssh} 'cd {rd}/{j} && ./launch/remote.sh collect'",
-            f"6. scp -o BatchMode=yes labpc:{rd}/{j}/results.tar.gz inputs/calibration-results/{j}/"])
+        self.assertEqual(out.splitlines()[:7], [
+            f"1. {ssh} 'mkdir -p {rd}'",
+            f"2. scp -o BatchMode=yes {bundle} labpc:{rd}/{j}.tar.gz",
+            f"3. {ssh} 'cd {rd} && tar xzf {j}.tar.gz && cd {j} && ./launch/remote.sh setup'",
+            f"4. {ssh} 'cd {rd}/{j} && ./launch/remote.sh start --parallel {k}'",
+            f"5. {ssh} 'cd {rd}/{j} && ./launch/remote.sh status'",
+            f"6. {ssh} 'cd {rd}/{j} && ./launch/remote.sh collect'",
+            f"7. scp -o BatchMode=yes labpc:{rd}/{j}/results.tar.gz inputs/calibration-results/{j}/"])
+        self.assertIn("only the bundle", out.lower())
+        self.assertIn("leaves this machine", out)
         self.assertEqual(self.fake.calls(), [])  # printing runs nothing
 
     def test_print_without_config_uses_host_as_alias(self):
         s = self.job_settings()
         code, out, _ = self.run_main("print", self.job_id, "--host", "somebox")
         self.assertEqual(code, 0)
-        self.assertIn(f"scp -o BatchMode=yes {(self.job_dir / 'bundle.tar.gz').resolve()} somebox:~/agentic-jobs/", out)
+        self.assertIn(f"scp -o BatchMode=yes {(self.job_dir / 'bundle.tar.gz').resolve()} somebox:~/agentic-jobs/{self.job_id}.tar.gz", out)
         self.assertIn(f"--parallel {s['parallel']}'", out)
 
 
@@ -171,15 +174,15 @@ class SshTests(LauncherFixture):
         self.assertEqual(e["bundle_sha256"], sha((self.job_dir / "bundle.tar.gz").read_bytes()))
         self.assertEqual(e["authorization"], "researcher: yes, run it on lab")
 
-    def test_submit_runs_steps_1_to_3_and_batchmode_always_set(self):
+    def test_submit_runs_mkdir_upload_setup_start_and_batchmode_always_set(self):
         self.fake.hosts(HOST)
         code, _, err = self.run_main("ssh", "submit", self.job_id, "--host", "lab", "--authorization", "ok")
         self.assertEqual(code, 0, err)
         calls = self.fake.calls()
-        self.assertEqual([c[0] for c in calls], ["scp", "ssh", "ssh"])
-        self.assertEqual(calls[0][1:3], ["-o", "BatchMode=yes"])
-        self.assertEqual(calls[0][-1], "labpc:~/jobs/")
-        self.assertTrue(calls[2][-1].endswith("./launch/remote.sh start --parallel "
+        self.assertEqual([c[0] for c in calls], ["ssh", "scp", "ssh", "ssh"])
+        self.assertEqual(calls[0][-1], "mkdir -p ~/jobs")
+        self.assertEqual(calls[1][-1], f"labpc:~/jobs/{self.job_id}.tar.gz")
+        self.assertTrue(calls[3][-1].endswith("./launch/remote.sh start --parallel "
                                               f"{launch.cores_parallel(self.job_settings(), 8)}"))
         for c in calls:
             self.assertEqual(c[1:3], ["-o", "BatchMode=yes"])
@@ -193,6 +196,16 @@ class SshTests(LauncherFixture):
         for c in last:
             self.assertEqual(c[1:4], ["-o", "BatchMode=yes", "labpc"])
         self.assertEqual(len(self.dispatch()), 1)  # only submit is logged
+
+    def test_dispatch_log_symlink_refused(self):
+        self.fake.hosts(HOST)
+        target = self.fake.tmp / "elsewhere.jsonl"
+        target.touch()
+        (self.job_dir / "dispatch.jsonl").symlink_to(target)
+        code, _, err = self.run_main("ssh", "submit", self.job_id, "--host", "lab", "--authorization", "ok")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.fake.calls(), [])
+        self.assertEqual(target.read_text(), "")
 
     def test_submit_refuses_a_modified_bundle(self):
         self.fake.hosts(HOST)
@@ -287,6 +300,7 @@ class SlurmTests(LauncherFixture):
         self.assertIn("already", err)
         self.assertEqual(len(self.fake.calls()), 1)
         self.assertEqual(self.run_main("slurm", "submit", self.job_id, "--resubmit")[0], 0)
+        self.assertEqual((job / "state" / "slurm_job").read_text().split(), ["4242", "4242"])  # appended
         self.assertEqual(len(self.fake.calls()), 2)
 
     def test_slurm_prints_when_no_sbatch(self):
@@ -296,8 +310,65 @@ class SlurmTests(LauncherFixture):
         self.assertEqual(code, 0, err)
         self.assertIn(f"sbatch --array=1-{s['restarts']}", out)
         self.assertIn("remote.sh setup", out)
+        self.assertIn(f"cd {self.job_id}\n", out)
+        self.assertNotIn(str(launch.cache_root()), out)
         self.assertEqual(self.fake.calls(), [])
         self.setup_mock.assert_not_called()
+
+
+REMOTE_FAKE = """#!/usr/bin/env python3
+import os, shutil, subprocess, sys
+name = os.path.basename(sys.argv[0])
+home = os.environ["FAKE_REMOTE_HOME"]
+args = sys.argv[1:]
+assert args[:2] == ["-o", "BatchMode=yes"], args
+args = args[2:]
+if name == "scp":
+    src, dst = [a.replace("labpc:~", home) for a in args]
+    if os.path.isdir(dst):
+        dst = os.path.join(dst, os.path.basename(src))
+    shutil.copyfile(src, dst)
+else:
+    alias, command = args
+    assert alias == "labpc"
+    command = command.replace("./launch/remote.sh setup", "mkdir -p .venv/bin && ln -sf " + os.environ["FAKE_PY"]
+                              + " .venv/bin/python && printf 'sleep 300 & wait\\n' > launch/local.sh")
+    sys.exit(subprocess.run(["bash", "-c", command], cwd=home, env={**os.environ, "HOME": home}).returncode)
+"""
+
+
+class EndToEndTests(LauncherFixture):
+    def test_submit_status_fetch_against_a_fake_remote_home(self):
+        import io as _io
+        import tarfile
+        home = self.fake.tmp / "remote-home"
+        home.mkdir()
+        for name in ("ssh", "scp"):
+            (self.fake.bin / name).write_text(REMOTE_FAKE, encoding="utf-8")
+        env = mock.patch.dict(os.environ, {"FAKE_REMOTE_HOME": str(home), "FAKE_PY": sys.executable,
+                                           "REMOTE_STATUS_INTERVAL": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.fake.hosts(HOST)
+        self.addCleanup(lambda: self.run_main("ssh", "cancel", self.job_id, "--host", "lab"))
+        code, _, err = self.run_main("ssh", "submit", self.job_id, "--host", "lab", "--authorization", "ok")
+        self.assertEqual(code, 0, err)
+        remote = home / "jobs" / self.job_id
+        self.assertTrue((home / "jobs" / f"{self.job_id}.tar.gz").is_file())
+        self.assertTrue((remote / "job.json").is_file())
+        code, out, err = self.run_main("ssh", "status", self.job_id, "--host", "lab")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads((remote / "state" / "status.json").read_text())["job_id"], self.job_id)
+        payload = json.dumps({"job_sha256": sha((self.job_dir / "job.json").read_bytes()),
+                              "partial": False, "restarts": [], "files": {}}).encode()
+        with tarfile.open(remote / "results.tar.gz", "w:gz") as tf:
+            info = tarfile.TarInfo("results.json")
+            info.size = len(payload)
+            tf.addfile(info, _io.BytesIO(payload))
+        code, out, err = self.run_main("ssh", "fetch", self.job_id, "--host", "lab")
+        self.assertEqual(code, 0, err)
+        self.assertTrue((self.root / "inputs" / "calibration-results" / self.job_id / "results.tar.gz").is_file())
+        self.assertEqual(self.run_main("ssh", "cancel", self.job_id, "--host", "lab")[0], 0)
 
 
 class RemoteShTests(unittest.TestCase):
@@ -459,6 +530,57 @@ class RemoteShTests(unittest.TestCase):
         done = self.remote("status", env={"PATH": f"{self.bin}{os.pathsep}/usr/bin{os.pathsep}/bin"})
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertRegex(done.stdout, r"running 1")
+
+    def test_sacct_ended_pending_restarts_become_failed(self):
+        self.tool("sacct")
+        (self.job / "state").mkdir()
+        (self.job / "state" / "slurm_job").write_text("4242\n")
+        self.restart(1, host="node1", result={"restart": 1, "status": "ok", "score": 0.5})
+        done = self.remote("status", env={"FAKE_SACCT": "4242_1|COMPLETED\n4242_2|TIMEOUT\n4242_3|NODE_FAIL\n"})
+        self.assertRegex(done.stdout, r"failed 2")
+        self.assertRegex(done.stdout, r"pending 0")
+        status = json.loads((self.job / "state" / "status.json").read_text())
+        self.assertEqual(status["failed_restarts"], [2, 3])
+
+    def test_cancel_kills_group_members_that_ignore_term(self):
+        (self.job / "launch" / "local.sh").write_text(
+            "#!/usr/bin/env bash\nbash -c 'trap \"\" TERM; sleep 300' &\nwait\n")
+        self.assertEqual(self.remote("start").returncode, 0)
+        time.sleep(1)
+        pid = int((self.job / "state" / "pids").read_text().split()[0])
+        self.assertEqual(self.remote("cancel").returncode, 0)
+        time.sleep(0.5)
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pid, 0)
+
+    def test_cancel_survives_a_failing_scancel_and_cancels_every_recorded_array(self):
+        self.tool("scancel")
+        (self.job / "state").mkdir()
+        (self.job / "state" / "slurm_job").write_text("4242\n4300\n")
+        done = self.remote("cancel", env={"FAKE_FAIL": "scancel"})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        calls = [json.loads(x) for x in (self.tmp / "calls.log").read_text().splitlines()]
+        self.assertEqual(calls, [["scancel", "4242"], ["scancel", "4300"]])
+        self.assertIn("failed", done.stderr)
+
+    def test_status_follows_the_latest_array(self):
+        self.tool("sacct")
+        (self.job / "state").mkdir()
+        (self.job / "state" / "slurm_job").write_text("4242\n4300\n")
+        self.restart(1, host="node1")
+        self.remote("status", env={"FAKE_SACCT": ""})
+        calls = [json.loads(x) for x in (self.tmp / "calls.log").read_text().splitlines()]
+        self.assertEqual(calls[0][2], "4300")
+
+    def test_start_validates_parallel(self):
+        for bad in (["--parallel"], ["--parallel", "0"], ["--parallel", "x"], ["--bogus"]):
+            done = self.remote("start", *bad)
+            self.assertEqual(done.returncode, 2, bad)
+            self.assertNotIn("started", done.stdout)
+        self.assertFalse((self.job / "state" / "pids").exists())
+
+    def test_readme_states_data_minimisation(self):
+        self.assertIn("leaves", (RUNTIME / "README.txt").read_text())
 
 
 if __name__ == "__main__":

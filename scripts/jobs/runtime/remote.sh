@@ -41,8 +41,8 @@ BAD = {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL"}
 slurm_id = None
 bad_tasks = {}
 try:
-    text = (root / "state" / "slurm_job").read_text().strip()
-    slurm_id = text if re.fullmatch(r"[0-9]+", text) else None
+    ids = (root / "state" / "slurm_job").read_text().split()  # one array id per submit; the latest counts
+    slurm_id = ids[-1] if ids and re.fullmatch(r"[0-9]+", ids[-1]) else None
 except OSError:
     pass
 if slurm_id and shutil.which("sacct"):
@@ -69,9 +69,10 @@ for n in info["done"]:
         ok_scores.append((result["score"], n))
     else:
         failed_results.append(n)
-ended = sorted(n for n in bad_tasks if n in info["running"] + info["stale"])
+ended = sorted(n for n in bad_tasks if n in info["running"] + info["stale"] + info["pending"])
 info["running"] = [n for n in info["running"] if n not in ended]
 info["stale"] = [n for n in info["stale"] if n not in ended]
+info["pending"] = [n for n in info["pending"] if n not in ended]
 info["failed_restarts"] = sorted(failed_results + ended)
 info["failed"] = len(info["failed_restarts"])
 info["slurm_job"] = slurm_id
@@ -118,6 +119,12 @@ case "${1:-}" in
   start)
     shift
     need_env
+    if [ "$#" -ne 0 ]; then
+      if [ "$#" -ne 2 ] || [ "$1" != "--parallel" ]; then
+        echo "remote.sh: usage: start [--parallel K]" >&2; exit 2
+      fi
+      case "$2" in '' | *[!0-9]* | 0*) echo "remote.sh: --parallel must be a positive integer" >&2; exit 2 ;; esac
+    fi
     if [ -f state/pids ]; then
       while read -r pid _; do
         if [ -n "$pid" ] && alive "$pid"; then
@@ -169,9 +176,10 @@ case "${1:-}" in
           kill -TERM "$pid" 2>/dev/null || true
         }
       done <state/pids
+      group_alive() { kill -0 -- "-$1" 2>/dev/null || alive "$1"; }
       for _ in 1 2 3 4 5 6 7 8 9 10; do
         left=""
-        for pid in $pids; do alive "$pid" && left="$left $pid"; done
+        for pid in $pids; do group_alive "$pid" && left="$left $pid"; done
         [ -z "$left" ] && break
         sleep 0.5
       done
@@ -182,13 +190,17 @@ case "${1:-}" in
       echo "remote.sh: no recorded processes (state/pids)"
     fi
     if [ -f state/slurm_job ]; then
-      jobid="$(tr -cd '0-9' <state/slurm_job)"
-      if [ -n "$jobid" ] && command -v scancel >/dev/null 2>&1; then
-        scancel "$jobid"
-        echo "remote.sh: scancel $jobid"
-      else
-        echo "remote.sh: SLURM job $jobid recorded but scancel is not available; cancel it by hand" >&2
-      fi
+      for jobid in $(tr -cs '0-9' ' ' <state/slurm_job); do
+        if command -v scancel >/dev/null 2>&1; then
+          if scancel "$jobid"; then
+            echo "remote.sh: scancel $jobid"
+          else
+            echo "remote.sh: scancel $jobid failed" >&2
+          fi
+        else
+          echo "remote.sh: SLURM job $jobid recorded but scancel is not available; cancel it by hand" >&2
+        fi
+      done
     fi
     if [ -x "$PY" ]; then progress quiet || true; fi ;;
   *)

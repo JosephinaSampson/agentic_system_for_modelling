@@ -230,6 +230,8 @@ SSH_ALIAS = re.compile(r"\A[A-Za-z0-9_][A-Za-z0-9_.@-]*\Z")
 REMOTE_DIR = re.compile(r"\A[A-Za-z0-9_~/][A-Za-z0-9_./~-]*\Z")
 DEFAULT_REMOTE_DIR = "~/agentic-jobs"
 SSH_BASE = ["-o", "BatchMode=yes"]
+NOTICE = ("Note: only the bundle (the model, the measurement rows used by the mapping and the parameter bounds) "
+          "leaves this machine; no other inputs/ content is sent.")
 
 
 def hosts_path() -> Path:
@@ -296,7 +298,8 @@ def ssh_steps(job_id: str, bundle: Path, host: dict) -> dict:
     rd, alias = host["remote_dir"], host["ssh"]
     remote = f"cd {rd}/{job_id} && ./launch/remote.sh"
     return {
-        "upload": ["scp", *SSH_BASE, str(bundle), f"{alias}:{rd}/"],
+        "mkdir": ["ssh", *SSH_BASE, alias, f"mkdir -p {rd}"],
+        "upload": ["scp", *SSH_BASE, str(bundle), f"{alias}:{rd}/{job_id}.tar.gz"],
         "setup": ["ssh", *SSH_BASE, alias, f"cd {rd} && tar xzf {job_id}.tar.gz && cd {job_id} && ./launch/remote.sh setup"],
         "start": ["ssh", *SSH_BASE, alias, f"{remote} start --parallel {host['parallel']}"],
         "status": ["ssh", *SSH_BASE, alias, f"{remote} status"],
@@ -316,8 +319,8 @@ def print_commands(root: Path, job_id: str, host_name: str) -> list[str]:
     job_dir, settings = _job_and_settings(root, job_id)
     host = resolve_host(host_name, settings, configured_only=False)
     steps = ssh_steps(job_id, (job_dir / "bundle.tar.gz").resolve(), host)
-    order = ("upload", "setup", "start", "status", "collect", "fetch")
-    return [f"{i}. {_shown(steps[name])}" for i, name in enumerate(order, 1)]
+    order = ("mkdir", "upload", "setup", "start", "status", "collect", "fetch")
+    return [*(f"{i}. {_shown(steps[name])}" for i, name in enumerate(order, 1)), "", NOTICE]
 
 
 def _bundle_sha(job_dir: Path) -> str:
@@ -331,10 +334,20 @@ def _bundle_sha(job_dir: Path) -> str:
 def log_dispatch(job_dir: Path, host: dict, bundle_sha256: str, authorization: str) -> None:
     entry = {"time": utc_now(), "host": host["name"], "ssh_alias": host["ssh"], "bundle_sha256": bundle_sha256,
              "authorization": authorization}
-    with (job_dir / "dispatch.jsonl").open("a", encoding="utf-8") as log:
+    path = job_dir / "dispatch.jsonl"
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError(f"{path} must be a regular file")
+    created = not path.exists()
+    with path.open("a", encoding="utf-8") as log:
         log.write(json.dumps(entry, sort_keys=True) + "\n")
         log.flush()
         os.fsync(log.fileno())
+    if created:  # make the new directory entry durable too
+        fd = os.open(job_dir, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 def _run(argv: list[str]) -> int:
@@ -349,8 +362,9 @@ def ssh_submit(root: Path, job_id: str, host_name: str, authorization: str) -> i
     host = resolve_host(host_name, settings, configured_only=True)
     digest = _bundle_sha(job_dir)
     log_dispatch(job_dir, host, digest, authorization.strip())  # before anything leaves this machine
+    print(NOTICE, flush=True)
     steps = ssh_steps(job_id, (job_dir / "bundle.tar.gz").resolve(), host)
-    for name in ("upload", "setup", "start"):
+    for name in ("mkdir", "upload", "setup", "start"):
         code = _run(steps[name])
         if code != 0:
             print(f"error: step '{name}' failed (exit {code}); later steps were not run", file=sys.stderr)
@@ -411,10 +425,9 @@ def slurm_submit(root: Path, job_id: str, resubmit: bool = False) -> int:
     sbatch = ["sbatch", f"--array=1-{settings['restarts']}", f"--time={settings['slurm']['time']}",
               f"--cpus-per-task={settings['slurm']['cpus_per_task']}", "launch/slurm.sbatch"]
     if not shutil.which("sbatch"):
-        target = cache_root() / job_id
-        print("sbatch is not on PATH; on the SLURM login node, with the bundle unpacked in a folder "
-              f"named {job_id}, run:")
-        print(f"cd {shlex.quote(str(target))}")
+        print("sbatch is not on PATH; on the SLURM login node, after unpacking the bundle "
+              f"(tar xzf {job_id}.tar.gz), run:")
+        print(f"cd {job_id}")
         print("bash launch/remote.sh setup")
         print("mkdir -p out state")
         print(_shown(sbatch))
@@ -423,7 +436,7 @@ def slurm_submit(root: Path, job_id: str, resubmit: bool = False) -> int:
     target = unpack(root, job_id)
     record = target / "state" / "slurm_job"
     if record.exists() and not resubmit:
-        raise ValueError(f"job {job_id} was already submitted (array job {record.read_text().strip()}); "
+        raise ValueError(f"job {job_id} was already submitted (array job {record.read_text().split()[-1]}); "
                          "cancel it with `bash launch/remote.sh cancel`, or pass --resubmit to run the "
                          "unfinished restarts again")
     slurm_setup(target)
@@ -438,7 +451,8 @@ def slurm_submit(root: Path, job_id: str, resubmit: bool = False) -> int:
     if not match:
         raise ValueError(f"could not read the array job id from sbatch output {done.stdout!r}; "
                          f"write it to {record} by hand")
-    record.write_text(match.group(1) + "\n")
+    with record.open("a", encoding="utf-8") as handle:  # one id per line; cancel stops every one
+        handle.write(match.group(1) + "\n")
     print(f"recorded array job {match.group(1)} in {record}")
     return 0
 

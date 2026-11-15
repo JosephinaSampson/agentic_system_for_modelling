@@ -33,4 +33,8 @@ going after you log out:
 On a SLURM cluster: bash launch/remote.sh setup on the login node, then see the header of
 launch/slurm.sbatch.
 
+When a job is sent to another machine with scripts/jobs/launch.py, only this bundle (the model, the
+measurement rows used by the mapping, the parameter bounds) leaves the researcher's machine; no
+other inputs/ content does.
+
 Nothing here edits files outside this folder (uv's download cache is env/uv-cache).
