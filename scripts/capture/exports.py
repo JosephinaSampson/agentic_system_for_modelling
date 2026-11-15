@@ -11,7 +11,10 @@ lies inside ``<artifact root>/<Server>/<session>/`` (no symlinks) to
 ``exports.json`` manifest. Anything else is refused and reported, never copied.
 No export results -> no ``exports/`` directory. A rerun never amends a capture: it
 re-verifies the saved copies (a no-op when unchanged), fails closed when a saved copy
-or a recopied source differs, and only reports new refusals or vanished sources. ode-modeler (record_ode_artifacts.py)
+or a recopied source differs, and only reports new refusals or vanished sources.
+MaBoSS ``run_simulation``/``simulate_mutation`` results are captured through their
+``run_manifest``: the manifest plus its ``node_marginals`` and ``engine_input`` files, each
+checked against the manifest's sha256; larger state/engine dumps stay in the server store. ode-modeler (record_ode_artifacts.py)
 and data-analyst (no MCP exports) are skipped.
 """
 from __future__ import annotations
@@ -34,6 +37,8 @@ EXPORT_TOOLS = {
     'boolean-dynamics-modeler': ('MaBoSS', 'maboss', {
         'export_maboss_bnd_cfg': (('bnd_file', 'bnd'), ('cfg_file', 'cfg')),
         'export_maboss_handoff': (('manifest_file', 'handoff-manifest'),),
+        'run_simulation': (('run_manifest', 'maboss-run-manifest'),),
+        'simulate_mutation': (('run_manifest', 'maboss-run-manifest'),),
     }),
     'multicellular-configurator': ('PhysiCell', 'physicell', {
         'export_xml_configuration': (('file', 'xml'),),
@@ -43,6 +48,9 @@ EXPORT_TOOLS = {
 }
 NEKO_TEXT = re.compile(r'\A(SIF|History|BNET) exported: `?(/[^`\n]*?\.(?:sif|json|bnet))`?(?=[.\s]|\Z)')
 MANIFEST = 'exports.json'
+# Small run files copied with a captured MaBoSS run manifest; state/engine dumps (often
+# hundreds of MB) stay in the server store and are identified by the manifest's hashes.
+RUN_COMPANION_ROLES = ('node_marginals', 'engine_input')
 
 
 def artifact_root() -> Path:
@@ -169,6 +177,35 @@ def _check_source(path: str, session_dir: Path) -> tuple[str | None, Path | None
     return None, candidate
 
 
+RUN_TOOLS = ('run_simulation', 'simulate_mutation')
+
+
+def _run_companions(item: dict, source: Path, session_dir: Path) -> list[dict]:
+    """Rows for an accepted run manifest's small companions, each with the manifest's expected sha256."""
+    try:
+        files = json.loads(source.read_text(encoding='utf-8')).get('files')
+        if not isinstance(files, list):
+            raise ValueError('files is not a list')
+    except (OSError, ValueError, AttributeError, RecursionError) as error:
+        return [{'tool': item['tool'], 'format': 'maboss-run-companions', 'source_path': item['source_path'],
+                 'rejected': True, 'reason': f'run manifest unreadable ({type(error).__name__}); companions not captured'}]
+    rows = []
+    for entry in files:
+        if not isinstance(entry, dict) or entry.get('role') not in RUN_COMPANION_ROLES:
+            continue
+        name, expected = entry.get('name'), entry.get('sha256')
+        row = {'tool': item['tool'], 'format': f"maboss-run-{entry['role']}"}
+        if not isinstance(name, str) or not name or Path(name).name != name or name in ('.', '..'):
+            rows.append({**row, 'source_path': str(name), 'rejected': True,
+                         'reason': 'run manifest file name is not a plain file name'})
+        elif not isinstance(expected, str) or not re.fullmatch(r'[0-9a-f]{64}', expected):
+            rows.append({**row, 'source_path': str(session_dir / name), 'rejected': True,
+                         'reason': 'run manifest gives no sha256 for this file'})
+        else:
+            rows.append({**row, 'source_path': str(session_dir / name), 'expected_sha256': expected})
+    return rows
+
+
 def capture_exports(project: Path, specialist: str, session: str, invocation: str, transcript: Path) -> dict | None:
     """Copy this invocation's exports; None when the specialist is excluded."""
     if specialist not in EXPORT_TOOLS:
@@ -185,8 +222,10 @@ def capture_exports(project: Path, specialist: str, session: str, invocation: st
     for item in transcript_exports(transcript, specialist):
         latest.pop(item['source_path'], None)
         latest[item['source_path']] = item
-    rows, payloads, names = [], {}, {}
-    for item in latest.values():
+    rows, payloads, names, seen = [], {}, {}, set()
+
+    def take(item):
+        """Check and stage one item; return its source path when accepted, else None."""
         reason, source = _check_source(item['source_path'], session_dir)
         if reason is None and source.name == MANIFEST:
             reason = f'{MANIFEST} is reserved for the capture manifest'
@@ -194,15 +233,34 @@ def capture_exports(project: Path, specialist: str, session: str, invocation: st
             reason = f'file name collides with {names[source.name]}'
         if reason is not None:
             rows.append({**item, 'rejected': True, 'reason': reason})
-            continue
-        names[source.name] = item['source_path']
+            return None
         if not source.is_file():
             rows.append({**item, 'missing': True})
-            continue
+            return None
         content = source.read_bytes()
-        rows.append({**item, 'dest_path': f'{relative_target}/{source.name}',
-                     'sha256': hashlib.sha256(content).hexdigest(), 'bytes': len(content)})
+        digest = hashlib.sha256(content).hexdigest()
+        if 'expected_sha256' in item and digest != item['expected_sha256']:
+            rows.append({**item, 'rejected': True, 'reason': 'sha256 differs from the run manifest'})
+            return None
+        names[source.name] = item['source_path']
+        rows.append({**item, 'dest_path': f'{relative_target}/{source.name}', 'sha256': digest, 'bytes': len(content)})
         payloads[source.name] = content
+        return source
+
+    for item in latest.values():
+        source = take(item)
+        if source is None or item['tool'] not in RUN_TOOLS:
+            continue
+        # Companions of an accepted run manifest; a file shared by several runs is staged once.
+        for companion in _run_companions(item, source, session_dir):
+            key = (companion['source_path'], companion.get('expected_sha256'))
+            if key in seen:
+                continue
+            seen.add(key)
+            if companion.get('rejected'):
+                rows.append(companion)
+            else:
+                take(companion)
     summary = {'path': None, 'copied': [r for r in rows if 'sha256' in r],
                'missing': [r for r in rows if r.get('missing')], 'rejected': [r for r in rows if r.get('rejected')]}
     if not rows:

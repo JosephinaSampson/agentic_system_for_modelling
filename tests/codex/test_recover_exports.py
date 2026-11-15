@@ -364,5 +364,156 @@ class ReviewFixTests(ExportsBase):
         self.assertEqual(result["exports"]["copied"], [])
 
 
+
+class MabossRunCaptureTests(ExportsBase):
+    """run_simulation / simulate_mutation runs: manifest plus small companions are captured."""
+
+    def run_files(self, run="run_abc", nodes=b"Time,A\n0,0.5\n", tamper=None):
+        mroot = self.aroot / "MaBoSS" / SESSION
+        payloads = {f"{run}.nodes.csv": ("node_marginals", nodes),
+                    f"{run}.input.bnd": ("engine_input", b"Node A { logic = A; }"),
+                    f"{run}.input.cfg": ("engine_input", b"$x = 1;"),
+                    f"{run}.states.csv": ("state_probabilities", b"Time,state\n0,A\n"),
+                    f"{run}.engine.res_probtraj.csv": ("engine_output", b"Time\n0\n")}
+        files = []
+        for name, (role, content) in payloads.items():
+            self.artifact(name, content, root=mroot)
+            files.append({"name": name, "role": role, "size_bytes": len(content),
+                          "sha256": hashlib.sha256(content).hexdigest()})
+        if tamper:
+            self.artifact(tamper[0], tamper[1], root=mroot)
+        manifest = self.artifact(f"{run}.json", json.dumps(
+            {"server": "MaBoSS", "session_id": SESSION, "run_id": run, "status": "complete",
+             "model_revision": "rev1", "files": files}).encode(), root=mroot)
+        return manifest
+
+    def run_result(self, manifest, run="run_abc"):
+        return self.structured(f"Run {run} complete", {
+            "server": "MaBoSS", "session_id": SESSION, "model_revision": "rev1", "run_id": run,
+            "run_manifest": str(manifest), "result_available": True})
+
+    def test_run_simulation_captures_manifest_node_marginals_and_inputs(self):
+        manifest = self.run_files()
+        self.transcript([("run_simulation", {}, self.run_result(manifest))], prefix="maboss")
+        self.run_recover(specialist="boolean-dynamics-modeler")
+        out = self.exports_dir("boolean-dynamics-modeler")
+        rows = self.manifest("boolean-dynamics-modeler")["exports"]
+        copied = {r["dest_path"].rsplit("/", 1)[1]: r for r in rows if "sha256" in r}
+        self.assertEqual(set(copied), {"run_abc.json", "run_abc.nodes.csv", "run_abc.input.bnd", "run_abc.input.cfg"})
+        self.assertEqual(copied["run_abc.json"]["format"], "maboss-run-manifest")
+        self.assertEqual(copied["run_abc.nodes.csv"]["format"], "maboss-run-node_marginals")
+        self.assertEqual(copied["run_abc.input.bnd"]["format"], "maboss-run-engine_input")
+        self.assertEqual((out / "run_abc.nodes.csv").read_bytes(), b"Time,A\n0,0.5\n")
+        self.assertFalse((out / "run_abc.states.csv").exists())
+        self.assertFalse((out / "run_abc.engine.res_probtraj.csv").exists())
+
+    def test_simulate_mutation_runs_are_captured(self):
+        manifest = self.run_files(run="run_mut")
+        self.transcript([("simulate_mutation", {"nodes": ["A"], "state": "OFF"},
+                          self.run_result(manifest, run="run_mut"))], prefix="maboss")
+        self.run_recover(specialist="boolean-dynamics-modeler")
+        names = {r["dest_path"].rsplit("/", 1)[1] for r in self.manifest("boolean-dynamics-modeler")["exports"]
+                 if "sha256" in r}
+        self.assertIn("run_mut.nodes.csv", names)
+        self.assertIn("run_mut.json", names)
+
+    def test_companion_hash_mismatch_is_rejected_not_copied(self):
+        manifest = self.run_files(tamper=("run_abc.nodes.csv", b"Time,A\n0,0.9\n"))
+        self.transcript([("run_simulation", {}, self.run_result(manifest))], prefix="maboss")
+        result = self.run_recover(specialist="boolean-dynamics-modeler")
+        rejected = [r for r in result["exports"]["rejected"] if r["source_path"].endswith("run_abc.nodes.csv")]
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("sha256", rejected[0]["reason"])
+        self.assertFalse((self.exports_dir("boolean-dynamics-modeler") / "run_abc.nodes.csv").exists())
+
+    def test_companion_name_with_path_is_rejected(self):
+        mroot = self.aroot / "MaBoSS" / SESSION
+        manifest = self.artifact("run_bad.json", json.dumps(
+            {"server": "MaBoSS", "session_id": SESSION, "run_id": "run_bad",
+             "files": [{"name": "../evil.csv", "role": "node_marginals", "sha256": "0" * 64}]}).encode(), root=mroot)
+        self.transcript([("run_simulation", {}, self.run_result(manifest, run="run_bad"))], prefix="maboss")
+        result = self.run_recover(specialist="boolean-dynamics-modeler")
+        reasons = [r["reason"] for r in result["exports"]["rejected"]]
+        self.assertTrue(any("file name" in reason for reason in reasons), reasons)
+
+    def write_manifest(self, name, files):
+        mroot = self.aroot / "MaBoSS" / SESSION
+        return self.artifact(name, json.dumps({"server": "MaBoSS", "session_id": SESSION, "files": files}).encode(),
+                             root=mroot)
+
+    def companion(self, name, content, role="engine_input", sha=None):
+        self.artifact(name, content, root=self.aroot / "MaBoSS" / SESSION)
+        return {"name": name, "role": role, "sha256": sha or hashlib.sha256(content).hexdigest()}
+
+    def test_mismatch_does_not_free_a_name_an_accepted_companion_holds(self):
+        good = self.companion("x.csv", b"GOOD")
+        m1 = self.write_manifest("run_1.json", [good])
+        m2 = self.write_manifest("run_2.json", [{**good, "sha256": "f" * 64}])
+        mroot = self.aroot / "MaBoSS" / SESSION
+        other = self.artifact("sub/x.csv", b"OTHER", root=mroot)
+        cfg = self.artifact("y.cfg", b"$x=1;", root=mroot)
+        self.transcript([("run_simulation", {}, self.run_result(m1, run="run_1")),
+                         ("run_simulation", {}, self.run_result(m2, run="run_2")),
+                         ("export_maboss_bnd_cfg", {}, self.structured("exported", {
+                             "server": "MaBoSS", "session_id": SESSION, "bnd_file": file_summary(other),
+                             "cfg_file": file_summary(cfg)}))], prefix="maboss")
+        result = self.run_recover(specialist="boolean-dynamics-modeler")
+        out = self.exports_dir("boolean-dynamics-modeler")
+        self.assertEqual((out / "x.csv").read_bytes(), b"GOOD")
+        rows = [r for r in self.manifest("boolean-dynamics-modeler")["exports"]
+                if r.get("dest_path", "").endswith("/x.csv")]
+        self.assertEqual({r["sha256"] for r in rows}, {hashlib.sha256(b"GOOD").hexdigest()})
+        self.assertIn(str(other), [r["source_path"] for r in result["exports"]["rejected"]])
+
+    def test_rejected_manifest_is_not_expanded(self):
+        self.write_manifest("exports.json", [self.companion("n.csv", b"N", role="node_marginals")])
+        manifest = self.aroot / "MaBoSS" / SESSION / "exports.json"
+        self.transcript([("run_simulation", {}, self.run_result(manifest, run="run_r"))], prefix="maboss")
+        self.run_recover(specialist="boolean-dynamics-modeler")
+        self.assertFalse((self.exports_dir("boolean-dynamics-modeler") / "n.csv").exists())
+
+    def test_unreadable_manifest_is_reported(self):
+        manifest = self.artifact("run_u.json", b"not json", root=self.aroot / "MaBoSS" / SESSION)
+        self.transcript([("run_simulation", {}, self.run_result(manifest, run="run_u"))], prefix="maboss")
+        result = self.run_recover(specialist="boolean-dynamics-modeler")
+        reasons = [r["reason"] for r in result["exports"]["rejected"]]
+        self.assertTrue(any("unreadable" in reason for reason in reasons), reasons)
+
+    def test_deeply_nested_manifest_is_reported_not_raised(self):
+        manifest = self.artifact("run_n.json", b"[" * 100000, root=self.aroot / "MaBoSS" / SESSION)
+        self.transcript([("run_simulation", {}, self.run_result(manifest, run="run_n"))], prefix="maboss")
+        result = self.run_recover(specialist="boolean-dynamics-modeler")
+        self.assertTrue(any("unreadable" in r["reason"] for r in result["exports"]["rejected"]))
+
+    def test_shared_companion_gets_one_row(self):
+        shared = self.companion("s.bnd", b"Node A {}")
+        m1 = self.write_manifest("run_1.json", [shared])
+        m2 = self.write_manifest("run_2.json", [shared])
+        self.transcript([("run_simulation", {}, self.run_result(m1, run="run_1")),
+                         ("run_simulation", {}, self.run_result(m2, run="run_2"))], prefix="maboss")
+        self.run_recover(specialist="boolean-dynamics-modeler")
+        rows = [r for r in self.manifest("boolean-dynamics-modeler")["exports"]
+                if r.get("dest_path", "").endswith("/s.bnd")]
+        self.assertEqual(len(rows), 1)
+
+    def test_missing_companion_and_invalid_sha(self):
+        m = self.write_manifest("run_m.json", [{"name": "gone.csv", "role": "node_marginals", "sha256": "a" * 64},
+                                               self.companion("bad.cfg", b"x", sha="nothex")])
+        self.transcript([("run_simulation", {}, self.run_result(m, run="run_m"))], prefix="maboss")
+        result = self.run_recover(specialist="boolean-dynamics-modeler")
+        self.assertEqual([Path(r["source_path"]).name for r in result["exports"]["missing"]], ["gone.csv"])
+        self.assertIn("bad.cfg", [Path(r["source_path"]).name for r in result["exports"]["rejected"]])
+        copied = {Path(r["dest_path"]).name for r in result["exports"]["copied"]}
+        self.assertEqual(copied, {"run_m.json"})
+
+    def test_rerun_with_companions_is_noop(self):
+        manifest = self.run_files()
+        self.transcript([("run_simulation", {}, self.run_result(manifest))], prefix="maboss")
+        self.run_recover(specialist="boolean-dynamics-modeler")
+        before = self.snapshot()
+        self.run_recover(specialist="boolean-dynamics-modeler")
+        self.assertEqual(before, self.snapshot())
+
+
 if __name__ == "__main__":
     unittest.main()
