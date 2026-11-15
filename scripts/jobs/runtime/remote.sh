@@ -7,9 +7,11 @@
 #   bash launch/remote.sh collect                write results.tar.gz now (partial if restarts are pending)
 #   bash launch/remote.sh cancel                 stop what `start` launched (and scancel a SLURM array)
 #
-# State (all inside this folder): state/pids = the process groups started by `start`; state/status.json =
-# progress, refreshed while it runs and by `status`; state/slurm_job = the SLURM array job id (written when
-# it was submitted). `start` is refused while any restart is running.
+# State (all inside this folder): state/pids = the process groups started by `start` (emptied when the
+# supervisor finishes and by `cancel`); state/status.json = progress, refreshed while it runs and by `status`;
+# state/slurm_job = the SLURM array job id (written when it was submitted). `start` is refused while any
+# restart is running. A recorded pid is acted on (by `start` and `cancel`) only while `ps -o args=` shows it
+# is a `remote.sh _supervise` process: a pid reused by an unrelated process is never signalled.
 set -euo pipefail
 
 JOB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -113,6 +115,13 @@ PYEOF
 
 alive() { kill -0 "$1" 2>/dev/null; }
 
+# True when the pid is (still) a supervisor started by `start`, not a reused pid.
+is_supervisor() {
+  local args
+  args="$(ps -o args= -p "$1" 2>/dev/null)" || return 1
+  case "$args" in *"remote.sh _supervise"*) return 0 ;; *) return 1 ;; esac
+}
+
 case "${1:-}" in
   setup)
     bash env/bootstrap.sh ;;
@@ -127,7 +136,8 @@ case "${1:-}" in
     fi
     if [ -f state/pids ]; then
       while read -r pid _; do
-        if [ -n "$pid" ] && alive "$pid"; then
+        case "$pid" in '' | *[!0-9]*) continue ;; esac
+        if alive "$pid" && is_supervisor "$pid"; then
           echo "remote.sh: already running (pid $pid); use cancel first" >&2
           exit 1
         fi
@@ -144,8 +154,11 @@ case "${1:-}" in
     else
       nohup bash launch/remote.sh _supervise "$@" >launch.log 2>&1 </dev/null &
     fi
-    echo $! >state/pids
-    echo "remote.sh: started (pid $!); log: $JOB_DIR/launch.log" ;;
+    supervisor=$!
+    echo "$supervisor" >state/pids
+    # a supervisor that already finished (and emptied state/pids) must not stay recorded
+    if ! is_supervisor "$supervisor"; then : >state/pids; fi
+    echo "remote.sh: started (pid $supervisor); log: $JOB_DIR/launch.log" ;;
   _supervise)  # internal: runs local.sh and keeps state/status.json fresh
     shift
     need_env
@@ -156,7 +169,8 @@ case "${1:-}" in
       sleep "${REMOTE_STATUS_INTERVAL:-30}"
     done
     wait "$child" || true
-    progress quiet || true ;;
+    progress quiet || true
+    : >state/pids ;;  # finished: nothing left for start/cancel to act on
   status)
     need_env
     progress report ;;
@@ -169,6 +183,10 @@ case "${1:-}" in
       left=""
       while read -r pid _; do
         case "$pid" in '' | *[!0-9]*) continue ;; esac
+        if ! is_supervisor "$pid"; then
+          echo "remote.sh: pid $pid is not this job's supervisor any more (finished, or the pid was reused); not signalled"
+          continue
+        fi
         pids="$pids $pid"
         # the recorded pid leads its own process group (setsid): stop the whole group, else the pid and its children
         kill -TERM -- "-$pid" 2>/dev/null || {

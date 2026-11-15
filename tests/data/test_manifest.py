@@ -516,5 +516,25 @@ class LedgerReadTests(unittest.TestCase):
             self.assertEqual(manifest._read_ledger(Path(tmp)), entries)
 
 
+
+class ProposalKindDocsTests(unittest.TestCase):
+    """The data-workflow skill and docs list every proposal kind and the ode_measurements columns."""
+
+    def test_skill_and_docs_match_the_manifest_schemas(self):
+        from scripts import state
+        from scripts.ode import measurements
+        skill = (state.ROOT / ".claude" / "skills" / "data-workflow" / "SKILL.md").read_text(encoding="utf-8")
+        docs = (state.ROOT / "docs" / "data-workflow.md").read_text(encoding="utf-8")
+        for kind in manifest.KINDS:
+            self.assertIn(f"`{kind}`", skill, kind)
+        for column in measurements.COLUMNS:
+            self.assertIn(f"| `{column}` |", skill, column)
+            self.assertIn(f"`{column}`", docs, column)
+        for text in (skill, docs):
+            self.assertIn("literal `proposal`", text)
+            for value in (*measurements.USES, *measurements.ERROR_KINDS):
+                self.assertIn(f"`{value}`", text)
+
+
 if __name__ == "__main__":
     unittest.main()

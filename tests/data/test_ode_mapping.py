@@ -333,6 +333,63 @@ class CheckTests(OdeFixture):
     def test_dose_row_time_must_equal_viability_time(self):
         self.assertError(self.mutated(lambda d: d["rules"][2]["viability"].update(time=60.0)), "viability.time")
 
+    def test_dose_row_time_compared_with_float_tolerance(self):
+        # 0.03 h * 60 = 1.7999999999999998 must count as 1.8 min
+        def hours(d):
+            self.rewrite(d, [r.replace(",30,min,0", ",0.03,h,0").replace(",30,min,1", ",0.03,h,1")
+                             if r[:2] in ("M5", "M6") else r for r in ROWS])
+            d["time"]["factors"]["h"] = 60.0
+            d["rules"][2]["viability"]["time"] = 1.8
+        self.assertEqual(self.mutated(hours), [])
+
+    def test_contrast_row_time_must_equal_rule_time(self):
+        # a rule time meant in hours against a minute model, and a row at another time, are refused
+        errors = self.mutated(lambda d: d["rules"][1].update(time=24))
+        self.assertError(errors, "M3", "rule time")
+        self.assertError(errors, "M4", "rule time")
+
+        def other_time(d):
+            self.rewrite(d, [r.replace(",30,min,", ",60,min,") if r.startswith("M4") else r for r in ROWS])
+        errors = self.mutated(other_time)
+        self.assertError(errors, "M4", "rule time")
+        self.assertFalse(any("M3" in e for e in errors), errors)
+
+        def hours(d):  # 0.03 h is 1.8 min: accepted (float tolerance)
+            self.rewrite(d, [r.replace(",30,min,", ",0.03,h,") if r[:2] in ("M3", "M4") else r for r in ROWS])
+            d["time"]["factors"]["h"] = 60.0
+            d["rules"][1]["time"] = 1.8
+        self.assertEqual(self.mutated(hours), [])
+
+    def test_dose_response_readout_must_map_to_viability_observable(self):
+        two = OBSERVABLE_PY.replace("'pR',\n", "'pR',\n            'pS',\n")
+        make_zip(self.root / BUNDLE, observable=two)
+
+        def viability_ps(d):
+            d["inputs"]["model"]["sha256"] = sha(self.root / BUNDLE)
+            d["rules"][2]["viability"]["observable"] = "pS"
+        self.assertError(self.mutated(viability_ps), "M5", "viability observable")
+
+        def mapped(d):  # pR readout mapped to pS: consistent again
+            d["inputs"]["model"]["sha256"] = sha(self.root / BUNDLE)
+            d["readouts"] = [{"readout": "pR", "observable": "pS"}]
+            d["rules"][2]["viability"]["observable"] = "pS"
+        self.assertEqual(self.mutated(mapped), [])
+
+    def test_at_least_one_fit_row_must_be_scored(self):
+        def holdout_only(d):
+            d["rules"] = [d["rules"][1]]  # the contrast of hold-out rows only
+            d["unmapped"] = [{"measurement_id": m, "reason": "not used in this calibration"}
+                             for m in ("M1", "M2", "M5", "M6")]
+        self.assertError(self.mutated(holdout_only), "use=fit")
+
+        def fit_reference_only(d):  # a use=fit row that is only a contrast reference is not scored
+            self.rewrite(d, [r.replace("holdout", "fit") if r.startswith("M3") else r for r in ROWS])
+            d["rules"] = [{"rule_id": "R2", "type": "endpoint_contrast", "method": "ratio", "test": "ligand",
+                           "reference": "ctrl", "time": 30.0, "measurements": ["M3"]}]
+            d["unmapped"] = [{"measurement_id": m, "reason": "not used in this calibration"}
+                             for m in ("M1", "M2", "M4", "M5", "M6")]
+        self.assertError(self.mutated(fit_reference_only), "use=fit")
+
     def test_rule_type_is_not_a_method_name(self):
         for kind in ("rows", "keys", "condition", "forbid_dose"):
             errors = self.mutated(lambda d, k=kind: d["rules"][0].update(type=k))

@@ -22,14 +22,18 @@ Proposal conventions:
   * results_sha256 is the sha256 of results.tar.gz itself;
   * good restarts = ok restarts with score <= best * (1 + good_fit_margin);
   * poorly_constrained = log10(good_max / good_min) > POORLY_CONSTRAINED_LOG10_SPAN;
-  * `start` is the model's nominal value, read from selftest/validate.json of the archive (the selftest's
-    validate at nominal values, hash-verified like every file); null when the archive has no such file;
+  * `start` is the model's nominal value, computed locally by the reproduce step from the trusted cache copy
+    of the bundle (`run.py validate` at nominal values); the archive's selftest/validate.json comes from the
+    remote machine and is never used for it (hashes only prove it is the file the remote side listed).
+    null when the reproduce step gives no finite nominal value for a parameter (unknown, never 0);
   * `partial` is true when results.json says so or fewer than settings.restarts restarts are ok (a missing
     or failed restart); failed restarts are listed with their status and excluded from the good restarts.
 
-`reproduce(root, job_id, params_file) -> float` is injectable. The default runs
+`reproduce(root, job_id, params_file) -> (score, nominal)` is injectable. The default runs
 `launch.py local validate <job-id> --params <file> --out <file>` (bootstrapping the cache environment when
-missing) and reads the score of the report (use=fit, the objective the restarts minimised).
+missing: this needs internet and builds ~/.cache/agentic-jobs/<job-id>/, minutes, even for ssh/slurm jobs)
+and reads the score of the report (use=fit, the objective the restarts minimised); then it runs the same
+validate without --params and returns that report's `params` (params_source "nominal") as `nominal`.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ import math
 import re
 import shutil
 import statistics
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -209,16 +214,28 @@ def cross_check(members: dict[str, Path], restarts: list[dict]) -> None:
                 raise ValueError(f"{name} {key} differs from the results.json entry of restart {r['restart']}")
 
 
-def default_reproduce(root: Path, job_id: str, params_file: Path) -> float:
-    """Score of `launch.py local validate <job-id> --params <file>` (use=fit)."""
+def default_reproduce(root: Path, job_id: str, params_file: Path) -> tuple[float, dict]:
+    """(score of `launch.py local validate <job-id> --params <file>` (use=fit), the local nominal values).
+
+    Both come from the locally unpacked, sha256-verified copy of the bundle, never from the archive.
+    """
     out = Path(params_file).with_name("reproduced.json")
     code = launch.validate(root, job_id, str(params_file), "fit", str(out))
     if code != 0:
         raise ValueError(f"launch.py local validate failed (exit {code}); cannot reproduce the best score")
-    score = strict_json(out.read_bytes()).get("score")
+    report = strict_json(out.read_bytes())
+    score = report.get("score") if isinstance(report, dict) else None
     if not _number(score):
         raise ValueError("the reproduced score is not a finite number")
-    return float(score)
+    out = Path(params_file).with_name("nominal.json")
+    code = launch.validate(root, job_id, None, "fit", str(out))
+    if code != 0:
+        raise ValueError(f"launch.py local validate at nominal values failed (exit {code})")
+    report = strict_json(out.read_bytes())
+    if (not isinstance(report, dict) or report.get("params_source") != "nominal"
+            or not isinstance(report.get("params"), dict)):
+        raise ValueError("the local nominal validate report has no nominal params")
+    return float(score), report["params"]
 
 
 def _stats(fit: list[dict], restarts: list[dict], good: list[int], best: dict, start: dict) -> list[dict]:
@@ -234,14 +251,11 @@ def _stats(fit: list[dict], restarts: list[dict], good: list[int], best: dict, s
     return rows
 
 
-def _start_values(members: dict[str, Path], names: list[str]) -> dict:
-    path = members.get("selftest/validate.json")
-    if path is None:
-        return {}
-    params = strict_json(path.read_bytes()).get("params")
-    if not isinstance(params, dict):
-        return {}
-    return {n: float(params[n]) for n in names if _number(params.get(n))}
+def _start_values(nominal, names: list[str]) -> dict:
+    """The locally computed nominal values of the fitted names (finite numbers only; others stay unknown)."""
+    if not isinstance(nominal, dict):
+        raise ValueError("the reproduce step must return the local nominal values as an object")
+    return {n: float(nominal[n]) for n in names if _number(nominal.get(n))}
 
 
 def _g(value) -> str:
@@ -325,7 +339,10 @@ def import_results(root, job_id: str, *, reproduce=None) -> Path:
                              "no restart found a meaningful fit")
         params_file = tmp / "best-params.json"
         params_file.write_text(json.dumps(best["params"], indent=2) + "\n", encoding="utf-8")
-        reproduced = reproduce(root, job_id, params_file)
+        outcome = reproduce(root, job_id, params_file)
+        if not isinstance(outcome, tuple) or len(outcome) != 2:
+            raise ValueError("the reproduce step must return (score, nominal values)")
+        reproduced, nominal = outcome
         if not _number(reproduced):
             raise ValueError("the reproduced score is not a finite number")
         rtol = settings["reproduce_rtol"]
@@ -348,7 +365,7 @@ def import_results(root, job_id: str, *, reproduce=None) -> Path:
                          for r in restarts],
             "partial": bool(results.get("partial")) or len(ok) < settings["restarts"],
             "best_restart": best["restart"], "good_restarts": good,
-            "parameters": _stats(fit, good_rows, good, best, _start_values(members, [f["name"] for f in fit])),
+            "parameters": _stats(fit, good_rows, good, best, _start_values(nominal, [f["name"] for f in fit])),
             "heuristics_note": HEURISTICS, "figures": figures,
         }
         text = json.dumps(proposal, indent=2, allow_nan=False) + "\n"
@@ -375,6 +392,11 @@ def main(argv: list[str] | None = None) -> int:
         path = import_results(root, args.job_id, reproduce=default_reproduce)
     except (ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as exc:
+        print(f"error: the local reproduce step failed: {exc} (bootstrapping the job environment in the cache "
+              "needs internet; see launch.log / env_report.json in the cache job folder); nothing was written",
+              file=sys.stderr)
         return 1
     print(f"proposal: {path.relative_to(root).as_posix()}")
     return 0

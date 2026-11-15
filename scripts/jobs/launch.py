@@ -8,7 +8,7 @@
                                                   bootstrap if needed, then run.py validate (foreground)
   launch.py print <job-id> --host NAME            the numbered scp/ssh commands to run by hand (runs nothing)
   launch.py ssh submit <job-id> --host NAME --authorization "<quote>"
-                                                  scp the bundle, set up, start (steps 1-3 of `print`); logs first
+                                                  mkdir, scp the bundle, set up, start (steps 1-4 of `print`); logs first
   launch.py ssh status|fetch|cancel <job-id> --host NAME
   launch.py slurm submit <job-id> [--resubmit]    on a SLURM login node: setup, then sbatch the array
                                                   (prints the commands when sbatch is not on PATH)
@@ -269,8 +269,14 @@ def load_hosts() -> dict:
 
 
 def cores_parallel(settings: dict, max_cores: int) -> int:
-    """K = min(parallel, max_cores // max(workers, 1)), at least 1 (workers -1 counts as 1)."""
-    return max(1, min(int(settings["parallel"]), int(max_cores) // max(int(settings["workers"]), 1)))
+    """K = min(parallel, max_cores // workers), at least 1.
+
+    workers -1 lets scipy use every core of the machine, so it counts as max_cores (K = 1). (Under SLURM,
+    -1 means the task's allocation, slurm.cpus_per_task: see run.effective_workers.)
+    """
+    workers = int(settings["workers"])
+    workers = int(max_cores) if workers == -1 else max(workers, 1)
+    return max(1, min(int(settings["parallel"]), int(max_cores) // workers))
 
 
 def resolve_host(name: str, settings: dict, configured_only: bool) -> dict:
@@ -320,7 +326,10 @@ def print_commands(root: Path, job_id: str, host_name: str) -> list[str]:
     host = resolve_host(host_name, settings, configured_only=False)
     steps = ssh_steps(job_id, (job_dir / "bundle.tar.gz").resolve(), host)
     order = ("mkdir", "upload", "setup", "start", "status", "collect", "fetch")
-    return [*(f"{i}. {_shown(steps[name])}" for i, name in enumerate(order, 1)), "", NOTICE]
+    lines = [f"{i}. {_shown(steps[name])}" for i, name in enumerate(order, 1)]
+    # scp needs the local target folder (run from the repository root)
+    lines[-1] = f"{len(order)}. mkdir -p inputs/{RESULTS[1]}/{job_id} && {_shown(steps['fetch'])}"
+    return [*lines, "", NOTICE]
 
 
 def _bundle_sha(job_dir: Path) -> str:

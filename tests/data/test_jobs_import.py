@@ -16,6 +16,8 @@ from scripts.jobs import import_results, launch
 
 SEEDS = [11, 12, 13]
 GOOD = {"kf1": 0.5, "kf2": 0.1}
+NOMINAL = {"kf1": 1.0, "kf2": 0.5}  # computed locally by the reproduce step (the trusted cache copy)
+REMOTE_NOMINAL = {"kf1": 7.0, "kf2": 7.0}  # the archive's selftest/validate.json: untrusted, never used
 
 
 def sha(data: bytes) -> str:
@@ -53,7 +55,7 @@ class ImportFixture(JobFixture):
         for r in restarts:
             files[f"restarts/restart-{r['restart']}/result.json"] = dump(r)
             files[f"restarts/restart-{r['restart']}/log.txt"] = b"log\n"
-        files["selftest/validate.json"] = dump({"params": {"kf1": 1.0, "kf2": 0.5}, "score": 0.1})
+        files["selftest/validate.json"] = dump({"params": REMOTE_NOMINAL, "score": 0.1})
         env_report = {"status": "ok", "python": {"version": "3.12.15", "implementation": "CPython"},
                       "packages": {"biomass": "0.14.0", "numpy": "2.5.4"}}
         env_report.update(env or {})
@@ -81,14 +83,14 @@ class ImportFixture(JobFixture):
         self.archive_path.write_bytes(buf.getvalue())
         return self.archive_path
 
-    def fake(self, score=1.0):
+    def fake(self, score=1.0, nominal=None):
         def reproduce(root, job_id, params_file):
             self.calls.append((job_id, json.loads(Path(params_file).read_text(encoding="utf-8"))))
-            return score
+            return score, dict(NOMINAL if nominal is None else nominal)
         return reproduce
 
-    def run_import(self, score=1.0):
-        return import_results.import_results(self.root, self.job_id, reproduce=self.fake(score))
+    def run_import(self, score=1.0, nominal=None):
+        return import_results.import_results(self.root, self.job_id, reproduce=self.fake(score, nominal))
 
     def proposal(self, **kw):
         return json.loads(self.run_import(**kw).read_text(encoding="utf-8"))
@@ -212,8 +214,9 @@ class ProposalTests(ImportFixture):
         self.assertEqual(rows["kf1"]["kind"], "parameter")
         self.assertEqual(rows["kf1"]["unit"], "1/min")
         self.assertEqual((rows["kf1"]["lower"], rows["kf1"]["upper"]), (0.001, 10.0))
-        self.assertEqual(rows["kf1"]["start"], 1.0)  # selftest/validate.json = nominal values
-        self.assertEqual(rows["kf2"]["start"], 0.5)
+        # start = the nominal values computed locally, never the archive's selftest/validate.json
+        self.assertEqual(rows["kf1"]["start"], NOMINAL["kf1"])
+        self.assertEqual(rows["kf2"]["start"], NOMINAL["kf2"])
         self.assertEqual(set(rows["kf1"]), {"name", "kind", "unit", "start", "lower", "upper", "best", "good_min",
                                             "good_median", "good_max", "poorly_constrained"})
 
@@ -348,23 +351,52 @@ class HardeningTests(ImportFixture):
 class DefaultReproduceTests(ImportFixture):
     def test_default_reproduce_runs_launch_validate_with_best_params(self):
         self.write_archive()
-        seen = {}
+        seen = []
+        local = {"kf1": 2.0, "kf2": 0.3}
 
         def fake_validate(root, job_id, params, use, out):
-            seen.update(job_id=job_id, params=json.loads(Path(params).read_text(encoding="utf-8")), use=use)
-            Path(out).write_text(json.dumps({"score": 1.0, "use": use}), encoding="utf-8")
+            given = json.loads(Path(params).read_text(encoding="utf-8")) if params else None
+            seen.append({"job_id": job_id, "params": given, "use": use})
+            report = ({"score": 1.0, "use": use, "params_source": "given", "params": given} if params else
+                      {"score": 3.0, "use": use, "params_source": "nominal", "params": local})
+            Path(out).write_text(json.dumps(report), encoding="utf-8")
             return 0
 
         with mock.patch.object(launch, "validate", fake_validate):
             path = import_results.import_results(self.root, self.job_id)
-        self.assertEqual(seen, {"job_id": self.job_id, "params": GOOD, "use": "fit"})
-        self.assertTrue(path.is_file())
+        self.assertEqual(seen, [{"job_id": self.job_id, "params": GOOD, "use": "fit"},
+                                {"job_id": self.job_id, "params": None, "use": "fit"}])
+        rows = {p["name"]: p for p in json.loads(path.read_text(encoding="utf-8"))["parameters"]}
+        self.assertEqual({n: r["start"] for n, r in rows.items()}, local)
+
+    def test_default_reproduce_refuses_a_report_without_nominal_params(self):
+        self.write_archive()
+
+        def fake_validate(root, job_id, params, use, out):
+            report = {"score": 1.0, "params_source": "given"} if params else {"score": 3.0, "params_source": "x"}
+            Path(out).write_text(json.dumps(report), encoding="utf-8")
+            return 0
+
+        with mock.patch.object(launch, "validate", fake_validate), \
+                self.assertRaisesRegex(ValueError, "nominal"):
+            import_results.import_results(self.root, self.job_id)
 
     def test_default_reproduce_failure_is_a_refusal(self):
         self.write_archive()
         with mock.patch.object(launch, "validate", lambda *a: 1), \
                 self.assertRaisesRegex(ValueError, "validate.*exit 1"):
             import_results.import_results(self.root, self.job_id)
+
+    def test_cli_reports_a_failed_bootstrap_cleanly(self):
+        self.write_archive()
+        err = io.StringIO()
+
+        def broken(*_):
+            raise import_results.subprocess.CalledProcessError(1, ["bash", "env/bootstrap.sh"])
+        with mock.patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": str(self.root)}), \
+                mock.patch.object(import_results, "default_reproduce", broken), mock.patch("sys.stderr", err):
+            self.assertEqual(import_results.main([self.job_id]), 1)
+        self.assertIn("bootstrap", err.getvalue())
 
     def test_cli(self):
         self.write_archive()

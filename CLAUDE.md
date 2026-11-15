@@ -243,6 +243,8 @@ and `record_session_id` = that ODE session (the hook refuses anything else, incl
 ode_mapping file named in the brief). Score the hold-out once with
 `scripts/jobs/score_holdout.py <job-id> --approval <id>`. Restart agreement and poorly-constrained flags are
 heuristics, not identifiability proofs. The hook also refuses ODE briefs naming a data-analyst path/session
-id or an orchestrator seeds/mapping/ode_mapping/calibration file without a `DATA_INPUT` line. Hold-out scoring
+id or an orchestrator seeds/mapping/ode_mapping/calibration file without a `DATA_INPUT` line. Any brief naming a
+path under a job folder (`runs/orchestrator/<p>/jobs/`, e.g. report.md) or `inputs/calibration-results/` is
+refused, except the ode-modeler's `DATA_INPUT` proposal and its own job folder. Hold-out scoring
 uses the bundled model with the accepted values and is independent of when the ode-modeler applies them. See
 docs/ode-workflow.md.

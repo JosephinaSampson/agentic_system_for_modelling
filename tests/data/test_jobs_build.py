@@ -351,6 +351,20 @@ class RuntimeConcurrencyTests(unittest.TestCase):
         owner = json.loads((self.root / "out" / "restart-1" / "owner.json").read_text())
         self.assertEqual(owner["pid"], os.getpid())
 
+    def test_workers_minus_one_uses_the_slurm_allocation(self):
+        (self.root / "job.json").write_text(json.dumps({"job_id": "job-000000000000", "settings": {
+            "restarts": 2, "seeds": [1, 2], "optimizer_options": {}, "workers": -1}}))
+        done = {"restart": 1, "seed": 1, "score": 1.0, "status": "ok", "params": {}, "wall_time_s": 0.0}
+        for env, expected in (({"SLURM_CPUS_PER_TASK": "6"}, 6), ({}, -1), ({"SLURM_CPUS_PER_TASK": "x"}, -1)):
+            shutil.rmtree(self.root / "out", ignore_errors=True)
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(run, "status"), \
+                    mock.patch.object(run, "run_restart", return_value=done) as restart, \
+                    mock.patch("sys.stdout", io.StringIO()):
+                if not env:
+                    os.environ.pop("SLURM_CPUS_PER_TASK", None)
+                self.assertEqual(run.cmd_calibrate(self.root, 1), 0)
+            self.assertEqual(restart.call_args.args[4], expected, env)
+
     def test_selftest_cap_is_hard(self):
         self.job()
 

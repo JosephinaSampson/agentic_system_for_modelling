@@ -186,6 +186,25 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(ms["c"]["target"], 3.0)
         self.assertTrue(math.isnan(ms["f"]["target"]))  # no reference of that readout and use: nan, no raise
 
+    def test_contrast_and_dose_row_times_must_equal_the_rule_time(self):
+        rule = {"rule_id": "ec", "type": "endpoint_contrast", "method": "ratio", "test": "drug",
+                "reference": "ref", "time": 60.0, "measurements": ["a", "b"]}
+        with self.assertRaisesRegex(ValueError, "a.*rule time"):
+            compare.resolve(mapping([rule]), [row("a", "drug", 24.0, 6.0), row("b", "ref", 60.0, 2.0)])
+        rows = [row("a", "drug", 1.0, 6.0, unit="h"), row("b", "ref", 60.0, 2.0)]
+        self.assertEqual(compare.resolve(mapping([rule]), rows)["measurements"]["a"]["time"], 60.0)
+        rule.update(time=1.8)  # 0.03 h * 60 = 1.7999999999999998: equal within the tolerance
+        rows = [row("a", "drug", 0.03, 6.0, unit="h"), row("b", "ref", 1.8, 2.0)]
+        self.assertEqual(compare.resolve(mapping([rule]), rows)["measurements"]["a"]["time"], 1.8)
+        dose = self._dose_rule({"form": "inhibitor_species", "species": "I"})
+        dose["measurements"] = ["d1"]
+        with self.assertRaisesRegex(ValueError, "d1.*viability.time"):
+            compare.resolve(mapping([dose]), [row("d1", "drug", 24.0, 0.5, dose=2.0, dose_unit="nM")])
+
+    def test_spec_carries_the_dose_model_unit(self):
+        spec = compare.resolve(mapping([tc("absolute", ["m1"])]), [row("m1", "ctrl", 1.0, 1.0)])
+        self.assertEqual(spec["dose_model_unit"], "nM")
+
     def test_inhibitor_species(self):
         rows = [row("d1", "drug", 48.0, 0.5, dose=2.0, dose_unit="nM")]
         rule = self._dose_rule({"form": "inhibitor_species", "species": "I"})

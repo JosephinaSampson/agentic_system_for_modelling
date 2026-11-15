@@ -1004,6 +1004,67 @@ class OdeCalibrationInputTests(HoldoutFixture):
             self.refused(self.task(line=line), "blocked")
         self.assertEqual(self.hook("ode-modeler", ["x"]).returncode, 2)
 
+    def test_job_files_and_returned_results_refused_without_data_input(self):
+        job = self.proposal_path.parent.relative_to(self.root).as_posix()
+        results = f"inputs/calibration-results/{self.job_id}/results.tar.gz"
+        self.assertTrue((self.root / job / "report.md").is_file())
+        for prompt in (f"Apply the values in {job}/report.md to session {ODE_SESSION}.",
+                       f"See {job}/holdout_score.json for the hold-out.",
+                       f"Unpack {results} and set the best values.",
+                       f"Read the job folder {job}/ first.",
+                       f"Read {job.upper()}/Report.MD.",
+                       f"Read {job.replace('/', chr(92))}\\report.md.",
+                       f"Read runs/orchestrator/*/jobs/{self.job_id}/report.md.",
+                       "Results are under inputs/calibration-results/."):
+            with self.subTest(prompt=prompt):
+                self.refused(prompt, "calibration job")
+
+    def test_job_files_refused_alongside_the_accepted_calibration(self):
+        job = self.proposal_path.parent.relative_to(self.root).as_posix()
+        self.refused(self.task(tail=f" Values: {job}/report.md."), "calibration job")
+        self.refused(self.task(tail=f" Hold-out: {job}/holdout_score.json."), "calibration job")
+        self.refused(self.task(tail=f" Raw: inputs/calibration-results/{self.job_id}/results.tar.gz."),
+                     "calibration job")
+        # the proposal itself and its own job folder stay allowed with this DATA_INPUT
+        self.assertEqual(self.hook("ode-modeler", self.task(tail=f" Job folder: {job}/.")).returncode, 0)
+        self.assertEqual(self.hook("ode-modeler", self.task(tail=f" See {self.proposal_rel}.")).returncode, 0)
+        # but the job folder without that DATA_INPUT is refused
+        self.refused(f"Job folder: {job}/; record_session_id {ODE_SESSION}.", "calibration job")
+
+    def test_job_files_refused_for_every_gated_specialist(self):
+        job = self.proposal_path.parent.relative_to(self.root).as_posix()
+        for role in ("network-curator", "boolean-dynamics-modeler", "multicellular-configurator"):
+            with self.subTest(role=role):
+                result = self.hook(role, f"Use {job}/report.md.")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("calibration job", result.stderr)
+
+    def test_ordinary_and_handoff_ode_briefs_pass(self):
+        handoff = self.root / "runs" / "network-curator" / "neko-1" / "exports" / "a1" / "biomass_handoff.json"
+        handoff.parent.mkdir(parents=True)
+        handoff.write_text(json.dumps({"handoff_type": "neko-to-biomass", "network": {"nodes": ["A"]}}),
+                           encoding="utf-8")
+        for prompt in ("Build the model from the reactions; then run a simulation.",
+                       "STAGE_GATE {\"upstream_session_id\": \"neko-1\", \"outputs\": [\"A\"]}\n"
+                       f"Import the NeKo to BioMASS handoff {handoff.relative_to(self.root).as_posix()}.",
+                       "Notes are in runs/orchestrator/p1/notes.md; the jobs list is elsewhere."):
+            with self.subTest(prompt=prompt):
+                result = self.hook("ode-modeler", prompt)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_proposal_mapping_approval_and_job_sha_are_checked(self):
+        data = json.loads(self.proposal_path.read_text(encoding="utf-8"))
+        for n, (edit, pattern) in enumerate((
+                (lambda d: d["mapping"].update(approval="missing-approval"), "missing-approval"),
+                (lambda d: d["mapping"].update(sha256="0" * 64), "sha256"),
+                (lambda d: d.update(job_sha256="0" * 64), "job_sha256|job.json"))):
+            with self.subTest(n=n):
+                broken = json.loads(json.dumps(data))
+                edit(broken)
+                self.proposal_path.write_text(json.dumps(broken, indent=2) + "\n", encoding="utf-8")
+                self.approve_calibration(f"cal-h{n}")
+                self.refused(self.task(line=self.line(approval=f"cal-h{n}")), pattern)
+
     def test_record_session_id_spellings_and_joins(self):
         bad = ("RECORD_SESSION_ID other-session", "Record_Session_Id other-session",
                "record session id other-session", "record-session-id: other-session",

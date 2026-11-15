@@ -21,6 +21,17 @@ except ImportError:  # discovered with -s tests/data
 
 from scripts.jobs import launch
 
+def kill_group_at_cleanup(testcase, pgid):
+    """Last-resort cleanup: SIGKILL the process group even when the test fails or is interrupted."""
+    def kill():
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGKILL)
+    testcase.addCleanup(kill)
+
+
+# A harmless stand-in for a running supervisor: `ps -o args=` shows "... remote.sh _supervise".
+SUPERVISOR_LIKE = [sys.executable, "-c", "import time; time.sleep(300)", "remote.sh", "_supervise"]
+
 FAKE = """#!/usr/bin/env python3
 import json, os, shutil, sys
 name = os.path.basename(sys.argv[0])
@@ -116,12 +127,13 @@ class HostsTests(LauncherFixture):
 
     def test_cores_cap_parallel(self):
         s = self.job_settings()
-        self.assertEqual(launch.cores_parallel(s, 10 ** 6), s["parallel"] if s["workers"] < 1 else
+        self.assertEqual(launch.cores_parallel(s, 10 ** 6), 1 if s["workers"] == -1 else
                          max(1, min(s["parallel"], 10 ** 6 // s["workers"])))
         self.assertEqual(launch.cores_parallel({"parallel": 8, "workers": 4}, 8), 2)
         self.assertEqual(launch.cores_parallel({"parallel": 8, "workers": 4}, 2), 1)
         self.assertEqual(launch.cores_parallel({"parallel": 3, "workers": 1}, 64), 3)
-        self.assertEqual(launch.cores_parallel({"parallel": 3, "workers": -1}, 64), 3)
+        # workers -1 lets scipy use every core of the machine: one restart at a time
+        self.assertEqual(launch.cores_parallel({"parallel": 3, "workers": -1}, 64), 1)
 
 
 class PrintTests(LauncherFixture):
@@ -141,7 +153,8 @@ class PrintTests(LauncherFixture):
             f"4. {ssh} 'cd {rd}/{j} && ./launch/remote.sh start --parallel {k}'",
             f"5. {ssh} 'cd {rd}/{j} && ./launch/remote.sh status'",
             f"6. {ssh} 'cd {rd}/{j} && ./launch/remote.sh collect'",
-            f"7. scp -o BatchMode=yes labpc:{rd}/{j}/results.tar.gz inputs/calibration-results/{j}/"])
+            f"7. mkdir -p inputs/calibration-results/{j} && "
+            f"scp -o BatchMode=yes labpc:{rd}/{j}/results.tar.gz inputs/calibration-results/{j}/"])
         self.assertIn("only the bundle", out.lower())
         self.assertIn("leaves this machine", out)
         self.assertEqual(self.fake.calls(), [])  # printing runs nothing
@@ -354,6 +367,8 @@ class EndToEndTests(LauncherFixture):
         code, _, err = self.run_main("ssh", "submit", self.job_id, "--host", "lab", "--authorization", "ok")
         self.assertEqual(code, 0, err)
         remote = home / "jobs" / self.job_id
+        for pid in (remote / "state" / "pids").read_text().split():
+            kill_group_at_cleanup(self, int(pid))  # the remote supervisor leads its own process group
         self.assertTrue((home / "jobs" / f"{self.job_id}.tar.gz").is_file())
         self.assertTrue((remote / "job.json").is_file())
         code, out, err = self.run_main("ssh", "status", self.job_id, "--host", "lab")
@@ -402,8 +417,18 @@ class RemoteShTests(unittest.TestCase):
         path.chmod(0o755)
 
     def remote(self, *args, env=None):
-        return subprocess.run(["bash", str(self.job / "launch" / "remote.sh"), *args], capture_output=True,
+        done = subprocess.run(["bash", str(self.job / "launch" / "remote.sh"), *args], capture_output=True,
                               text=True, env={**self.env, **(env or {})}, timeout=60)
+        if args[:1] == ("start",) and done.returncode == 0:
+            for pid in (self.job / "state" / "pids").read_text().split():
+                kill_group_at_cleanup(self, int(pid))  # the supervisor leads its own process group
+        return done
+
+    def spawn(self, argv):
+        proc = subprocess.Popen(argv, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(proc.wait)
+        kill_group_at_cleanup(self, proc.pid)  # runs before the wait (cleanups are LIFO)
+        return proc
 
     def restart(self, n, host=None, pid=None, result=None, log=None):
         folder = self.job / "out" / f"restart-{n}"
@@ -463,15 +488,43 @@ class RemoteShTests(unittest.TestCase):
             time.sleep(0.2)
         self.assertEqual(alive, [])
 
-    def test_cancel_kills_recorded_pids(self):
-        procs = [subprocess.Popen(["sleep", "300"], start_new_session=True) for _ in range(2)]
-        self.addCleanup(lambda: [p.kill() for p in procs if p.poll() is None])
+    def test_cancel_kills_recorded_supervisors(self):
+        procs = [self.spawn(SUPERVISOR_LIKE) for _ in range(2)]
         (self.job / "state").mkdir()
         (self.job / "state" / "pids").write_text("".join(f"{p.pid}\n" for p in procs))
         done = self.remote("cancel")
         self.assertEqual(done.returncode, 0, done.stderr)
         for p in procs:
             self.assertEqual(p.wait(timeout=15), -signal.SIGTERM)
+        self.assertEqual((self.job / "state" / "pids").read_text(), "")
+
+    def test_cancel_and_start_ignore_a_reused_pid(self):
+        # a recorded pid now belonging to an unrelated process (pid reuse) is never signalled nor blocks start
+        other = self.spawn(["sleep", "300"])
+        (self.job / "state").mkdir()
+        (self.job / "state" / "pids").write_text(f"{other.pid}\n")
+        done = self.remote("cancel")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        time.sleep(0.3)
+        self.assertIsNone(other.poll())
+        self.assertIn("not this job", done.stdout + done.stderr)
+        self.assertEqual((self.job / "state" / "pids").read_text(), "")
+        (self.job / "state" / "pids").write_text(f"{other.pid}\n")
+        done = self.remote("start")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotEqual((self.job / "state" / "pids").read_text().split(), [str(other.pid)])
+        self.assertIsNone(other.poll())
+
+    def test_supervise_clears_pids_when_it_finishes(self):
+        (self.job / "launch" / "local.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+        done = self.remote("start")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        pids = self.job / "state" / "pids"
+        for _ in range(100):
+            if pids.read_text().strip() == "":
+                break
+            time.sleep(0.1)
+        self.assertEqual(pids.read_text().strip(), "")
 
     def test_cancel_runs_scancel_for_the_recorded_array(self):
         self.tool("scancel")
@@ -545,7 +598,7 @@ class RemoteShTests(unittest.TestCase):
     def test_cancel_kills_group_members_that_ignore_term(self):
         (self.job / "launch" / "local.sh").write_text(
             "#!/usr/bin/env bash\nbash -c 'trap \"\" TERM; sleep 300' &\nwait\n")
-        self.assertEqual(self.remote("start").returncode, 0)
+        self.assertEqual(self.remote("start").returncode, 0)  # remote() registers the killpg cleanup
         time.sleep(1)
         pid = int((self.job / "state" / "pids").read_text().split()[0])
         self.assertEqual(self.remote("cancel").returncode, 0)

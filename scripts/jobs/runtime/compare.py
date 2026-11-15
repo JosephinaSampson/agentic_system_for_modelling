@@ -14,6 +14,7 @@ and returns a JSON-serialisable `spec` (string keys only; times and doses are fl
   measurements     {id: {rule_id, type, observable, condition, time, dose, dose_condition, use, value,
                          target, role}}   time/dose in model units; role is "fit_target" or "reference"
   time_model_unit  the model time unit
+  dose_model_unit  the model dose unit (mapping["dose"]["model_unit"]; the dose axis of the figures)
 
 Runner contract:
   * for every name in spec["conditions"] and spec["dose_conditions"], call
@@ -33,7 +34,8 @@ Rules (per measurement; a missing sim, solver failure or zero denominator gives 
   max_normalized          v(t) / max of v over the simulated points (condition, time) of the rule's own
                           measurements for that observable (all conditions of the rule, one max per observable)
   absolute                v(t)
-  endpoint_contrast       the rows of the test condition are predicted as ratio v_test(T)/v_ref(T) or
+  endpoint_contrast       every row's converted time must equal the rule time T (math.isclose, rel_tol 1e-9;
+                          ValueError otherwise); the rows of the test condition are predicted as ratio v_test(T)/v_ref(T) or
                           difference v_test(T)-v_ref(T); their target is the same contrast of the data
                           (test value vs the mean of the reference rows of the same readout AND the same
                           `use`, so fit targets never see hold-out references; none gives a nan target). Reference
@@ -42,8 +44,9 @@ Rules (per measurement; a missing sim, solver failure or zero denominator gives 
                           D = dose * mapping["dose"]["factors"][dose_unit] (required; ValueError when a unit
                           has no positive factor); K is in the model dose unit mapping["dose"]["model_unit"].
                           A fitted K <= 0 gives a nan scale (hence nan predictions and PENALTY).
-                          Every dose row is evaluated at viability.time (the mapping check requires each dose
-                          row's converted time to equal it); rows of one condition with the same converted
+                          Every dose row is evaluated at viability.time (each dose row's converted time must
+                          equal it within rel_tol 1e-9, ValueError otherwise; the mapping check also requires the
+                          rows' readout to map to viability.observable); rows of one condition with the same converted
                           dose share one dose condition.
                           target_activity_scaling multiplies the parameter by 1/(1 + D/K);
                           inhibitor_species sets the species' initial amount to D.
@@ -58,6 +61,7 @@ from __future__ import annotations
 import math
 
 PENALTY = 1e12
+TIME_RTOL = 1e-9  # a row's converted time equals a rule time within this relative tolerance
 
 
 def _overrides(items) -> dict:
@@ -73,6 +77,11 @@ def _dose_factor(mapping: dict, unit) -> float:
     if unit not in factors or not factors[unit] > 0:
         raise ValueError(f"dose_unit {unit!r} has no positive factor in dose.factors")
     return float(factors[unit])
+
+
+def _same_time(mid: str, converted: float, time: float, what: str) -> None:
+    if not math.isclose(converted, time, rel_tol=TIME_RTOL):
+        raise ValueError(f"measurement {mid}: time {converted!r} (model unit) is not {what} {time!r}")
 
 
 def resolve(mapping: dict, rows: list[dict]) -> dict:
@@ -97,6 +106,7 @@ def resolve(mapping: dict, rows: list[dict]) -> dict:
                 if rule["method"] == "relative_to_condition":
                     _times(times, rule["reference"], entry["time"])
             elif kind == "endpoint_contrast":
+                _same_time(mid, entry["time"], float(rule["time"]), "the rule time")
                 entry["time"] = float(rule["time"])
                 for name in (rule["test"], rule["reference"]):
                     _times(times, name, entry["time"])
@@ -104,7 +114,8 @@ def resolve(mapping: dict, rows: list[dict]) -> dict:
                     entry["role"] = "reference"
             else:
                 via, drug = rule["viability"], rule["drug_entry"]
-                entry["observable"] = via["observable"]
+                entry["observable"] = via["observable"]  # the check requires the readout to map to it
+                _same_time(mid, entry["time"], float(via["time"]), "viability.time")
                 entry["time"] = float(via["time"])
                 entry["dose"] = float(row["dose"]) * _dose_factor(mapping, row["dose_unit"])
                 name = f"{rid}|{row['condition']}|dose={entry['dose']!r}"
@@ -128,7 +139,8 @@ def resolve(mapping: dict, rows: list[dict]) -> dict:
                                                     sum(refs) / len(refs) if refs else None)
     fit = [{"name": f["name"], "kind": f["kind"], "lower": float(f["lower"]), "upper": float(f["upper"]),
             "log10_lower": math.log10(f["lower"]), "log10_upper": math.log10(f["upper"])} for f in mapping["fit"]]
-    return {"time_model_unit": mapping["time"]["model_unit"], "conditions": conditions,
+    return {"time_model_unit": mapping["time"]["model_unit"], "dose_model_unit": mapping["dose"]["model_unit"],
+            "conditions": conditions,
             "dose_conditions": dose_conditions,
             "times_model": {name: sorted(values) for name, values in times.items()},
             "rules": mapping["rules"], "fit": fit, "measurements": meas}

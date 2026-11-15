@@ -401,6 +401,16 @@ def _status_best_effort(root: Path) -> None:
         print(f"warning: status.json not updated: {exc}", file=sys.stderr)
 
 
+def effective_workers(workers: int) -> int:
+    """scipy `workers` for one restart: -1 means every core, which under SLURM is the task's allocation
+    (SLURM_CPUS_PER_TASK, i.e. settings slurm.cpus_per_task), not every core of the node."""
+    if workers == -1:
+        cpus = os.environ.get("SLURM_CPUS_PER_TASK", "")
+        if cpus.isdigit() and int(cpus) >= 1:
+            return int(cpus)
+    return workers
+
+
 def cmd_calibrate(root: Path, restart: int) -> int:
     job = read_json(root / "job.json")
     settings = job["settings"]
@@ -417,7 +427,7 @@ def cmd_calibrate(root: Path, restart: int) -> int:
     write_json(out_dir / "owner.json", {"host": socket.gethostname(), "pid": os.getpid(), "started_at": now()})
     _status_best_effort(root)
     result = run_restart(root, restart, settings["seeds"][restart - 1], settings["optimizer_options"],
-                         settings["workers"], out_dir)
+                         effective_workers(settings["workers"]), out_dir)
     _status_best_effort(root)
     print(f"restart {restart}: {result['status']} score={result['score']} wall_time_s={result['wall_time_s']}")
     return 0 if result["status"] == "ok" else 1
@@ -588,7 +598,7 @@ def _figures(folder: Path, rows: dict, results: list[dict], spec: dict, traces: 
             if pred:
                 ax.plot(*zip(*pred), "x-", color="tab:red", label="best fit")
             ax.set_title(f"{key[0]}: {key[1]} | {key[2]}", fontsize=9)
-            ax.set_xlabel(f"dose ({spec.get('dose_model_unit', 'model unit')})" if dose
+            ax.set_xlabel(f"dose ({spec.get('dose_model_unit') or 'model unit'})" if dose
                           else f"time ({spec['time_model_unit']})")
             ax.legend(fontsize=7)
         for ax in list(axes.flat)[len(groups):]:

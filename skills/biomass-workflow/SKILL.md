@@ -202,8 +202,11 @@ and `record_session_id` set to that proposal's ODE session (the brief names exac
 The Codex runtime has no dispatcher check for the calibration `DATA_INPUT` yet, so under Codex the
 specialist returns `blocked` for such a request.
 1. Read the proposal and the approval `outputs`: the accepted parameters. Ignore the others.
-2. Read the session's current configuration with `inspect_model`. The proposal's `unit` of each accepted
-   parameter must equal that parameter's configured unit; otherwise return `blocked` (never infer units).
+2. Read the session's current revision and configuration with `inspect_model`. The values were fitted to
+   one model revision: return `blocked` unless the session's current revision equals `proposal.model.revision`
+   (a later edit or regeneration means the calibration must be redone or re-approved). The proposal's `unit`
+   of each accepted parameter must equal that parameter's configured unit; otherwise return `blocked`
+   (never infer units).
 3. Apply exactly the accepted parameters at their `best` values through the server. `configure_model`
    replaces the whole configuration, so send it with every other configured value re-applied unchanged.
 4. Read back the stored values and compare each with the proposal; execution success is not enough.

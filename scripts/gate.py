@@ -567,6 +567,22 @@ def _check_ode_calibration_input(root, value, text):
     if record.get("session_id") != session:
         raise ValueError(f"calibration approval {approval_id} has session_id {record.get('session_id')!r}; "
                          f"it must be the proposal's ODE session {session}")
+    # The proposal must come from an approved mapping and from the job built beside it.
+    ref = proposal.get("mapping")
+    if not isinstance(ref, dict) or not all(isinstance(ref.get(k), str) and ref[k] for k in ("path", "sha256", "approval")):
+        raise ValueError(f"{rel} has no mapping {{path, sha256, approval}}")
+    try:
+        mapping_record = approvals.require_ode_mapping_approval(root, ref["approval"], ref["path"], ref["sha256"])
+    except ValueError as exc:
+        raise ValueError(f"{rel}: its mapping {ref['path']} (approval {ref['approval']}) is not an approved "
+                         f"ode_mapping: {exc}") from None
+    if mapping_record.get("session_id") != session:
+        raise ValueError(f"{rel}: mapping approval {ref['approval']} is for ODE session "
+                         f"{mapping_record.get('session_id')!r}, not the proposal's {session}")
+    job_json = (Path(root) / rel).parent / "job.json"
+    if job_json.is_symlink() or not job_json.is_file() \
+            or hashlib.sha256(job_json.read_bytes()).hexdigest() != proposal.get("job_sha256"):
+        raise ValueError(f"{rel}: job_sha256 does not match the job.json beside it")
     mentions, named = _record_session_values(text)
     if not mentions or set(named) != {session}:
         raise ValueError(f"the brief must contain record_session_id {session} (the proposal's ODE session) and "
@@ -739,6 +755,76 @@ def _check_orchestrator_mentions(root, text, allowed_rel):
                                  f"but {where}; {MENTION_RULE}")
 
 
+# Calibration job folders (runs/orchestrator/<p>/jobs/<job-id>/: report.md, holdout_score.json, figures,
+# bundle, ...) and returned results (inputs/calibration-results/) never reach a specialist: values reach the
+# ode-modeler only as the approved proposal on its DATA_INPUT line. Any spelling of such a path (case,
+# separators, globs) is refused, whether or not it exists, and so is any runs/orchestrator mention that
+# resolves into one; the exception is the DATA_INPUT calibration proposal itself and its own job folder.
+JOB_MENTION = re.compile(r"runs[\\/]+orchestrator[\\/]+[^\s\\/`'\"<>|]+[\\/]+jobs(?![\w.-])", re.I)
+RESULTS_MENTION = re.compile(r"inputs[\\/]+(?:\.[\\/]+)*calibration[\s_-]*results", re.I)
+JOB_RULE = ("calibration job folders (runs/orchestrator/<p>/jobs/) and returned results (inputs/calibration-results/) "
+            "reach a specialist only as the approved calibration proposal on the ode-modeler DATA_INPUT line; "
+            "see CLAUDE.md")
+
+
+def _job_area(root, path):
+    """True for a path inside runs/orchestrator/<p>/jobs or inputs/calibration-results (after resolving)."""
+    try:
+        parts = [p.casefold() for p in path.relative_to(root).parts]
+    except ValueError:
+        return False
+    return (parts[:2] == ["runs", "orchestrator"] and len(parts) >= 4 and parts[3] == "jobs") \
+        or parts[:2] == ["inputs", "calibration-results"]
+
+
+def _check_job_mentions(root, text, allowed_rels):
+    """Refuse calibration job files and returned results named in the (normalised) brief text."""
+    root = Path(root).resolve()
+    allowed = set()
+    for rel in allowed_rels:
+        if isinstance(rel, str) and CALIBRATION_REL.fullmatch(rel) and (root / rel).is_file():
+            proposal = (root / rel).resolve()
+            allowed |= {proposal, proposal.parent}
+    found = RESULTS_MENTION.search(text)
+    if found:
+        token = PATH_TOKEN.match(text, found.start()).group().rstrip(TRAILING)
+        raise ValueError(f"brief mentions calibration job results {token!r}; {JOB_RULE}")
+    for found in JOB_MENTION.finditer(text):
+        token = PATH_TOKEN.match(text, found.start()).group().rstrip(TRAILING)
+        paths = _resolve_mention(root, token)
+        if not paths or not set(paths) <= allowed:
+            raise ValueError(f"brief mentions calibration job path {token!r}; {JOB_RULE}")
+    for mention, paths in _orchestrator_mentions(root, text):
+        for path in paths:
+            if path not in allowed and _job_area(root, path):
+                raise ValueError(f"brief mentions {mention!r}, which is inside a calibration job folder or the "
+                                 f"returned results ({path.relative_to(root).as_posix()}); {JOB_RULE}")
+
+
+def check_job_mentions(root, specialist, task):
+    """The job-file rule for any gated specialist (the dispatch hook runs it for every one).
+
+    The exception for the ode-modeler's own proposal is taken, unverified, from any line starting with
+    `DATA_INPUT ` (so that a misplaced line gets check_data_input's placement message); the hook always runs
+    check_data_input afterwards for the ode-modeler, which verifies the line-1 DATA_INPUT and runs this rule
+    again with only the verified proposal exempt.
+    """
+    if task is None:
+        task = ""
+    if not isinstance(task, str):
+        raise ValueError("dispatch prompt must be a string")
+    allowed = []
+    if specialist == "ode_modeler":
+        for line in task.splitlines():
+            if line.startswith("DATA_INPUT "):
+                try:
+                    value = _strict_object(line[len("DATA_INPUT "):], "DATA_INPUT")
+                except ValueError:
+                    continue
+                allowed.append(value.get("calibration"))
+    _check_job_mentions(root, _detection_text(task), allowed)
+
+
 def _quote(line, match):
     """At most QUOTE_CHARS characters of the line around the match, with ... where cut."""
     start = max(0, min(match.start() - 20, len(line) - QUOTE_CHARS))
@@ -812,6 +898,7 @@ def check_data_input(root, specialist, task):
     if canonical is None:
         if DATA_PATH.search(text) or DATA_SESSION_ID.search(text):
             raise ValueError(DATA_REFUSAL)
+        _check_job_mentions(root, text, ())
         _check_orchestrator_mentions(root, text, None)
         return None
     value = _strict_object(lines[expected][len("DATA_INPUT "):], "DATA_INPUT")
@@ -824,6 +911,7 @@ def check_data_input(root, specialist, task):
     other = sorted(_data_sessions_named(text) - sessions)
     if other:
         raise ValueError(f"brief names data-analyst session(s) {', '.join(other)} outside its DATA_INPUT")
+    _check_job_mentions(root, text, (result.get("calibration"),))
     _check_orchestrator_mentions(root, text, result.get("seeds") or result.get("mapping")
                                or result.get("calibration"))
     return result

@@ -25,11 +25,14 @@ def main():
         role = inputs.get("subagent_type", "").split(":")[-1].replace("-", "_")
         if role not in GATED:
             return 0
-        from scripts.gate import check_data_input, check_task
+        from scripts.gate import check_data_input, check_job_mentions, check_task
         prompt = inputs.get("prompt")
         prompt = "" if prompt is None else prompt
         if not isinstance(prompt, str):
             raise ValueError("dispatch prompt must be a string")
+        # No gated specialist may be pointed at a calibration job folder or returned results (only the
+        # ode-modeler's approved DATA_INPUT proposal, verified below, is exempt).
+        check_job_mentions(ROOT, role, prompt)
         # ODE authoring has its own source/readiness/whole-model approval contract;
         # this hook enforces the two sequential Boolean downstream boundaries.
         if role in {"boolean_dynamics_modeler", "multicellular_configurator"}:

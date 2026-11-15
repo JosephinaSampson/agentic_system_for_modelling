@@ -192,6 +192,9 @@ class DataAnalystAccessTests(unittest.TestCase):
             )
 
 
+REVISION_RULE = "return `blocked` unless the session's current revision equals `proposal.model.revision`"
+
+
 class DataHandoffInstructionTests(unittest.TestCase):
     def test_specialists_and_reviewers_carry_data_handoff_rules(self):
         expected = {
@@ -204,10 +207,11 @@ class DataHandoffInstructionTests(unittest.TestCase):
             ".claude/skills/neko-workflow/SKILL.md": ("seeds.json", "hgnc_symbol"),
             ".claude/skills/maboss-workflow/SKILL.md": ("standalone approval",),
             ".claude/agents/ode-modeler.md": ("Applying an approved calibration", "record_session_id", "data-calibrated",
-                                              "re-apply every other configured value unchanged", "new revision"),
+                                              "re-apply every other configured value unchanged", "new revision",
+                                              REVISION_RULE),
             ".claude/skills/biomass-workflow/SKILL.md": ("Apply an approved calibration", "calibration_proposal.json",
                                                          "re-applied unchanged", "record_session_id", "data-calibrated", "inspect_model",
-                                                         "no dispatcher check", "never infer units"),
+                                                         "no dispatcher check", "never infer units", REVISION_RULE),
             "docs/ode-workflow.md": ("Calibrating parameters to measurements", "ode_calibration", "score_holdout.py",
                                      "popsize", "heuristic", "Only the bundle"),
             "docs/data-workflow.md": ("Data to ODE: calibration", "data-calibrated", "popsize"),

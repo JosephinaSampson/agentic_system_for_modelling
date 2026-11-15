@@ -6,7 +6,9 @@ Exact keys (missing or extra keys are refused):
   optimizer_options  exactly the BioMASS 0.14.0 differential-evolution defaults, written out:
                      strategy "best1bin", maxiter 50, popsize 3, tol 1e-4, mutation 0.1,
                      recombination 0.5, polish false (values may be changed, keys may not)
-  workers            int >= 1 or -1: scipy `workers` inside one restart (BioMASS default 1)
+  workers            int >= 1 or -1: scipy `workers` inside one restart (BioMASS default 1); -1 = every core,
+                     so ssh hosts run one restart at a time (K = 1) and under SLURM it means the task's
+                     allocation (slurm.cpus_per_task, read from SLURM_CPUS_PER_TASK)
   parallel           int >= 1: restarts run at the same time by local.sh / remote.sh start
   slurm              {"time": "HH:MM:SS", "cpus_per_task": int >= 1}
   good_fit_margin    float > 0: restarts within this fraction of the best score count as good fits (import)

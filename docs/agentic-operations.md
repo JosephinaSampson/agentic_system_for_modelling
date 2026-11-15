@@ -249,7 +249,13 @@ approval stage `ode_calibration` bound to that path and sha256, `outputs` a none
 parameter names, approval `session_id` = the proposal's ODE session, and the brief names
 `record_session_id` with exactly that session and no other. Any other calibration proposal or
 `ode_mapping.json` named in the brief, or a payload-like `DATA_INPUT` elsewhere, is refused; errors deny.
-`score_holdout.py` writes `holdout_score.json` once (accepted parameters at best, others at start; null start refuses).
+It also requires the proposal's `mapping` to be an approved `ode_mapping` and its `job_sha256` to match the
+`job.json` beside it. For every gated specialist the hook refuses any path under `runs/orchestrator/<p>/jobs/`
+or `inputs/calibration-results/` except the ode-modeler's `DATA_INPUT` proposal and its own job folder.
+`import_results.py` computes `start` (nominal values) locally while reproducing (needs internet; builds
+`~/.cache/agentic-jobs/<job-id>/`); the archive's selftest values are ignored.
+`score_holdout.py` writes `holdout_score.json` once with `n_rows` (accepted parameters at best, others at
+start; a null start or zero predicted hold-out rows refuses).
 
 ## Evidence and provenance
 

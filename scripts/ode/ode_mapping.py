@@ -29,12 +29,16 @@ Schema (schema_version 1; every key below is required unless marked optional):
       dose_response: drug_entry = {form: target_activity_scaling, parameter, K: number | {fit: name}}
                                 or {form: inhibitor_species, species}
                      viability = {observable, untreated (condition), time (model time unit)}
-                     every dose row's time, converted, must equal viability.time (dose rows are evaluated there)
-      endpoint_contrast: every test row needs a reference row of the same readout and the same `use`
+                     every dose row's time, converted, must equal viability.time (dose rows are evaluated there),
+                     and every row's readout must map (readouts) to viability.observable
+      endpoint_contrast: every test row needs a reference row of the same readout and the same `use`; every
+                     row's time, converted, must equal the rule time
+      (times are compared with math.isclose, rel_tol 1e-9: 0.03 h x 60 = 1.7999999999999998 is 1.8 min)
   fit: [{name, kind: parameter|initial, lower, upper, unit, justification: {source, locator} | {text}}]
   unmapped: [{measurement_id, reason}]
 
-Every measurement row is used by exactly one rule or listed in unmapped with a real reason.
+Every measurement row is used by exactly one rule or listed in unmapped with a real reason, and at
+least one use=fit row is scored by a rule (a contrast reference row is not scored).
 
 CLI:
   ode_mapping.py draft --purpose P --ode-session S --revision R --bundle ZIP --measurements CSV [--source ID:PATH ...]
@@ -73,6 +77,7 @@ FIT_KINDS = ("parameter", "initial")
 BASE_RULE_KEYS = {"rule_id", "type", "measurements"}
 OPTIONAL_RULE_KEYS = {"note"}
 SHA256 = user_sources.SHA256
+TIME_RTOL = 1e-9  # converted row times equal a rule time within this relative tolerance (float products)
 
 
 def _parts(rel) -> tuple:
@@ -213,6 +218,8 @@ class _Checker:
         self.time_factors: dict = {}
         self.dose_factors: dict = {}
         self.readouts: set[str] = set()
+        self.readout_observable: dict[str, object] = {}
+        self.scored: set[str] = set()  # measurement ids that are fit targets of a rule (not references)
         self.conditions: set[str] = set()
         self.fit_names: set[str] = set()
         self.fit_kinds: dict[str, object] = {}
@@ -359,6 +366,7 @@ class _Checker:
             if name in self.readouts:
                 self.error(f"readouts[{n}]: readout {name} is declared twice")
             self.readouts.add(name)
+            self.readout_observable.setdefault(name, obs)
             if self.names is not None and obs not in self.names["observables"]:
                 self.error(f"readouts[{n}]: observable {obs!r} is not an observable of the model "
                            f"({', '.join(self.names['observables'])})")
@@ -536,6 +544,18 @@ class _Checker:
         if method == "relative_to_condition":
             self.condition(label, "reference", item["reference"])
         self.forbid_dose(label, rows)
+        self.scored.update(row["measurement_id"] for row in rows)
+
+    def same_time(self, label: str, rows: list[dict], time, what: str) -> None:
+        """Each row's time, converted to the model unit, must equal `time` (relative tolerance 1e-9)."""
+        for row in rows:
+            factor = self.time_factors.get(row["time_unit"])
+            if factor is None or not _is_number(row["time"]):
+                continue  # reported by the time section / the table check
+            converted = row["time"] * factor
+            if not math.isclose(converted, time, rel_tol=TIME_RTOL):
+                self.error(f"{label}: measurement {row['measurement_id']} time {converted!r} (model unit) "
+                           f"must equal {what} {time!r}")
 
     def rule_endpoint_contrast(self, label: str, item: dict, rid) -> None:
         method = item.get("method")
@@ -552,7 +572,11 @@ class _Checker:
             self.error(f"{label}: test and reference conditions must differ")
         if not _is_number(item["time"]) or item["time"] < 0:
             self.error(f"{label}: time must be a finite number >= 0 (in the model time unit)")
+        else:  # rows are evaluated at the rule time: a row measured at another time (or unit) is refused
+            self.same_time(label, rows, item["time"], "the rule time")
         self.forbid_dose(label, rows)
+        if test_ok:
+            self.scored.update(row["measurement_id"] for row in rows if row["condition"] == item["test"])
         if test_ok and ref_ok:
             present = {row["condition"] for row in rows}
             for what in ("test", "reference"):
@@ -575,18 +599,20 @@ class _Checker:
                 self.error(f"{label}: measurement {row['measurement_id']} has no dose; "
                            "dose_response needs dosed rows")
         self.drug_entry(label, item["drug_entry"])
+        self.scored.update(row["measurement_id"] for row in rows)
         via = item["viability"]
         if isinstance(via, dict) and _is_number(via.get("time")):
-            for row in rows:
-                factor = self.time_factors.get(row["time_unit"])
-                if row["dose"] is not None and factor is not None and row["time"] * factor != via["time"]:
-                    self.error(f"{label}: measurement {row['measurement_id']} time {row['time'] * factor!r} "
-                               f"(model unit) must equal viability.time {via['time']!r}")
+            self.same_time(label, [row for row in rows if row["dose"] is not None], via["time"], "viability.time")
         if not isinstance(via, dict) or set(via) != {"observable", "untreated", "time"}:
             self.error(f"{label}: viability must have exactly observable, untreated, time")
             return
         if self.names is not None and via["observable"] not in self.names["observables"]:
             self.error(f"{label}: viability observable {via['observable']!r} is not an observable of the model")
+        for row in rows:  # the rows are compared with the viability observable: their readout must map to it
+            mapped = self.readout_observable.get(row["readout"])
+            if row["readout"] in self.readout_observable and mapped != via["observable"]:
+                self.error(f"{label}: measurement {row['measurement_id']} readout {row['readout']!r} maps to "
+                           f"observable {mapped!r}, not to the viability observable {via['observable']!r}")
         self.condition(label, "viability untreated condition", via["untreated"])
         if not _is_number(via["time"]) or via["time"] < 0:
             self.error(f"{label}: viability time must be a finite number >= 0 (in the model time unit)")
@@ -633,6 +659,11 @@ class _Checker:
             elif mid in self.uses:
                 self.uses[mid].append(label)
 
+    def fit_targets(self) -> None:
+        if self.rows and not any(self.rows[mid]["use"] == "fit" for mid in self.scored if mid in self.rows):
+            self.error("no use=fit measurement is scored by a rule (contrast reference rows are not scored): "
+                       "the calibration objective would be empty")
+
     def coverage(self) -> None:
         for mid, labels in self.uses.items():
             if not labels:
@@ -671,6 +702,7 @@ def load_and_check(root: Path, rel: str) -> tuple[dict, str, list[str]]:
         checker.rules_section(data["rules"])
         checker.unmapped_section(data["unmapped"])
         checker.coverage()
+        checker.fit_targets()
         checker.sources.uncited()
     return data, digest, checker.errors
 

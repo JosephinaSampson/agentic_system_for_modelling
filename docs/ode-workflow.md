@@ -91,7 +91,11 @@ Calibration is a portable job the researcher approves step by step; no specialis
    proposal, or a CSV under `runs/orchestrator/`) is mapped onto a captured, accepted model revision
    (`ode_mapping.py draft`, fill, `check`). The mapping fixes observables, condition overrides, comparison
    rules, fitted parameters with bounds and justification, hold-out rows (`use=holdout`) and the reasons
-   for any unmapped row.
+   for any unmapped row. `check` requires at least one `use=fit` row scored by a rule (a contrast
+   reference row is not scored), every endpoint-contrast row and every dose row measured at the rule's
+   time once converted (`time.factors`; compared with relative tolerance 1e-9: a rule `"time": 24` meant
+   as hours against a minute model is refused, not silently read as 24 min), and the rows of a
+   dose-response rule to have a readout mapped to `viability.observable`.
 2. **Approval.** The researcher approves the mapping: `ode_mapping` `stage_approval` (`session_id` = the
    ODE session, `outputs` = measurement ids used plus fitted names, `artifact` = path and sha256).
 3. **Build.** `build.py --mapping ... --approval ... --settings ...` writes the deterministic bundle and
@@ -102,8 +106,26 @@ Calibration is a portable job the researcher approves step by step; no specialis
    researcher's authorization quote, logged to `dispatch.jsonl` before anything runs), or `slurm submit`
    on a login node. Only the bundle (model, the measurement rows the rules use, parameter bounds) leaves
    the machine. `fetch` places `results.tar.gz` under `inputs/calibration-results/<job-id>/`.
+   `workers: -1` (scipy uses every core inside one restart) makes an ssh host run one restart at a time
+   (K = 1); under SLURM it means the task's allocation (`slurm.cpus_per_task`).
+   **SLURM return path, end to end:** on the login node, `launch.py slurm submit <job-id>` (or the printed
+   `sbatch` and `echo <id> > state/slurm_job` lines) from the unpacked job folder; follow it with
+   `bash launch/remote.sh status` there; when status shows every restart done (or failed), run
+   `bash launch/remote.sh collect` there, which writes `<job folder>/results.tar.gz`; bring that file back
+   to this repository with `mkdir -p inputs/calibration-results/<job-id> && scp <cluster>:<job folder>/results.tar.gz inputs/calibration-results/<job-id>/`
+   (or `launch.py ssh fetch <job-id> --host NAME` when the cluster is a configured host whose
+   `remote_dir` holds the job), then import.
+   **Partial fetch or import:** do not fetch before `status` shows the run done: `fetch` never overwrites,
+   so an early (partial) archive stays the job's archive. A failed import writes nothing and can be rerun
+   after the cause is fixed. To run again (more restarts, other seeds or settings), change the settings and
+   rebuild: that is a new job id with its own folders; a job's fetched archive and proposal are never
+   replaced.
 5. **Import.** `import_results.py <job-id>` verifies the archive (hashes, environment pins, seeds, bounds)
    and reproduces the best score locally, then writes `calibration_proposal.json`, `report.md` and figures.
+   The reproduce step needs internet: it builds the job's own environment under
+   `~/.cache/agentic-jobs/<job-id>/` (uv, Python 3.12, the pinned packages; minutes the first time) even
+   for ssh and slurm jobs, and also computes the nominal values (`start`) locally from that verified copy
+   of the bundle; the remote `selftest/validate.json` is never used for them.
    Nothing reaches the model. Partial results (failed or missing restarts) are flagged `partial`;
    parameters whose good restarts span more than a decade are flagged `poorly_constrained`; restart
    agreement is a heuristic, not an identifiability proof.
@@ -114,17 +136,25 @@ Calibration is a portable job the researcher approves step by step; no specialis
    `DATA_INPUT {"calibration": "runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json", "sha256": "...", "approval": "<record id>"}`
    and `record_session_id` = that ODE session (no other value, no other proposal or ode_mapping file named).
    The hook checks the approval, hash, outputs, session and `record_session_id`; the specialist applies
-   exactly the accepted `best` values and re-applies every other configured value unchanged
+   exactly the accepted `best` values (only when the session's current revision equals
+   `proposal.model.revision`; otherwise it returns `blocked`) and re-applies every other configured value unchanged
    (`configure_model` replaces the configuration), then reports the new revision. Tag the values
    `data-calibrated`; register the new revision with Derived from = the calibrated session, the job id,
    proposal short hash and approval id. The new revision needs the usual review and approval.
 8. **Hold-out.** `score_holdout.py <job-id> --approval <id>` scores the held-out rows once with the accepted
    parameters at their best values and every other fitted parameter at its start value, and writes
-   `holdout_score.json`. It never overwrites; a null start for a non-accepted parameter refuses. It runs
+   `holdout_score.json` with `n_rows`, the hold-out rows that received a prediction. It never overwrites;
+   a null start for a non-accepted parameter refuses, and so does a run in which no hold-out row received a
+   prediction (an objective over no rows is 0, not a score). It runs
    the bundled model with the accepted values, so it is independent of when the ode-modeler applies them:
    run it once, after the calibration approval.
 
-The dispatch hook also refuses an ODE brief that names a data-analyst path or session id, or an orchestrator seeds/mapping/ode_mapping/calibration file other than the `DATA_INPUT` artifact, without a `DATA_INPUT` line. The hook records a malformed or ambiguous
+The dispatch hook also refuses an ODE brief that names a data-analyst path or session id, or an orchestrator seeds/mapping/ode_mapping/calibration file other than the `DATA_INPUT` artifact, without a `DATA_INPUT` line.
+For every gated specialist it refuses any path under a calibration job folder (`runs/orchestrator/<p>/jobs/`,
+e.g. `report.md`, `holdout_score.json`, figures, the bundle) or under `inputs/calibration-results/`; the only
+exception is the ode-modeler's `DATA_INPUT` proposal itself and its own job folder. With the calibration
+`DATA_INPUT` it also checks that the proposal's `mapping` is an approved `ode_mapping` and that its
+`job_sha256` is the sha256 of the `job.json` beside it. The hook records a malformed or ambiguous
 `record_session_id` (any case or separator, joined to another id) as a refusal.
 
 ## Dispatch and isolation

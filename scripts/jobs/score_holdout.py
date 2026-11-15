@@ -12,8 +12,11 @@ hold-out would no longer be a hold-out.
     its `outputs` (the accepted parameters) must be a nonempty subset of the proposal's parameter names;
   * a proposal `start` of null means the nominal value is unknown: a non-accepted parameter with a null
     start refuses the scoring (the bundle's model defaults are not read; no value is ever assumed to be 0);
-  * `runner(root, job_id, params_file) -> float` is injectable. The default runs
-    `launch.py local validate <job-id> --use holdout --params <file> --out <file>` and reads its score.
+  * `runner(root, job_id, params_file) -> (score, n_rows)` is injectable. The default runs
+    `launch.py local validate <job-id> --use holdout --params <file> --out <file>` and reads its score and
+    n_rows = the hold-out rows that received a (finite) prediction (contrast reference rows get none);
+  * zero such rows refuses the scoring (an objective over no rows is 0.0, never a hold-out score); n_rows
+    is recorded in holdout_score.json.
 """
 
 from __future__ import annotations
@@ -40,15 +43,25 @@ def _number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def default_runner(root: Path, job_id: str, params_file: Path) -> float:
+def predicted_rows(report: dict, use: str = "holdout") -> int:
+    """The rows of a `run.py validate` report with this use that received a finite prediction."""
+    rows = report.get("predictions") if isinstance(report, dict) else None
+    if not isinstance(rows, dict):
+        raise ValueError("the validate report has no predictions")
+    return sum(1 for row in rows.values() if isinstance(row, dict) and row.get("use") == use
+               and row.get("role") != "reference" and _number(row.get("prediction")))
+
+
+def default_runner(root: Path, job_id: str, params_file: Path) -> tuple[float, int]:
     out = Path(params_file).with_name("holdout-report.json")
     code = launch.validate(root, job_id, str(params_file), "holdout", str(out))
     if code != 0:
         raise ValueError(f"launch.py local validate --use holdout failed (exit {code})")
-    score = strict_json(out.read_bytes()).get("score")
+    report = strict_json(out.read_bytes())
+    score = report.get("score") if isinstance(report, dict) else None
     if not _number(score):
         raise ValueError("the hold-out score is not a finite number")
-    return float(score)
+    return float(score), predicted_rows(report)
 
 
 def score_holdout(root, job_id: str, approval_id: str, *, runner=None) -> Path:
@@ -96,15 +109,18 @@ def score_holdout(root, job_id: str, approval_id: str, *, runner=None) -> Path:
     try:
         params_file = tmp / "holdout-params.json"
         params_file.write_text(json.dumps(params, indent=2) + "\n", encoding="utf-8")
-        score = runner(root, job_id, params_file)
+        score, n_rows = runner(root, job_id, params_file)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if not _number(score):
         raise ValueError("the hold-out score is not a finite number")
+    if type(n_rows) is not int or n_rows < 1:
+        raise ValueError(f"no hold-out row received a prediction (n_rows {n_rows!r}): the mapping has no scored "
+                         "use=holdout measurement, or every hold-out prediction failed; nothing was written")
     result = {"kind": "holdout_score", "schema_version": 1, "job_id": job_id,
               "proposal": {"path": rel, "sha256": digest}, "approval": approval_id,
               "accepted": list(accepted), "parameters": params, "parameter_source": source,
-              "use": "holdout", "score": float(score),
+              "use": "holdout", "score": float(score), "n_rows": n_rows,
               "note": "Scored once on the held-out measurements; accepted parameters at their best values, "
                       "all others at their start values."}
     data = (json.dumps(result, indent=2, allow_nan=False) + "\n").encode()
