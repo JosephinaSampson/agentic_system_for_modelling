@@ -301,9 +301,13 @@ whose rule changed ("rediscuss"). `check` lists each entry that no longer valida
 those with the researcher; the old mapping and approval stay untouched, and the new mapping needs a
 fresh `data_mapping` approval.
 
-**Brief strictness.** For both specialists, any case-insensitive occurrence of
-`DATA[_-]?INPUT` other than the single canonical line is refused: never mention it in
-prose, backticks or quotes. A brief that mentions `runs/data-analyst` in any form, or a
+**Brief strictness.** For both specialists, only the single canonical line may carry a
+`DATA_INPUT` payload. After normalisation (NFKC, format characters removed), any
+case-insensitive `DATA[_-]?INPUT` elsewhere that starts its line (after optional whitespace,
+`>`, `-`, `*`, backticks or quotes) or is followed (after optional whitespace, backticks,
+quotes, `:` or `=`) by `{` is refused as a second or miswritten line; the refusal names the
+line number and quotes up to 60 characters of it. A prose mention such as "as defined in the
+DATA_INPUT mapping" is allowed, with or without a canonical line (it carries no data). A brief that mentions `runs/data-analyst` in any form, or a
 data session id, without the `DATA_INPUT` line is refused. Seeds and mapping files may be named
 only on the `DATA_INPUT` line: the hook reads every `runs/orchestrator/...` path the brief
 mentions (any separator or case; for a directory or glob, each file directly in it, not

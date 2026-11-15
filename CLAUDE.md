@@ -63,9 +63,10 @@ into a brief. NeKo: line 1 of the network-curator brief is
 mapping's perturbation and criterion ids), then line 2 of the boolean-dynamics-modeler
 brief, after `STAGE_GATE`, is
 `DATA_INPUT {"mapping": "runs/orchestrator/<p>/mapping.json", "sha256": "...", "approval": "<record id>"}`.
-Mention `DATA_INPUT` or a `runs/data-analyst` path nowhere else in these briefs; the
-dispatch hook refuses it (a bare data session id without `DATA_INPUT` too, and any data
-session other than the one `DATA_INPUT` names). Seeds and mapping files may be named only on the
+Only the canonical line may carry a `DATA_INPUT` payload (prose mentions are fine; a mention
+starting a line or followed by `{` is refused); name a `runs/data-analyst` path nowhere else in
+these briefs; the dispatch hook refuses it (a bare data session id without `DATA_INPUT` too,
+and any data session other than the one `DATA_INPUT` names). Seeds and mapping files may be named only on the
 `DATA_INPUT` line (the hook refuses any other, recognised by content). Registry: a NeKo session built from seeds has `Derived from`
 = the data session (proposal ids and short hashes) or, for `seeds.json`, the `data_seeds` decision id
 (Artifacts cites the path and short hash); a MaBoSS row cites the mapping path and short hash, and

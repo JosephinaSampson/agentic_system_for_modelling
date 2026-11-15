@@ -259,6 +259,13 @@ DATA_PATH = re.compile(r"runs[\\/]+data-analyst", re.I)
 DATA_SESSION_PATH = re.compile(r"runs[\\/]+data-analyst[\\/]+([A-Za-z0-9][A-Za-z0-9._-]*)", re.I)
 DATA_SESSION_ID = re.compile(r"data-\d{8}T\d{6}Z-[0-9a-f]{8}", re.I)
 DATA_INPUT_MENTION = re.compile(r"DATA[_-]?INPUT", re.I)
+# Payload-like mentions (an attempt at a second or miswritten DATA_INPUT line): one that
+# starts its line after optional whitespace, quote marks, `>`, `-` or `*`, or one followed,
+# after optional whitespace, quote marks, `:` or `=`, by `{`. Other mentions are prose.
+QUOTES = "`'\"\u2018\u2019\u201c\u201d"
+PAYLOAD_PREFIX = re.compile(rf"[\s>*{QUOTES}-]*")
+PAYLOAD_SUFFIX = re.compile(rf"[\s:={QUOTES}]*\{{")
+QUOTE_CHARS = 60
 DATA_REFUSAL = "brief references data-analyst artifacts without a DATA_INPUT line; see CLAUDE.md"
 # Specialist -> (0-based line index of its DATA_INPUT line, human label).
 DATA_INPUT_LINE = {"network_curator": (0, "network-curator DATA_INPUT must be line 1 of the prompt"),
@@ -653,13 +660,42 @@ def _check_orchestrator_mentions(root, text, allowed_rel):
                                  f"but {where}; {MENTION_RULE}")
 
 
+def _quote(line, match):
+    """At most QUOTE_CHARS characters of the line around the match, with ... where cut."""
+    start = max(0, min(match.start() - 20, len(line) - QUOTE_CHARS))
+    end = min(len(line), start + QUOTE_CHARS)
+    return ("..." if start else "") + line[start:end] + ("..." if end < len(line) else "")
+
+
+def _payload_mentions(lines, canonical):
+    """(1-based line, quote) of each payload-like DATA_INPUT mention outside the canonical line.
+
+    ``canonical`` is the 0-based index of the canonical line, or None. Its leading
+    `DATA_INPUT ` introduces the payload; any further mention on that line counts.
+    """
+    found = []
+    for number, raw in enumerate(lines):
+        line = _detection_text(raw)
+        for match in DATA_INPUT_MENTION.finditer(line):
+            if number == canonical and match.start() == 0:
+                continue
+            if (number == canonical or PAYLOAD_PREFIX.fullmatch(line, 0, match.start())
+                    or PAYLOAD_SUFFIX.match(line, match.end())):
+                found.append((number + 1, _quote(line, match)))
+    return found
+
+
 def check_data_input(root, specialist, task):
     """Check the DATA_INPUT line by which network-curator and boolean-dynamics-modeler take data.
 
     Data reach these specialists only as approved, hash-checked artifacts named on a
     literal DATA_INPUT line (line 1 for network-curator, line 2 after STAGE_GATE for
-    boolean-dynamics-modeler); data are never pasted or pointed at in prose. Returns
-    None when the prompt has neither a DATA_INPUT line nor a data-analyst path.
+    boolean-dynamics-modeler); data are never pasted or pointed at in prose. Only that
+    line may carry a DATA_INPUT payload: a payload-like mention elsewhere (one starting
+    its line or followed by `{`) is refused with its line number and a quote, while a
+    prose mention ("as defined in the DATA_INPUT mapping") is allowed. Returns None when
+    the prompt has no DATA_INPUT line and no data-analyst path, data session id or
+    seeds/mapping file (a prose-only mention carries no data).
 
     network-curator: {"data_session", "proposals"} (approved seed_genes proposals) or
     {"seeds", "sha256", "approval"} (an approved data_seeds seeds.json from user sources).
@@ -675,16 +711,20 @@ def check_data_input(root, specialist, task):
     lines = task.splitlines()  # the same line split as check_task
     expected, placement = DATA_INPUT_LINE[specialist]
     text = _detection_text(task)
-    mentions = len(DATA_INPUT_MENTION.findall(text))
-    if not mentions:
+    canonical = expected if len(lines) > expected and lines[expected].startswith("DATA_INPUT ") else None
+    payloads = _payload_mentions(lines, canonical) if DATA_INPUT_MENTION.search(text) else []
+    if payloads:
+        number, quote = payloads[0]
+        where = ("outside the canonical DATA_INPUT line" if canonical is not None
+                 else "but there is no canonical DATA_INPUT line")
+        raise ValueError(f'{placement}; line {number}: "{quote}" is a DATA_INPUT payload {where}. '
+                         "Only that line may carry a DATA_INPUT payload; a prose mention must not "
+                         "start a line or precede `{`")
+    if canonical is None:
         if DATA_PATH.search(text) or DATA_SESSION_ID.search(text):
             raise ValueError(DATA_REFUSAL)
         _check_orchestrator_mentions(root, text, None)
         return None
-    # Any spelling of DATA_INPUT anywhere must be exactly the one canonical line.
-    if mentions != 1 or len(lines) <= expected or not lines[expected].startswith("DATA_INPUT "):
-        raise ValueError(f"{placement}: exactly one line starting 'DATA_INPUT ' and no other "
-                         "mention of DATA_INPUT in any spelling")
     value = _strict_object(lines[expected][len("DATA_INPUT "):], "DATA_INPUT")
     if specialist == "network_curator":
         result, sessions = _check_neko_data_input(root, value)
