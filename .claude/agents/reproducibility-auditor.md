@@ -69,6 +69,23 @@ patches. Distinguish unsupported tool features and missing measurements from pas
 Inspect captured invocation records and validator output; report unverified execution
 explicitly. Configuration validation never proves a PhysiCell simulation ran.
 
+## ODE calibration checklist
+
+When the stage applies a calibration, check that these agree:
+- `ode_mapping.json` sha256 in its `ode_mapping` approval, `job.json` and the proposal `mapping`; the job's
+  `export_sha256` equals the model revision bundle and `calibration_proposal.json` `model` names the same
+  ODE session and revision;
+- proposal sha256 in the `ode_calibration` approval and the `DATA_INPUT` line; approval `outputs` are
+  parameter names of the proposal; `session_id` equals the proposal's ODE session and the brief's
+  `record_session_id`;
+- the proposal's `results_sha256` equals `inputs/calibration-results/<job-id>/results.tar.gz`; `partial` and
+  `poorly_constrained` flags are reported, not dropped;
+- stored parameter values in the new revision equal the approved `best` values, and every other configured
+  value equals the previous revision's;
+- `holdout_score.json` exists once, cites the same proposal sha256 and approval, and lists accepted
+  parameters at best and the rest at start; `dispatch.jsonl` (ssh) matches the bundle sha256;
+- the `data-calibrated` tag cites the job id, proposal sha256 and approval id; registry lineage names them.
+
 ## Data-stage and mapping checklist
 
 When the stage uses data proposals or a `mapping.json`, check that these agree:

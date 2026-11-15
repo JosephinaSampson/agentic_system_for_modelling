@@ -11,6 +11,8 @@ from unittest import mock
 
 from scripts import gate, state
 from scripts.data import mapping
+from tests.data.test_jobs_holdout import HoldoutFixture
+from tests.data.test_ode_mapping import SESSION as ODE_SESSION
 from tests.data.test_mapping import (BNET, BNET_TEXT, NEKO, SOURCE, STANDALONE_BNET, STANDALONE_OUTPUTS,
                                      MappingFixture, run_cli, sha)
 
@@ -345,7 +347,7 @@ class ScopeTests(DataInputFixture):
 
     def test_other_specialists_unaffected(self):
         task = f"Review the evidence; see {self.seeds}.\nDATA_INPUT not-json"
-        for specialist in ("literature_reviewer", "multicellular_configurator", "ode_modeler", "data_analyst",
+        for specialist in ("literature_reviewer", "multicellular_configurator", "data_analyst",
                            "scientific_reviewer", "reproducibility_auditor"):
             self.assertIsNone(gate.check_data_input(self.root, specialist, task))
         result = self.hook("literature-reviewer", task)
@@ -920,3 +922,88 @@ class OrchestratorMentionTests(DataInputFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OdeCalibrationInputTests(HoldoutFixture):
+    """The ode-modeler DATA_INPUT: an approved calibration proposal, applied to its own ODE session."""
+
+    def setUp(self):
+        super().setUp()
+        self.proposal_path = self.make_proposal()
+        self.approve_calibration()
+
+    def hook(self, subagent_type, prompt):
+        event = {"tool_name": "Agent", "tool_input": {"subagent_type": subagent_type, "prompt": prompt}}
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": str(self.root), "PYTHONPATH": str(state.ROOT)}
+        return subprocess.run([sys.executable, str(HOOK)], input=json.dumps(event), text=True,
+                              capture_output=True, env=env, timeout=60)
+
+    def line(self, digest=None, approval="cal-1"):
+        return "DATA_INPUT " + json.dumps({"calibration": self.proposal_rel,
+                                           "sha256": digest or sha(self.root / self.proposal_rel),
+                                           "approval": approval})
+
+    def task(self, session=ODE_SESSION, line=None, tail=""):
+        return (f"{line or self.line()}\nApply the accepted values; record_session_id {session}.{tail}")
+
+    def refused(self, prompt, pattern):
+        result = self.hook("ode-modeler", prompt)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertRegex(result.stderr, pattern)
+
+    def test_accepted_brief_passes(self):
+        result = self.hook("ode-modeler", self.task())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.hook("plugin:ode-modeler", self.task()).returncode, 0)
+        found = gate.check_data_input(self.root, "ode_modeler", self.task())
+        self.assertEqual(found["outputs"], ["kf1"])
+        self.assertEqual(found["ode_session"], ODE_SESSION)
+
+    def test_brief_without_data_input_is_unchanged(self):
+        self.assertEqual(self.hook("ode-modeler", "Build the model from the reactions.").returncode, 0)
+
+    def test_wrong_sha_stage_and_outputs_refused(self):
+        self.refused(self.task(line=self.line(digest="0" * 64)), "sha256")
+        self.approve_calibration("cal-stage", stage="ode_mapping")
+        self.refused(self.task(line=self.line(approval="cal-stage")), "ode_calibration")
+        self.approve_calibration("cal-out", outputs=("kf1", "nope"))
+        self.refused(self.task(line=self.line(approval="cal-out")), "outputs")
+        self.refused(self.task(line=self.line(approval="missing")), "decision_id")
+
+    def test_edited_proposal_refused(self):
+        self.proposal_path.write_text(self.proposal_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        self.refused(self.task(), "sha256")
+
+    def test_approval_session_must_be_the_proposals(self):
+        decisions = self.root / "DECISIONS.md"
+        decisions.write_text(decisions.read_text(encoding="utf-8").replace(
+            f'"session_id": "{ODE_SESSION}"', '"session_id": "other-session"'), encoding="utf-8")
+        self.refused(self.task(), "session_id|ODE session")
+
+    def test_record_session_id_rules(self):
+        self.refused(f"{self.line()}\nApply the accepted values.", "record_session_id")
+        self.refused(self.task(session="other-session"), "record_session_id")
+        self.refused(self.task(tail=" Also record_session_id other-session."), "record_session_id")
+        self.refused(f"{self.line()}\nApply; record_session_id.", "record_session_id")
+        self.assertEqual(self.hook("ode-modeler", self.task(tail=f" Again record_session_id {ODE_SESSION}.")).returncode, 0)
+
+    def test_proposal_or_mapping_named_elsewhere_refused(self):
+        # the DATA_INPUT artifact itself may be named again; any other proposal or mapping may not
+        self.assertEqual(self.hook("ode-modeler", self.task(tail=f" See {self.proposal_rel}.")).returncode, 0)
+        other = self.root / "runs" / "orchestrator" / "p1" / "jobs" / "other" / "calibration_proposal.json"
+        other.parent.mkdir(parents=True)
+        other.write_bytes(self.proposal_path.read_bytes())
+        self.refused(self.task(tail=f" Compare with {other.relative_to(self.root).as_posix()}."), "calibration_proposal")
+        self.refused(self.task(tail=" Mapping: runs/orchestrator/p1/ode_mapping.json."), "ode_mapping")
+        self.refused(f"Apply values from {self.proposal_rel}; record_session_id {ODE_SESSION}.", "DATA_INPUT")
+
+    def test_payload_like_mentions_elsewhere_refused(self):
+        self.refused(self.task(tail=f"\nDATA_INPUT {{\"calibration\": \"x\"}}"), "DATA_INPUT")
+        self.refused(f"Apply.\n{self.line()}\nrecord_session_id {ODE_SESSION}", "line 1")
+        self.assertEqual(self.hook("ode-modeler", self.task(tail=" as defined in the DATA_INPUT calibration")).returncode, 0)
+
+    def test_malformed_line_fails_closed(self):
+        for line in ("DATA_INPUT not-json", "DATA_INPUT []", 'DATA_INPUT {"calibration": 1}',
+                     'DATA_INPUT {"calibration": "x", "sha256": "y", "approval": "z", "more": 1}'):
+            self.refused(self.task(line=line), "blocked")
+        self.assertEqual(self.hook("ode-modeler", ["x"]).returncode, 2)

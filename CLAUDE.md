@@ -139,6 +139,9 @@ result. Every final rule and every manual edge needs a provenance tag in DECISIO
   NeKo `edit_interactions` between existing nodes, never by hand-editing SIF.
 - `data-derived`: an approved data-analyst proposal (data session ID, proposal id, SHA256)
   or a researcher source (path, short SHA256, locator); an association, never a mechanism claim.
+- `data-calibrated`: an approved calibration value of a BioMASS ODE parameter (job id,
+  calibration_proposal.json sha256, `ode_calibration` approval id); set only through the
+  ode-modeler and the BioMASS server, never by hand.
 - `fitted-for-dynamics`: chosen against a named validation target; no independent
   literature claim for the fitted Boolean function.
 - `readout`: researcher-named summary node added via MaBoSS `edit_maboss_readouts`
@@ -225,6 +228,18 @@ the pinned backend (BioMASS smoke test plus a live read-only ode-modeler isolati
 check); rerun it after any backend or transport change. Keep distinct sessions and
 approved sources. Provisional preservation within existing workflow authorization is not
 scientific acceptance, simulation permission or conclusive export. Respect whole-model
-review; exact session/revision acceptance is required. No ODE calibration, sensitivity
-analysis or ODE-to-PhysiCell coupling is included. Universal approval, evidence,
+review; exact session/revision acceptance is required. No in-specialist ODE calibration,
+sensitivity analysis or ODE-to-PhysiCell coupling is included. Universal approval, evidence,
 lineage and no-direct-modelling-tool rules apply to both branches.
+
+Calibration of ODE parameters to measurements runs as a portable job, never through a specialist:
+`scripts/ode/ode_mapping.py` (researcher-approved `ode_mapping` record) -> `scripts/jobs/build.py` ->
+`scripts/jobs/launch.py` (local, ssh or slurm; only the bundle leaves the machine) -> `fetch` ->
+`scripts/jobs/import_results.py` -> `calibration_proposal.json` and report for the researcher. The
+researcher approves accepted parameters with an `ode_calibration` `stage_approval` (`session_id` = the ODE
+session, `outputs` = the accepted parameter names, `artifact` = the proposal path and sha256). Apply them only
+by dispatching the ode-modeler with line 1 `DATA_INPUT {"calibration": "...calibration_proposal.json", "sha256": "...", "approval": "<record id>"}`
+and `record_session_id` = that ODE session (the hook refuses anything else, incl. any other proposal or
+ode_mapping file named in the brief). Score the hold-out once with
+`scripts/jobs/score_holdout.py <job-id> --approval <id>`. Restart agreement and poorly-constrained flags are
+heuristics, not identifiability proofs. See docs/ode-workflow.md.

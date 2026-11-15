@@ -7,7 +7,7 @@ import sys
 
 ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR", Path(__file__).resolve().parents[2])).resolve()
 sys.path.insert(0, str(ROOT))
-GATED = {"boolean_dynamics_modeler", "multicellular_configurator", "network_curator"}
+GATED = {"boolean_dynamics_modeler", "multicellular_configurator", "network_curator", "ode_modeler"}
 
 
 def main():
@@ -34,9 +34,9 @@ def main():
         # this hook enforces the two sequential Boolean downstream boundaries.
         if role in {"boolean_dynamics_modeler", "multicellular_configurator"}:
             check_task(ROOT, role, prompt)
-        # Data enter NeKo and MaBoSS only through an approved, hash-checked
+        # Data enter NeKo, MaBoSS and the ODE (approved calibration values) only through an approved, hash-checked
         # DATA_INPUT line, checked after STAGE_GATE.
-        if role in {"network_curator", "boolean_dynamics_modeler"}:
+        if role in {"network_curator", "boolean_dynamics_modeler", "ode_modeler"}:
             check_data_input(ROOT, role, prompt)
         return 0
     except Exception as exc:  # noqa: BLE001 - see fail-closed note above

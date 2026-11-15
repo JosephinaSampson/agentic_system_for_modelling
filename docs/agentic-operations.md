@@ -223,6 +223,34 @@ context and perturbation fix the same node, the perturbation overrides the conte
 `scenario_contrast` is documented in
 `scripts/validate/README.md`.
 
+### ODE calibration jobs and applying their result
+
+```
+python3 scripts/ode/ode_mapping.py draft --purpose P --ode-session S --revision R --bundle ZIP --measurements CSV [--source ID:PATH ...]
+python3 scripts/ode/ode_mapping.py check runs/orchestrator/P/ode_mapping.json
+python3 scripts/jobs/build.py --mapping runs/orchestrator/P/ode_mapping.json --approval <ode_mapping record id> --settings SETTINGS.json
+python3 scripts/jobs/launch.py local start|status|fetch <job-id>
+python3 scripts/jobs/launch.py local validate <job-id> [--params FILE] [--use fit|holdout|all] [--out FILE]
+python3 scripts/jobs/launch.py print <job-id> --host NAME                 # the scp/ssh commands, runs nothing
+python3 scripts/jobs/launch.py ssh submit <job-id> --host NAME --authorization "<researcher quote>"
+python3 scripts/jobs/launch.py ssh status|fetch|cancel <job-id> --host NAME
+python3 scripts/jobs/launch.py slurm submit <job-id> [--resubmit]
+python3 scripts/jobs/import_results.py <job-id>
+python3 scripts/jobs/score_holdout.py <job-id> --approval <ode_calibration record id>
+```
+
+`hosts.json` (`~/.config/agentic-modelling/hosts.json`) maps names to
+`{"ssh": alias, "remote_dir": str, "max_cores": int}`; ssh always runs with `BatchMode=yes`. `ssh submit` appends
+`{"time", "host", "ssh_alias", "bundle_sha256", "authorization"}` to the job folder's `dispatch.jsonl` before
+anything leaves the machine, and only the bundle is sent. The `ode_mapping` and `ode_calibration` stages are
+governance stages of `state.py record`. The ode-modeler hook (`stage_gate_guard.py`) accepts
+a `DATA_INPUT {"calibration": ..., "sha256": ..., "approval": ...}` on line 1 only:
+approval stage `ode_calibration` bound to that path and sha256, `outputs` a nonempty subset of the proposal's
+parameter names, approval `session_id` = the proposal's ODE session, and the brief names
+`record_session_id` with exactly that session and no other. Any other calibration proposal or
+`ode_mapping.json` named in the brief, or a payload-like `DATA_INPUT` elsewhere, is refused; errors deny.
+`score_holdout.py` writes `holdout_score.json` once (accepted parameters at best, others at start; null start refuses).
+
 ## Evidence and provenance
 
 Edge reports end in exactly one fenced `yaml` block using JSON syntax. Ordinary

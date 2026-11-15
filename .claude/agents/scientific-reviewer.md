@@ -67,6 +67,20 @@ patches. Distinguish unsupported tool features and missing measurements from pas
 Inspect captured invocation records and validator output; report unverified execution
 explicitly. Configuration validation never proves a PhysiCell simulation ran.
 
+## ODE calibration checklist
+
+When the stage applies a calibration (`ode_mapping.json`, `calibration_proposal.json`, `holdout_score.json`):
+- mapping: each observable, condition override, unit factor and comparison rule is biologically justified;
+  fitted parameters have sourced bounds; every `unmapped` reason is sound; the hold-out rows are not
+  fitted rows and were chosen before seeing the fit;
+- proposal: read the `partial` flag (failed or missing restarts), the restart scores and agreement, and
+  every `poorly_constrained` parameter; restart agreement is a heuristic, not identifiability. Accepting a
+  poorly constrained parameter needs an explicit rationale; a parameter at a bound is suspect;
+- applied values: only the approved parameters changed, at the approved `best` values, tagged
+  `data-calibrated`; a good fit is not evidence that the mechanism is right;
+- hold-out: scored once, with the stated parameter choice; compare it to the fit score and say if it is
+  unconvincing or missing.
+
 ## Data-stage and mapping checklist
 
 When the stage uses data proposals or a `mapping.json`:

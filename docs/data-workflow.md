@@ -329,6 +329,19 @@ MaBoSS row with the mapping path and short hash), and mapped states, perturbatio
 readouts get the `data-derived` tag, citing (data session, proposal id, sha256) or
 (source path, short sha256, locator).
 
+## Data to ODE: calibration
+
+An `ode_measurements` table, once approved, can calibrate a BioMASS model through the job route (details
+in docs/ode-workflow.md): `ode_mapping.py` -> researcher approval (`ode_mapping`) -> `build.py` ->
+`launch.py` (local/ssh/slurm; only the bundle leaves the machine) -> `fetch` -> `import_results.py` ->
+`calibration_proposal.json` -> researcher approval of the accepted parameters (`ode_calibration`) ->
+ode-modeler `DATA_INPUT {"calibration": ..., "sha256": ..., "approval": ...}` on line 1 with
+`record_session_id` -> `score_holdout.py`. Calibrated values carry the `data-calibrated` tag (job id,
+proposal sha256, approval id). Caveats for the researcher: BioMASS differential-evolution defaults stop
+early with few fitted parameters (raise `popsize`/`maxiter`); restart agreement and the
+`poorly_constrained` flag are heuristics; the hold-out is scored once. A calibration proposal or an
+`ode_mapping.json` may be named only on the `DATA_INPUT` line of its dispatch.
+
 ## Provenance checks
 
 - `sources.jsonl` paths are project-root-relative (`data-cache/sha256/<hex>`,

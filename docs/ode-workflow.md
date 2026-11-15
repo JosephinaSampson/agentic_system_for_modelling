@@ -80,8 +80,47 @@ the ODE handoff. Topology choices still retain their existing approval gates.
    identified as historical. Optional graph rendering may be skipped if unavailable.
 8. Present the complete model and results for review. Conclusive bundle export and
    stage acceptance require the exact session/revision approval in the artifact
-   contract. ODE-to-PhysiCell coupling, calibration and sensitivity analysis remain
-   outside this integrated workflow.
+   contract. ODE-to-PhysiCell coupling and sensitivity analysis remain outside this
+   integrated workflow; calibration is the separate route below.
+
+## Calibrating parameters to measurements
+
+Calibration is a portable job the researcher approves step by step; no specialist fits anything. Steps:
+
+1. **Measurement table to mapping.** A measurement table (from an approved `ode_measurements` data
+   proposal, or a CSV under `runs/orchestrator/`) is mapped onto a captured, accepted model revision
+   (`ode_mapping.py draft`, fill, `check`). The mapping fixes observables, condition overrides, comparison
+   rules, fitted parameters with bounds and justification, hold-out rows (`use=holdout`) and the reasons
+   for any unmapped row.
+2. **Approval.** The researcher approves the mapping: `ode_mapping` `stage_approval` (`session_id` = the
+   ODE session, `outputs` = measurement ids used plus fitted names, `artifact` = path and sha256).
+3. **Build.** `build.py --mapping ... --approval ... --settings ...` writes the deterministic bundle and
+   `job.json` under `runs/orchestrator/<p>/jobs/<job-id>/`. Settings come from
+   `templates/calibration-settings.{first-pass,final}.json`; the BioMASS differential-evolution defaults
+   stop early when few parameters are fitted, so raise `popsize` and `maxiter` in the settings.
+4. **Launch.** `launch.py local start|status|fetch`, or `ssh submit` (a host from `hosts.json`, the
+   researcher's authorization quote, logged to `dispatch.jsonl` before anything runs), or `slurm submit`
+   on a login node. Only the bundle (model, the measurement rows the rules use, parameter bounds) leaves
+   the machine. `fetch` places `results.tar.gz` under `inputs/calibration-results/<job-id>/`.
+5. **Import.** `import_results.py <job-id>` verifies the archive (hashes, environment pins, seeds, bounds)
+   and reproduces the best score locally, then writes `calibration_proposal.json`, `report.md` and figures.
+   Nothing reaches the model. Partial results (failed or missing restarts) are flagged `partial`;
+   parameters whose good restarts span more than a decade are flagged `poorly_constrained`; restart
+   agreement is a heuristic, not an identifiability proof.
+6. **Calibration approval.** The researcher reviews the report and approves a subset of parameters:
+   `ode_calibration` `stage_approval` with `session_id` = the proposal's ODE session, `outputs` = the
+   accepted parameter names and `artifact` = the proposal path and sha256.
+7. **Apply.** Dispatch ode-modeler with line 1
+   `DATA_INPUT {"calibration": "runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json", "sha256": "...", "approval": "<record id>"}`
+   and `record_session_id` = that ODE session (no other value, no other proposal or ode_mapping file named).
+   The hook checks the approval, hash, outputs, session and `record_session_id`; the specialist applies
+   exactly the accepted `best` values and re-applies every other configured value unchanged
+   (`configure_model` replaces the configuration), then reports the new revision. Tag the values
+   `data-calibrated`; register the new revision with Derived from = the calibrated session, the job id,
+   proposal short hash and approval id. The new revision needs the usual review and approval.
+8. **Hold-out.** `score_holdout.py <job-id> --approval <id>` scores the held-out rows once with the accepted
+   parameters at their best values and every other fitted parameter at its start value, and writes
+   `holdout_score.json`. It never overwrites; a null start for a non-accepted parameter refuses.
 
 ## Dispatch and isolation
 
