@@ -34,7 +34,10 @@ Each `criteria` entry has exactly these fields:
 The example is structural syntax only; fill in actual researcher-approved paths
 and options. Multiple inputs are evaluated separately, and all must pass. A CSV
 must have a `Time` column, unique node columns, strictly increasing nonnegative
-times, finite values and probabilities in `[0,1]`.
+times, finite values and probabilities in `[0,1]`. Values at most `1e-4` outside `[0,1]`
+(MaBoSS floating-point accumulation) are clamped and counted (`metrics.clamped_values`: one count per input, a list for `scenario_contrast` and an
+object keyed by input path for other trajectory methods; calibration reports it per
+trajectory). Peak and threshold metrics are computed on the clamped series; values further outside are rejected.
 
 Supported methods and required options:
 

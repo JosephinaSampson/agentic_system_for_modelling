@@ -121,7 +121,9 @@ The step-by-step procedure is in [data workflow](data-workflow.md). In outline:
   numbers, such as RNG seeds, is not) unless it is the `DATA_INPUT` artifact.
 - **`scenario_contrast`:** drop is P(control) minus P(perturbed). It passes when
   test drop minus reference drop is strictly greater than the margin. The statistic is
-  `final` or `tail_mean`; `combine` is `all` or `any`. There is no implicit tolerance.
+  `final` or `tail_mean`; `combine` is `all` or `any`. There is no implicit tolerance on the
+  margin; only trajectory values within 1e-4 outside [0,1] (engine floating point) are clamped
+  and counted in `metrics.clamped_values`.
 - **Lineage:** a NeKo session built from a data session has `Derived from` = that session and
   cites proposal ids and short hashes; one built from `seeds.json` has `Derived from` = the
   `data_seeds` decision id (Artifacts cite the path and short hash). A MaBoSS row cites the
