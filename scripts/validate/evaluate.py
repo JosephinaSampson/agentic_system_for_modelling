@@ -7,7 +7,9 @@ The criteria file uses JSON-compatible YAML: {"schema_version":1,"criteria":[
  "inputs":["runs/.../artifact"],"options":{...}}]}. Thresholds, nodes, initial
 states and expectations must be supplied explicitly from researcher-approved
 criteria. Each trajectory is evaluated separately; a criterion passes only if all
-its declared inputs pass, except scenario_contrast, whose four inputs are joint. No statistical pooling or implicit tolerance is applied.
+its declared inputs pass, except scenario_contrast, whose four inputs are joint. No statistical pooling
+is applied. Trajectory values within common.PROBABILITY_TOLERANCE outside [0,1] (engine floating
+point) are clamped and reported in metrics.clamped_values; no other tolerance is applied.
 """
 from __future__ import annotations
 import argparse
@@ -43,12 +45,15 @@ def evaluate(root: Path, criteria_path: str) -> dict:
         try:
             if item['method'] == 'scenario_contrast':
                 # The four inputs are evaluated jointly in fixed role order.
-                trajectories = []
+                trajectories, clamped = [], []
                 for value in item['inputs']:
                     source, entry = artifact(root, value)
                     result['inputs'].append(entry)
-                    trajectories.append(load_series(source)[1])
+                    report = {}
+                    trajectories.append(load_series(source, report)[1])
+                    clamped.append(report['clamped_values'])
                 ok, result['metrics'] = contrast(trajectories, item['options'])
+                result['metrics']['clamped_values'] = clamped
                 result['status'] = 'passed' if ok else 'failed'
                 results.append(result)
                 continue
@@ -59,7 +64,9 @@ def evaluate(root: Path, criteria_path: str) -> dict:
                 if item['method'] == 'boolean_structure':
                     ok, metrics = analyze(source, item['options'])
                 else:
-                    times, series = load_series(source)
+                    report = {}
+                    times, series = load_series(source, report)
+                    result['metrics'].setdefault('clamped_values', {})[value] = report['clamped_values']
                     if item['method'] == 'ordered_peaks':
                         ok, metrics = ordered_peaks(times, series, item['options'])
                     elif item['method'] == 'canonical_cycles':

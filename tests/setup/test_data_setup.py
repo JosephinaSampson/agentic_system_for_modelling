@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -19,6 +20,8 @@ IMPORT_PROBE = "import pydeseq2, gseapy, anndata, decoupler, sklearn, statsmodel
 class DataSetupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        # Server TMPDIRs are created under the cache root; keep them inside the fixture.
+        self.enterContext(mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(Path(self.temp.name) / "xdg-cache")}))
         self.root = Path(self.temp.name)/'project'; self.root.mkdir()
         (self.root/'setup').mkdir()
         for name in ('data-requirements.txt', 'data-requirements.lock', 'data-requirements-cellprofiler.txt'):

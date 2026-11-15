@@ -2,6 +2,7 @@
 from contextlib import ExitStack
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -18,6 +19,8 @@ from scripts.setup_support.state import SetupError
 class BackendSourcesTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
+        # Server TMPDIRs are created under the cache root; keep them inside the fixture.
+        self.enterContext(mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(Path(temporary.name) / "xdg-cache")}))
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.manifest = {"package": "mcp-biomodelling-servers", "version": "2.4.0", "index_url": "https://pypi.org/simple", "dependency_pins": {"nekomata": "1.10.1"}}

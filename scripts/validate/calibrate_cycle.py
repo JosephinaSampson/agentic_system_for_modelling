@@ -41,7 +41,8 @@ def propose(root: Path, config_path: str):
     inputs, trajectories, cycles, dwell = [], [], [], {p['name']: [] for p in phases}
     for value in config['inputs']:
         source, meta = artifact(root, value); inputs.append(meta)
-        times, series = load_series(source)
+        report = {}
+        times, series = load_series(source, report)
         phase, entered, previous_division, observed = 0, times[0], None, []
         for i, time in enumerate(times):
             mapping = phases[phase]
@@ -52,7 +53,8 @@ def propose(root: Path, config_path: str):
                     previous_division = time
                 phase, entered = (phase + 1) % len(phases), time
         cycles.extend(observed)
-        trajectories.append({'path': value, 'complete_cycle_durations': observed})
+        trajectories.append({'path': value, 'complete_cycle_durations': observed,
+                             'clamped_values': report['clamped_values']})
     complete_inputs = all(item['complete_cycle_durations'] for item in trajectories)
     mean = statistics.mean(cycles) if cycles else None
     scaling = target / mean if mean and complete_inputs else None

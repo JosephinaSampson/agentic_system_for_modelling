@@ -34,7 +34,7 @@ dispatch checks; lineage; review checklists; the `scenario_contrast` validator.
 |---|---|
 | **Typed proposal schemas** per kind (`seed_genes`, `perturbations`, `validation_targets`), checked by `manifest.py verify`; `mutations` is removed; layers are fixed (`neko`, `maboss`) | Data-term prose cannot be mapped mechanically. Extra columns are allowed, so the analyst keeps its statistics. |
 | **`DATA_INPUT` lines, never pasted data** | The motivating failure: the orchestrator pasted seed symbols into a brief, and the build decision cited seed lists by name only. A line naming session, proposal ids and hashes can be re-checked by the dispatch hook. |
-| **One canonical `DATA_INPUT` line; refuse stray mentions** | Any other spelling of `DATA_INPUT`, a `runs/data-analyst` path, a bare data session id, or a session other than the one named is refused. This stops data leaking in through prose. |
+| **One canonical `DATA_INPUT` line; refuse stray payloads** | Only that line may carry a payload: another mention in any spelling that starts its line, has a `{` within the next 16 characters, or ends its line before a line starting with `{` is refused, as are a `runs/data-analyst` path, a bare data session id, or a session other than the one named. This stops data leaking in through prose. Prose mentions ("as defined in the DATA_INPUT mapping") are allowed: in the live test refusing them cost two retries per model and carried no data. Refusals name the line and quote it. |
 | **Fail-closed hook** | `stage_gate_guard.py` exits 2 on any error, including import failures. Claude Code blocks a dispatch only on exit 2; exit 1 would let it proceed. |
 | **Orchestrator-drafted mapping, discussed with the researcher, checked by script** | `CLAUDE.md` forbids silently selecting mappings, states or readouts. Node names and margins are never inferred. `mapping.py check` makes the result exact. |
 | **The mapping approval binds the mapping sha256 and `outputs` equal perturbation ids plus criterion ids** | Otherwise `outputs` is decorative. Adding a criterion after approval needs re-approval. |
@@ -121,7 +121,9 @@ The step-by-step procedure is in [data workflow](data-workflow.md). In outline:
   numbers, such as RNG seeds, is not) unless it is the `DATA_INPUT` artifact.
 - **`scenario_contrast`:** drop is P(control) minus P(perturbed). It passes when
   test drop minus reference drop is strictly greater than the margin. The statistic is
-  `final` or `tail_mean`; `combine` is `all` or `any`. There is no implicit tolerance.
+  `final` or `tail_mean`; `combine` is `all` or `any`. There is no implicit tolerance on the
+  margin; only trajectory values within 1e-4 outside [0,1] (engine floating point) are clamped
+  and counted in `metrics.clamped_values`.
 - **Lineage:** a NeKo session built from a data session has `Derived from` = that session and
   cites proposal ids and short hashes; one built from `seeds.json` has `Derived from` = the
   `data_seeds` decision id (Artifacts cite the path and short hash). A MaBoSS row cites the
@@ -131,7 +133,8 @@ The step-by-step procedure is in [data workflow](data-workflow.md). In outline:
 
 ## 6. Guardrails and threat model
 
-- **Dispatch hook:** denies on any exception, any extra `DATA_INPUT` mention, a data
+- **Dispatch hook:** denies on any exception, any payload-like `DATA_INPUT` mention outside
+  the canonical line (starting a line, or with `{` soon after it or on the next line), a data
   path or session id without `DATA_INPUT`, a data session outside the one named, a
   proposal that is unapproved or of the wrong kind or layer, a hash mismatch, a mapping
   that fails `check`, a mapping whose network differs from `STAGE_GATE` or whose readout nodes
@@ -160,7 +163,10 @@ The step-by-step procedure is in [data workflow](data-workflow.md). In outline:
   data session.
 - **Evasion spellings:** homoglyph spellings of `DATA_INPUT` and case-sensitive
   `subagent_type` matching are not caught.
-- **False positives refuse:** text like `METADATA_INPUT` is refused. This is safe.
+- **Payload detection is syntactic:** a mention is payload-like only when it starts its line
+  or has a `{` within 16 characters or on the next non-blank line; prose such as `METADATA_INPUT` or "the DATA_INPUT mapping" passes. A
+  payload written in prose form (for example "DATA_INPUT mapping is runs/...") is still caught
+  only through its data path, session id or seeds/mapping file, which the hook checks anyway.
 - **`mapping.py criteria` does not check** the approval's `session_id` or `outputs`; the
   dispatch gate does.
 - **One `data_session` per NeKo `DATA_INPUT`.**

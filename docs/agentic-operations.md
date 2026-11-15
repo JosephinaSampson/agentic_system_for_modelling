@@ -276,11 +276,39 @@ after every specialist completion the orchestrator runs `python3 scripts/capture
 write) and proceeds only on its `RECOVERED <specialist> <session-or-unbound> <status>`
 line. It records the missing invocation through the normal recorder, which also writes
 `report.md`, and is a no-op (`already-recorded`) when the hook did fire. In both cases it
-then saves the run's server exports (NeKo SIF/history, MaBoSS BND/CFG, PhysiCell XML and
-bundles) to `runs/<specialist>/<session>/exports/<agentId>/` with an `exports.json` hash
+then saves the run's server exports (NeKo SIF/history, MaBoSS BND/CFG and run manifests with
+their node-marginal trajectories and engine inputs, PhysiCell XML and bundles) to `runs/<specialist>/<session>/exports/<agentId>/` with an `exports.json` hash
 manifest, since each MCP server and its sessions end with the run; rerunning it captures
-exports for older runs (details in the capture README). data-analyst uses `receive.py`,
+exports for older runs that have no `exports/` directory yet; an existing capture is never
+amended (details in the capture README). data-analyst uses `receive.py`,
 which calls it.
+
+After a `boolean-dynamics-modeler` recovery, recover.py also removes orphaned MaBoSS
+temp directories and prints one `TMP CLEANUP: removed N maboss-run dirs (X MiB), skipped M`
+line after `RECOVERED` (a cleanup error prints `TMP CLEANUP WARNING: ...` and never fails
+the recovery). The MaBoSS server writes a 100–300 MB `maboss-run-*` directory per
+simulation and leaves it behind after copying the results into its artifact store; on WSL
+`/tmp` is a small RAM tmpfs that these directories filled ("No space left on device").
+Setup therefore renders a disk-backed `TMPDIR` (`<cache>/mcp-biomodelling/tmp/<server>`,
+mode 0700) into every modelling server's transport ([automatic setup](automatic-setup.md));
+rerun setup to get it. Both that directory and `/tmp` are cleaned. A directory is removed
+only if it is a real `maboss-run-*` directory owned by you, no process has a file or working
+directory open inside it or names it on its command line, its newest entry is older than 10
+minutes, and either it was last modified before the earliest start of every running MaBoSS
+server (a process whose argv has an element `mcp-maboss-server` or `.../mcp-maboss-server`;
+shell command lines merely mentioning the name do not count) or it is older than 24 hours.
+Parallel runs keep their own directories; earlier runs' directories are orphans. A directory
+that disappears meanwhile is reported as `vanished`. If the MaBoSS `TMPDIR` is missing at
+recover time it is recreated (0700, refusing symlinks) with a `TMP CLEANUP WARNING` that the
+server fell back to `/tmp` for that run. Manual use:
+
+```bash
+python3 scripts/capture/server_tmp.py status                 # free space per root, candidate size
+python3 scripts/capture/server_tmp.py clean --dry-run        # what would be removed, and why not
+python3 scripts/capture/server_tmp.py clean [--min-age SECONDS]
+```
+
+Both print `WARNING: <root> has <N> MiB free` when a root has less than 2 GiB free.
 
 See [validation commands](../scripts/validate/README.md) for explicit criteria,
 safe bounded Boolean analyses, trajectory metrics, seed planning and time-scaling

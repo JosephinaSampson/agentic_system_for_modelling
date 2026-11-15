@@ -36,7 +36,7 @@ multicellular-configurator, ode-modeler), before any registry or state write, ru
 `python3 scripts/capture/recover.py --specialist <name> --agent-id <agentId> [--session <id>]`
 and proceed only once it prints `RECOVERED ...`; on `RECOVER FAILED` relay the reason
 verbatim and never repair files. It also saves the run's server exports under
-`runs/<specialist>/<session>/exports/<agentId>/` (MCP sessions end with the run). data-analyst uses `receive.py` below, which includes recovery.
+`runs/<specialist>/<session>/exports/<agentId>/` (MCP sessions end with the run) and, for MaBoSS, removes orphaned `maboss-run-*` temp dirs. data-analyst uses `receive.py` below, which includes recovery.
 
 Data retrieval and analysis are delegated to `data-analyst`. The orchestrator never
 runs `vendor/scientific-agent-skills` scripts or `.venv-data`. data-analyst invocations
@@ -63,9 +63,10 @@ into a brief. NeKo: line 1 of the network-curator brief is
 mapping's perturbation and criterion ids), then line 2 of the boolean-dynamics-modeler
 brief, after `STAGE_GATE`, is
 `DATA_INPUT {"mapping": "runs/orchestrator/<p>/mapping.json", "sha256": "...", "approval": "<record id>"}`.
-Mention `DATA_INPUT` or a `runs/data-analyst` path nowhere else in these briefs; the
-dispatch hook refuses it (a bare data session id without `DATA_INPUT` too, and any data
-session other than the one `DATA_INPUT` names). Seeds and mapping files may be named only on the
+Only the canonical line may carry a `DATA_INPUT` payload (prose mentions are fine; a mention
+starting a line or followed by `{` soon after or on the next line is refused); name a `runs/data-analyst` path nowhere else in
+these briefs; the dispatch hook refuses it (a bare data session id without `DATA_INPUT` too,
+and any data session other than the one `DATA_INPUT` names). Seeds and mapping files may be named only on the
 `DATA_INPUT` line (the hook refuses any other, recognised by content). Registry: a NeKo session built from seeds has `Derived from`
 = the data session (proposal ids and short hashes) or, for `seeds.json`, the `data_seeds` decision id
 (Artifacts cites the path and short hash); a MaBoSS row cites the mapping path and short hash, and

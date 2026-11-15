@@ -321,8 +321,9 @@ class ScopeTests(DataInputFixture):
                 gate.check_data_input(self.root, "boolean_dynamics_modeler", f"{STAGE_GATE}\n{variant}\nSimulate.")
             with self.assertRaises(ValueError, msg=repr(variant)):
                 gate.check_data_input(self.root, "network_curator", f"Build.\n{variant}")
-        # The canonical line plus any other mention is refused too.
-        for extra in ("Follow the DATA_INPUT line above.", "see `data_input`", "DATA-INPUT"):
+        # The canonical line plus another payload-like mention (one starting a line or
+        # followed by `{`) is refused; a prose mention is allowed (ProseMentionTests).
+        for extra in ("DATA-INPUT", "- data_input: the mapping", "see `data_input` = {}"):
             with self.assertRaises(ValueError, msg=extra):
                 gate.check_data_input(self.root, "boolean_dynamics_modeler", f"{self.maboss_task()}\n{extra}")
             with self.assertRaises(ValueError, msg=extra):
@@ -398,6 +399,115 @@ class HookTests(DataInputFixture):
         result = self.hook("boolean-dynamics-modeler", self.maboss_task(approval="dec-data-1"))
         self.assertEqual(result.returncode, 2)
         self.assertIn("data_mapping", result.stderr)
+
+
+class ProseMentionTests(DataInputFixture):
+    """Only the canonical line may carry a DATA_INPUT payload; prose mentions are allowed."""
+
+    PROSE = "as defined in the DATA_INPUT mapping"
+
+    def setUp(self):
+        super().setUp()
+        self.stage_gate_ready()
+
+    def live_brief(self, extra=""):
+        """The live-test brief shape: STAGE_GATE, canonical DATA_INPUT, prose mention on line 9."""
+        body = ["Import the approved NeKo handoff and simulate the mapped scenarios.",
+                "Use the session's BNET as exported; do not edit rules.",
+                "Run each scenario with 5000 trajectories, max_time 50, seed 1.",
+                "Report probabilities of the readouts at the final time.",
+                "Export BND/CFG after the runs.",
+                "Context: lung adenocarcinoma cell lines.",
+                ("Perturbed node states are fixed node states (MaBoSS mutations) "
+                 f"{self.PROSE}; do not invent others.")]
+        return "\n".join([STAGE_GATE, self.maboss_line(), *body]) + extra
+
+    def refused(self, role, prompt):
+        result = self.hook(role, prompt)
+        self.assertEqual(result.returncode, 2, (prompt, result.stderr))
+        return result.stderr
+
+    def test_live_test_brief_with_prose_mention_passes(self):
+        brief = self.live_brief()
+        self.assertIn(self.PROSE, brief.splitlines()[8])
+        self.assertEqual(gate.check_data_input(self.root, "boolean_dynamics_modeler", brief)["approval_id"],
+                         "dec-map-1")
+        result = self.hook("boolean-dynamics-modeler", brief)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_second_payload_line_refused_with_line_number_and_quote(self):
+        stderr = self.refused("boolean-dynamics-modeler", self.live_brief("\n" + self.maboss_line()))
+        self.assertIn('line 10: "DATA_INPUT {', stderr)
+        quoted = re.search(r'line 10: "(.*?)"', stderr)[1]
+        self.assertLessEqual(len(quoted.removesuffix("...")), 60)
+
+    def test_backticked_payload_line_refused(self):
+        stderr = self.refused("boolean-dynamics-modeler", self.live_brief(f"\n`{self.maboss_line()}`"))
+        self.assertIn("line 10:", stderr)
+
+    def test_mid_sentence_payload_refused(self):
+        payload = json.dumps({"mapping": self.mapping_rel})
+        stderr = self.refused("boolean-dynamics-modeler",
+                              self.live_brief(f"\nFor the checks listed above, also honour the DATA-INPUT: {payload} for checks."))
+        self.assertIn('line 10: "...', stderr)
+        self.assertIn("DATA-INPUT: {", stderr)
+
+    def test_refusal_quotes_the_prose_context(self):
+        # A payload-like mention with no canonical line: the refusal names it.
+        stderr = self.refused("boolean-dynamics-modeler",
+                              f"{STAGE_GATE}\nImport and simulate.\nDATA_INPUT is the approved mapping.")
+        self.assertIn('line 3: "DATA_INPUT is the approved mapping."', stderr)
+        with self.assertRaisesRegex(ValueError, r'line 2: "\.\.\.[^"]{1,40}DATA_INPUT = \{x\}[^"]*\.\.\."'):
+            gate.check_data_input(self.root, "network_curator",
+                                  "Build the network.\nPlease, for this network-building run, use the DATA_INPUT = {x} "
+                                  "exactly as the researcher wrote it in the approval record.")
+        # A `{` well after the mention (more than 16 characters) does not make it payload-like.
+        self.assertIsNone(gate.check_data_input(
+            self.root, "network_curator", "Build the network.\nUse the DATA_INPUT mapping exactly as approved, {x} aside."))
+
+    LIVE_PROSE = ("Perturbed node states are fixed node states (MaBoSS mutations) as defined in the "
+                  "DATA_INPUT mapping; where both fix the same node the perturbation overrides the context.")
+
+    def test_payload_sidesteps_refused_and_live_prose_still_passes(self):
+        payload = json.dumps({"mapping": self.mapping_rel})
+        sidesteps = [f"Then DATA_INPUT => {payload}", f"Then DATA_INPUT -> {payload}",
+                     f"Then DATA_INPUT is {payload}", f"Then DATA_INPUT payload: {payload}",
+                     f"| DATA_INPUT | {payload} |", f"Then DATA_INPUTS {payload}",
+                     f"Use this DATA_INPUT\n{payload}", f"Use this DATA_INPUT:\n\n> `{payload}`",
+                     f"Use this DATA_INPUT:\n```\n{payload}\n```",
+                     'The DATA_INPUT => {"seed_genes": ["TP53","MYC"]}']
+        for sidestep in sidesteps:
+            with self.subTest(sidestep=sidestep):
+                brief = self.live_brief("\n" + sidestep)
+                self.assertIn(self.PROSE, brief)
+                stderr = self.refused("boolean-dynamics-modeler", brief)
+                self.assertIn("line 10:", stderr)
+                prose = self.hook("boolean-dynamics-modeler", self.live_brief("\n" + self.LIVE_PROSE))
+                self.assertEqual(prose.returncode, 0, prose.stderr)
+        for sidestep in sidesteps:
+            with self.subTest(neko=sidestep), self.assertRaisesRegex(ValueError, "line 2:"):
+                gate.check_data_input(self.root, "network_curator", "Build the network.\n" + sidestep)
+
+    def test_neko_seeds_brief_with_prose_mention_passes(self):
+        self.add_source()
+        self.write_seeds(SeedsGateTests.SEEDS_REL, ["KRAS", "EGFR"])
+        self.approve_seeds("dec-seeds-1", SeedsGateTests.SEEDS_REL, ["EGFR", "KRAS"])
+        brief = f"{self.seeds_task()}\nUse only the symbols named by the DATA_INPUT line above; add no others."
+        result = self.hook("network-curator", brief)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_prose_mention_without_canonical_line_or_data_passes(self):
+        self.assertIsNone(gate.check_data_input(
+            self.root, "network_curator", "Build from EGFR, KRAS. No DATA_INPUT is used for this run."))
+        result = self.hook("boolean-dynamics-modeler",
+                           f"{STAGE_GATE}\nImport and simulate; there is no `DATA_INPUT` mapping this time.")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # It carries no data: a data path or a seeds/mapping file is still refused.
+        stderr = self.refused("network-curator", f"No DATA_INPUT here; see {self.seeds}.")
+        self.assertIn(REFUSAL, stderr)
+        stderr = self.refused("boolean-dynamics-modeler",
+                              f"{STAGE_GATE}\nNo DATA_INPUT; scenarios are in {self.mapping_rel}.")
+        self.assertIn(MENTION, stderr)
 
 
 REDRAFT = "redraft with mapping.py draft --from"

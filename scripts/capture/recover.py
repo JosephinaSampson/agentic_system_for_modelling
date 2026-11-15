@@ -9,14 +9,19 @@ already captured and indexed) runs the normal recorder on a synthetic SubagentSt
 payload, then checks the recorder-written report.md. For a bound invocation (recorded
 or already recorded) it then copies the run's server exports into
 runs/<specialist>/<session>/exports/<agentId>/ (scripts/capture/exports.py) and lists
-them. Prints ``RECOVERED <specialist> <session-or-unbound> <status>`` as its last line,
-or ``RECOVER FAILED: <reason>`` on stderr with exit 1. It writes nothing but what the
-recorder and the export capture write.
+them. Prints ``RECOVERED <specialist> <session-or-unbound> <status>``, or
+``RECOVER FAILED: <reason>`` on stderr with exit 1. It writes nothing but what the
+recorder and the export capture write. After a boolean-dynamics-modeler recovery it
+then removes orphaned MaBoSS ``maboss-run-*`` temp directories
+(scripts/capture/server_tmp.py, default thresholds) and prints a ``TMP CLEANUP`` line;
+a cleanup failure prints ``TMP CLEANUP WARNING: ...`` and never fails the recovery.
+For every other specialist ``RECOVERED`` is the last line.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -97,6 +102,25 @@ def recover(root: Path, specialist: str, agent_id: str, session: str | None,
             "exports": _exports(root, specialist, bound, agent_id, transcript, result.get("capture_path"))}
 
 
+def _clean_server_tmp() -> None:
+    """Remove the MaBoSS server's orphaned run directories; never raises."""
+    try:
+        # Imported here so that even an import failure cannot fail a recovery.
+        server_tmp = importlib.import_module("scripts.capture.server_tmp")
+        try:
+            missing = server_tmp.ensure_server_tmpdir()
+            if missing:
+                print(f"TMP CLEANUP WARNING: {missing}")
+        except Exception as exc:
+            print(f"TMP CLEANUP WARNING: cannot prepare the MaBoSS TMPDIR: {exc}")
+        summary = server_tmp.clean(server_tmp.default_roots())
+        print(server_tmp.summary_line(summary))
+        for line in summary.get("warnings", []):
+            print(line)
+    except Exception as exc:  # cleanup must never turn a recovery into a failure
+        print(f"TMP CLEANUP WARNING: {exc}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--specialist", required=True)
@@ -126,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
         if exports["path"]:
             print(f"exports: {exports['path']}/exports.json")
     print(f"RECOVERED {args.specialist} {result['session_id'] or 'unbound'} {result['status']}")
+    if args.specialist == "boolean-dynamics-modeler":
+        _clean_server_tmp()
     return 0
 
 

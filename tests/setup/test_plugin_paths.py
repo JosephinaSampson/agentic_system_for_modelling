@@ -13,6 +13,8 @@ from scripts.setup_support.state import SetupError
 class PluginPathTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
+        # Server TMPDIRs are created under the cache root; keep them inside the fixture.
+        self.enterContext(mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(Path(temp.name) / "xdg-cache")}))
         self.addCleanup(temp.cleanup)
         self.base = Path(temp.name)
         self.root = self.base / 'project'; self.root.mkdir()

@@ -35,7 +35,13 @@ def load_json_yaml(path: Path) -> dict:
     return result
 
 
-def load_series(path: Path):
+# MaBoSS accumulates probabilities in floating point and can write values a few 1e-5
+# outside [0, 1]. Values within this tolerance are clamped (and counted); anything
+# further outside is still rejected.
+PROBABILITY_TOLERANCE = 1e-4
+
+
+def load_series(path: Path, report: dict | None = None):
     with path.open(newline='') as handle:
         reader = csv.DictReader(handle)
         fields = reader.fieldnames
@@ -52,8 +58,17 @@ def load_series(path: Path):
     times = series.pop('Time')
     if times[0] < 0 or any(b <= a for a, b in zip(times, times[1:])):
         raise ValueError('Time must be nonnegative and strictly increasing')
-    if any(not 0 <= x <= 1 for values in series.values() for x in values):
-        raise ValueError('node values must lie in [0,1]')
+    if any(not -PROBABILITY_TOLERANCE <= x <= 1 + PROBABILITY_TOLERANCE for values in series.values() for x in values):
+        raise ValueError(f'node values must lie in [0,1] (tolerance {PROBABILITY_TOLERANCE})')
+    clamped, largest = 0, 0.0
+    for key, values in series.items():
+        for i, x in enumerate(values):
+            if not 0 <= x <= 1:
+                bounded = min(1.0, max(0.0, x))
+                clamped, largest = clamped + 1, max(largest, abs(x - bounded))
+                values[i] = bounded
+    if report is not None:
+        report.update(clamped_values=clamped, max_clamp=largest)
     return times, series
 
 

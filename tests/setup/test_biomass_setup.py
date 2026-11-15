@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 class BioMASSSetupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        # Server TMPDIRs are created under the cache root; keep them inside the fixture.
+        self.enterContext(mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(Path(self.temp.name) / "xdg-cache")}))
         self.root = Path(self.temp.name)/'project'; self.root.mkdir()
         for name in ('setup', '.codex', '.codex-plugin', '.claude/agents', '.claude/skills'):
             shutil.copytree(ROOT/name, self.root/name)

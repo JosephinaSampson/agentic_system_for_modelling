@@ -1,6 +1,7 @@
 """Release compatibility must be checked before configuring either client."""
 from contextlib import ExitStack
 import json
+import os
 from pathlib import Path
 import tempfile
 import tomllib
@@ -17,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 class ReleaseVersionTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
+        # Server TMPDIRs are created under the cache root; keep them inside the fixture.
+        self.enterContext(mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(Path(temporary.name) / "xdg-cache")}))
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.prefix = self.root / "environment"

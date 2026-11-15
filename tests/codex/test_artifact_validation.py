@@ -87,6 +87,45 @@ class ArtifactTests(unittest.TestCase):
             with self.subTest(content=content), self.assertRaises((ValueError, TypeError)):
                 load_series(self.write('series.csv', content))
 
+    def test_engine_rounding_within_tolerance_is_clamped_and_counted(self):
+        report = {}
+        _, series = load_series(self.write('series.csv', 'Time,A,B\n0,1.00002,0.5\n1,-0.00001,1\n'), report)
+        self.assertEqual(series['A'], [1.0, 0.0])
+        self.assertEqual(series['B'], [0.5, 1.0])
+        self.assertEqual(report['clamped_values'], 2)
+        self.assertLessEqual(report['max_clamp'], 1e-4)
+
+    def test_values_beyond_tolerance_still_rejected(self):
+        for content in ('Time,A\n0,1.001\n', 'Time,A\n0,-0.0002\n'):
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                load_series(self.write('series.csv', content))
+
+    def test_scenario_contrast_reports_clamped_values_per_input(self):
+        for name, value in (('tc', '1.00001'), ('tp', '0.2'), ('rc', '0.5'), ('rp', '0.5')):
+            self.write(f'{name}.csv', f'Time,A\n0,{value}\n1,{value}\n')
+        self.write('criteria.json', json.dumps({'schema_version': 1, 'criteria': [{
+            'criterion_id': 'C1', 'method': 'scenario_contrast', 'inputs': ['tc.csv', 'tp.csv', 'rc.csv', 'rp.csv'],
+            'options': {'readouts': ['A'], 'margin': 0.1, 'combine': 'all', 'statistic': 'final'}}]}))
+        result = evaluate(self.root, 'criteria.json')['results'][0]
+        self.assertEqual(result['status'], 'passed')
+        self.assertEqual(result['metrics']['clamped_values'], [2, 0, 0, 0])
+        self.assertTrue(all(set(entry) == {'path', 'sha256'} for entry in result['inputs']))
+
+    def test_tolerance_boundary(self):
+        load_series(self.write('series.csv', 'Time,A\n0,1.0001\n1,-0.0001\n'))
+        for content in ('Time,A\n0,1.00010001\n', 'Time,A\n0,-0.00010001\n'):
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                load_series(self.write('series.csv', content))
+
+    def test_per_input_methods_report_clamped_values(self):
+        self.write('peaks.csv', 'Time,A,B\n0,0,0\n1,1.00002,0\n2,0.5,0\n3,0.5,1\n4,0.5,0.4\n5,0.5,0.4\n')
+        self.write('criteria.json', json.dumps({'schema_version': 1, 'criteria': [{
+            'criterion_id': 'P1', 'method': 'ordered_peaks', 'inputs': ['peaks.csv'],
+            'options': {'nodes': ['A', 'B'], 'comparators': ['<'], 'metric': 'first_peak', 'drop': 0.1}}]}))
+        result = evaluate(self.root, 'criteria.json')['results'][0]
+        self.assertEqual(result['metrics']['clamped_values'], {'peaks.csv': 1})
+        self.assertTrue(all(set(entry) == {'path', 'sha256'} for entry in result['inputs']))
+
     def test_structural_fixed_points_reachable_scc_and_exclusivity(self):
         path = self.write('model.bnet', 'A, !A\nB, A\nC, !A\n')
         passed, result = analyze(path, {'analysis':'reachable_attractors','max_states':8,'expected_count':1,'initial_state':{'A':False,'B':False,'C':False}})

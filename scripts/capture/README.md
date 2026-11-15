@@ -168,7 +168,7 @@ transcript under `~/.claude/projects/<slug>/*/subagents/agent-<id>.jsonl` (overr
 `--transcript-root`), binds the session, and, unless the invocation is already captured and
 indexed, runs the recorder above on a synthetic `SubagentStop` payload and checks that
 `runs/<specialist>/<session>/report.md` exists. With `--session`, a transcript bound to a
-different or no session is refused before anything is recorded. The last output line is
+different or no session is refused before anything is recorded. The final status line is
 `RECOVERED <specialist> <session-or-unbound> <recorded|already-recorded|unbound>`;
 failures print `RECOVER FAILED: <reason>` and exit 1. `scripts/data/receive.py` uses it for
 data-analyst.
@@ -196,7 +196,10 @@ after the artifact root changed) or files absent from the earlier capture. A fil
 `exports.json` is refused. If export capture fails after recording, the error says
 `export capture failed (invocation recorded at <path>)`.
 recover.py prints one `export:` line per copied file (`export WARNING:` / `export REFUSED:`
-for the others) before its last `RECOVERED` line. ode-modeler uses
+for the others) before its `RECOVERED` line. For boolean-dynamics-modeler it then runs
+`server_tmp.py clean` (orphaned MaBoSS `maboss-run-*` temp directories; see
+docs/agentic-operations.md) and prints its `TMP CLEANUP` summary line, or
+`TMP CLEANUP WARNING: ...` without failing; for other specialists `RECOVERED` stays last. ode-modeler uses
 `record_ode_artifacts.py`; data-analyst has no MCP exports. These copies are not handoff
 captures: approved handoffs still go through the recorders above.
 
