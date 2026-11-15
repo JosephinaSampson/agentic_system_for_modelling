@@ -18,6 +18,7 @@ current release (see [`CHANGELOG.md`](../CHANGELOG.md)).
 | [data-workflow.md](data-workflow.md) | The `data-analyst` specialist: `--with-data`/`--with-cellprofiler` setup, provenance checks, smoke test, guard limits and manual verification checklist |
 | [data-analyst-architecture.md](data-analyst-architecture.md) | Design rationale for the `data-analyst` specialist and the cross-specialist capture changes: vendored skills, guards and threat model, mechanical handoff, recorder-written reports, recovery and export saving, known limitations |
 | [data-to-model-handoffs-architecture.md](data-to-model-handoffs-architecture.md) | Design rationale for typed data-to-model handoffs: proposal schemas, `DATA_INPUT` dispatch checks, the researcher-approved mapping, cumulative approvals, `scenario_contrast`, known limitations |
+| [data-to-ode-calibration-architecture.md](data-to-ode-calibration-architecture.md) | Design rationale for data-to-ODE mapping and portable calibration jobs: the BioMASS runner, deterministic bundles, launchers, verified import, hold-out, the `DATA_INPUT` calibration gate, known limitations |
 | [ode-workflow.md](ode-workflow.md) | The optional BioMASS ODE branch: formulation, inputs, the ODE readiness check, capture and the real-backend smoke test |
 | [neko-curation-continuity.md](neko-curation-continuity.md) | Continuing NeKo curation from exported artifacts in a fresh session |
 | [specialist-dispatcher.md](specialist-dispatcher.md) | The Codex specialist dispatcher: isolation, task lifecycle, plugin, CLI fallback, troubleshooting |

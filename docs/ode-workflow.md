@@ -85,7 +85,7 @@ the ODE handoff. Topology choices still retain their existing approval gates.
 
 ## Calibrating parameters to measurements
 
-Calibration is a portable job the researcher approves step by step; no specialist fits anything. Steps:
+Calibration is a portable job the researcher approves step by step; no specialist fits anything. Design rationale: [data to ODE calibration architecture](data-to-ode-calibration-architecture.md). Steps:
 
 1. **Measurement table to mapping.** A measurement table (from an approved `ode_measurements` data
    proposal, or a CSV under `runs/orchestrator/`) is mapped onto a captured, accepted model revision
@@ -98,6 +98,7 @@ Calibration is a portable job the researcher approves step by step; no specialis
    dose-response rule to have a readout mapped to `viability.observable`.
 2. **Approval.** The researcher approves the mapping: `ode_mapping` `stage_approval` (`session_id` = the
    ODE session, `outputs` = measurement ids used plus fitted names, `artifact` = path and sha256).
+   Keep the `ode_mapping` unchanged until its approved proposal has been applied; for a changed mapping use a new purpose (the earlier proposal stays scoreable but cannot be applied).
 3. **Build.** `build.py --mapping ... --approval ... --settings ...` writes the deterministic bundle and
    `job.json` under `runs/orchestrator/<p>/jobs/<job-id>/`. Settings come from
    `templates/calibration-settings.{first-pass,final}.json`; the BioMASS differential-evolution defaults

@@ -24,7 +24,7 @@ criteria; per-kind proposal schemas; the mapping file and its checker; `DATA_INP
 dispatch checks; lineage; review checklists; the `scenario_contrast` validator.
 
 **Not covered here:**
-- BioMASS and PhysiCell data inputs;
+- BioMASS data inputs (see [data to ODE calibration](data-to-ode-calibration-architecture.md)) and PhysiCell data inputs;
 - Codex parity (pending);
 - MCP server changes, and automatic mapping (the researcher decides every row).
 
@@ -183,5 +183,7 @@ The step-by-step procedure is in [data workflow](data-workflow.md). In outline:
 ## 8. Roadmap
 
 1. **Implemented:** the typed handoffs above.
-2. **Later:** BioMASS and PhysiCell data inputs; Codex parity (pending, low priority);
+2. **Implemented (sub-project 3):** BioMASS data inputs and portable calibration jobs; see
+   [data to ODE calibration architecture](data-to-ode-calibration-architecture.md).
+3. **Later:** PhysiCell data inputs; Codex parity (pending, low priority);
    path-level scoping of data mentions; an explicit revocation record.
