@@ -112,6 +112,36 @@ def _write_new(root: Path, path: Path, text: str) -> None:
         handle.write(text)
 
 
+def proposal_table(root: Path, meas: dict) -> Path:
+    """The table of an approved data-analyst `ode_measurements` proposal {session, proposal, approval}."""
+    return _proposal_entry(root, meas)[0]
+
+
+def _proposal_entry(root: Path, meas: dict) -> tuple[Path, str]:
+    session, pid, record_id = meas["session"], meas["proposal"], meas["approval"]
+    if not all(isinstance(v, str) and v for v in (session, pid, record_id)):
+        raise ValueError("session, proposal and approval must be non-empty strings")
+    record = approvals.require_data_approval(root, record_id, session)
+    entry = approvals.require_proposal_approved(root, record, session, pid)
+    if entry.get("kind") != "ode_measurements" or entry.get("target_layer") != "biomass":
+        raise ValueError(f"proposal {pid} must be an ode_measurements proposal for biomass, "
+                         f"not {entry.get('kind')!r} for {entry.get('target_layer')!r}")
+    if not entry["path"].endswith(".csv"):
+        raise ValueError(f"proposal {pid} must be a .csv table")
+    return state.artifact(root, entry["path"]), entry["sha256"]
+
+
+def measurement_table(root: Path, meas: dict) -> tuple[Path, str]:
+    """(path, expected sha256) of a mapping's inputs.measurements, for either route.
+
+    The orchestrator route returns the sha256 bound in the mapping; the data-analyst route returns
+    the sha256 the approved handoff lists for the proposal table.
+    """
+    if set(meas) == FILE_KEYS:
+        return _measurements_path(root, meas["path"]), meas["sha256"]
+    return _proposal_entry(root, meas)
+
+
 # ---------------------------------------------------------------- draft
 
 def draft(root: Path, purpose: str, *, ode_session: str, revision, bundle_rel: str, measurements_rel: str,
@@ -263,17 +293,7 @@ class _Checker:
             self.sources.cited[sid] += 1
 
     def proposal_table(self, meas) -> Path:
-        session, pid, record_id = meas["session"], meas["proposal"], meas["approval"]
-        if not all(isinstance(v, str) and v for v in (session, pid, record_id)):
-            raise ValueError("session, proposal and approval must be non-empty strings")
-        record = approvals.require_data_approval(self.root, record_id, session)
-        entry = approvals.require_proposal_approved(self.root, record, session, pid)
-        if entry.get("kind") != "ode_measurements" or entry.get("target_layer") != "biomass":
-            raise ValueError(f"proposal {pid} must be an ode_measurements proposal for biomass, "
-                             f"not {entry.get('kind')!r} for {entry.get('target_layer')!r}")
-        if not entry["path"].endswith(".csv"):
-            raise ValueError(f"proposal {pid} must be a .csv table")
-        return state.artifact(self.root, entry["path"])
+        return proposal_table(self.root, meas)
 
     # -- time
     def time(self, value) -> None:

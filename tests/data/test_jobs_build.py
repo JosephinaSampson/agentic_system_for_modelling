@@ -1,0 +1,381 @@
+import copy
+import hashlib
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import tarfile
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from scripts import state
+
+try:
+    from tests.data.test_ode_mapping import BUNDLE, MAP, ROWS, SESSION, OdeFixture
+except ImportError:  # discovered with -s tests/data
+    from test_ode_mapping import BUNDLE, MAP, ROWS, SESSION, OdeFixture
+
+from scripts.jobs import build, launch, settings
+from scripts.jobs.runtime import run
+
+REPO = state.ROOT
+SETTINGS = "runs/orchestrator/p1/calibration-settings.json"
+RUNTIME = REPO / "scripts" / "jobs" / "runtime"
+DE_KEYS = {"strategy", "maxiter", "popsize", "tol", "mutation", "recombination", "polish"}
+
+
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def template(name="first-pass"):
+    return json.loads((REPO / "templates" / f"calibration-settings.{name}.json").read_text(encoding="utf-8"))
+
+
+class SettingsTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "s.json"
+
+    def load(self, data):
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        return settings.load(self.path)
+
+    def test_templates_carry_biomass_defaults_and_suggested_restarts(self):
+        for name, restarts in (("first-pass", 10), ("final", 30)):
+            data = self.load(template(name))
+            self.assertEqual(data["restarts"], restarts)
+            self.assertEqual(len(data["seeds"]), restarts)
+            self.assertEqual(data["optimizer_options"], {
+                "strategy": "best1bin", "maxiter": 50, "popsize": 3, "tol": 1e-4, "mutation": 0.1,
+                "recombination": 0.5, "polish": False})
+            self.assertEqual(data["workers"], 1)
+            self.assertEqual(data["reproduce_rtol"], 1e-3)
+
+    def test_settings_requires_every_key_and_pinned_optimizer_keys(self):
+        good = template()
+        self.assertEqual(self.load(good)["restarts"], 10)
+        for key in good:
+            bad = copy.deepcopy(good)
+            del bad[key]
+            with self.assertRaisesRegex(ValueError, key):
+                self.load(bad)
+        with self.assertRaisesRegex(ValueError, "extra"):
+            self.load({**good, "note": "x"})
+        for key in DE_KEYS:
+            bad = copy.deepcopy(good)
+            del bad["optimizer_options"][key]
+            with self.assertRaisesRegex(ValueError, "optimizer_options"):
+                self.load(bad)
+        bad = copy.deepcopy(good)
+        bad["optimizer_options"]["init"] = "latinhypercube"
+        with self.assertRaisesRegex(ValueError, "optimizer_options"):
+            self.load(bad)
+
+    def test_settings_value_checks(self):
+        good = template()
+        cases = [
+            ("seeds", list(range(9))), ("seeds", [1] * 10), ("seeds", [1.5] + list(range(9))),
+            ("restarts", 0), ("restarts", True), ("workers", 0), ("workers", -2), ("parallel", 0),
+            ("slurm", {"time": "1h", "cpus_per_task": 1}), ("slurm", {"time": "01:00:00"}),
+            ("good_fit_margin", 0), ("reproduce_rtol", -1.0), ("reproduce_rtol", "1e-3"),
+        ]
+        for key, value in cases:
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
+                self.load({**good, key: value})
+        for key, value in (("maxiter", 0), ("popsize", 0), ("strategy", "nope"), ("polish", 0),
+                           ("recombination", 1.5), ("mutation", 2.5), ("tol", -1)):
+            bad = copy.deepcopy(good)
+            bad["optimizer_options"][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
+                self.load(bad)
+        self.assertEqual(self.load({**good, "workers": -1})["workers"], -1)
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            self.path.write_text('{"restarts": 1, "restarts": 2}', encoding="utf-8")
+            settings.load(self.path)
+
+
+class JobFixture(OdeFixture):
+    def setUp(self):
+        super().setUp()
+        import zipfile
+        with zipfile.ZipFile(self.root / BUNDLE, "a") as zf:
+            zf.writestr("model/__init__.py", "from .name2idx import C, V\n")
+            zf.writestr("model/ode.py", "def param_values():\n    return [1, 1, 1, 1]\n")
+            zf.writestr("model/name2idx/__init__.py", "from .parameters import C\nfrom .species import V\n")
+            zf.writestr("model/__pycache__/ode.cpython-312.pyc", b"junk")
+            zf.writestr("simulate_1/out.csv", "1,2\n")
+        self.write_rows(ROWS + ["M7,pR,ctrl,60,min,,,9.9,a.u.,,,,fit,s1,Fig. 3"])
+        data = self.complete()
+        data["unmapped"] = [{"measurement_id": "M7", "reason": "readout outside the model scope"}]
+        self.save(data)
+        self.assertEqual(self.errors(), [])
+        settings_path = self.root / SETTINGS
+        settings_path.write_text(json.dumps(template(), indent=2), encoding="utf-8")
+        self.approve()
+
+    def approve(self, record_id="ode-map-1"):
+        digest = sha((self.root / MAP).read_bytes())
+        outputs = ["M1", "M2", "M3", "M4", "M5", "M6", "kf1", "kf2"]
+        state.update(self.root, "record", {
+            "id": record_id, "kind": "stage_approval", "stage": "ode_mapping", "session_id": SESSION,
+            "outputs": outputs, "artifact": {"path": MAP, "sha256": digest},
+            "approved_by": "researcher", "authorization": "researcher: ok"})
+        return record_id
+
+    def build(self, approval="ode-map-1"):
+        return build.build(self.root, MAP, approval, SETTINGS)
+
+    def members(self, job_dir):
+        with tarfile.open(job_dir / "bundle.tar.gz") as tf:
+            return {m.name: (m, tf.extractfile(m).read()) for m in tf.getmembers()}
+
+
+class BuildTests(JobFixture):
+    def test_build_refuses_unapproved_mapping(self):
+        with self.assertRaisesRegex(ValueError, "not found"):
+            self.build("missing-1")
+        data = self.load()
+        data["fit"][1]["upper"] = 2.0
+        self.save(data)  # changed after approval
+        self.assertEqual(self.errors(), [])
+        with self.assertRaisesRegex(ValueError, "sha256"):
+            self.build()
+        self.assertFalse((self.root / "runs/orchestrator/p1/jobs").exists())
+
+    def test_build_refuses_failing_mapping(self):
+        data = self.load()
+        data["unmapped"] = []
+        self.save(data)
+        self.approve("ode-map-2")
+        with self.assertRaisesRegex(ValueError, "M7"):
+            self.build("ode-map-2")
+
+    def test_build_is_deterministic(self):
+        first = self.build()
+        bundle1 = (first / "bundle.tar.gz").read_bytes()
+        self.assertTrue(re.fullmatch(r"job-[0-9a-f]{12}", first.name))
+        self.assertEqual(first.parent.relative_to(self.root).as_posix(), "runs/orchestrator/p1/jobs")
+        # Rebuilding the same inputs yields the same job (left untouched).
+        self.assertEqual(self.build(), first)
+        shutil.rmtree(first)
+        second = self.build()
+        self.assertEqual(second.name, first.name)
+        self.assertEqual(sha((second / "bundle.tar.gz").read_bytes()), sha(bundle1))
+        raw = (second / "bundle.tar.gz").read_bytes()
+        self.assertEqual(raw[4:8], b"\0\0\0\0")  # gzip mtime 0
+        for name, (member, _) in self.members(second).items():
+            self.assertEqual((member.mtime, member.uid, member.gid, member.uname, member.gname), (0, 0, 0, "", ""))
+        names = [m.name for m in tarfile.open(second / "bundle.tar.gz").getmembers()]
+        self.assertEqual(names, sorted(names))
+        info = json.loads((second / "build.json").read_text(encoding="utf-8"))
+        self.assertEqual(info["bundle_sha256"], sha(raw))
+        self.assertIn("built_at", info)
+        self.assertIn("host", info)
+
+    def test_job_id_depends_on_inputs(self):
+        first = self.build()
+        data = template()
+        data["restarts"], data["seeds"] = 2, [5, 6]
+        (self.root / SETTINGS).write_text(json.dumps(data), encoding="utf-8")
+        second = self.build()
+        self.assertNotEqual(first.name, second.name)
+        job = json.loads((second / "job.json").read_text(encoding="utf-8"))
+        self.assertEqual(job["settings"]["seeds"], [5, 6])
+        expected = sha("\n".join([job["mapping"]["sha256"], "ode-map-1", settings.digest(job["settings"]),
+                                  job["export_sha256"], job["framework_commit"]]).encode())
+        self.assertEqual(second.name, "job-" + expected[:12])
+
+    def test_bundle_contents_and_manifest(self):
+        job_dir = self.build()
+        members = self.members(job_dir)
+        prefix = job_dir.name + "/"
+        self.assertTrue(all(name.startswith(prefix) for name in members))
+        files = {name[len(prefix):]: data for name, (_, data) in members.items()}
+        job = json.loads(files["job.json"])
+        self.assertEqual(files["job.json"], (job_dir / "job.json").read_bytes())
+        self.assertEqual(list(job), ["kind", "job_id", "mapping", "export_sha256", "settings", "framework_commit",
+                                     "files"])
+        self.assertEqual(job["kind"], "biomass-calibration")
+        self.assertEqual(job["job_id"], job_dir.name)
+        self.assertEqual(job["mapping"], {"path": MAP, "sha256": sha((self.root / MAP).read_bytes()),
+                                          "approval": "ode-map-1"})
+        self.assertEqual(job["export_sha256"], self.load()["inputs"]["model"]["sha256"])
+        self.assertEqual(job["settings"], settings.load(self.root / SETTINGS))
+        self.assertEqual(set(job["files"]), set(files) - {"job.json"})
+        for rel, digest in job["files"].items():
+            self.assertEqual(sha(files[rel]), digest, rel)
+        for rel in ("run.py", "env/requirements.lock", "env/bootstrap.sh", "launch/local.sh", "launch/remote.sh",
+                    "launch/slurm.sbatch", "README.txt", "calibration/compare.py", "calibration/spec.json",
+                    "model/name2idx/parameters.py", "model/observable.py"):
+            self.assertIn(rel, files)
+        self.assertEqual(files["calibration/compare.py"], (RUNTIME / "compare.py").read_bytes())
+        self.assertEqual(files["run.py"], (RUNTIME / "run.py").read_bytes())
+        self.assertEqual(files["env/requirements.lock"], (REPO / "setup" / "biomass-calibration.lock").read_bytes())
+        # Only the model package of the export: no saved runs, run_simulation.py or requirements.txt.
+        self.assertNotIn("run_simulation.py", files)
+        self.assertNotIn("requirements.txt", files)
+        self.assertFalse([rel for rel in files if "__pycache__" in rel or rel.startswith("simulate_")])
+        modes = {name[len(prefix):]: m.mode for name, (m, _) in members.items()}
+        self.assertEqual(modes["env/bootstrap.sh"], 0o755)
+        self.assertEqual(modes["run.py"], 0o755)
+        self.assertEqual(modes["calibration/spec.json"], 0o644)
+
+    def test_bundle_contains_only_mapping_rows(self):
+        job_dir = self.build()
+        files = {n.split("/", 1)[1]: d for n, (_, d) in self.members(job_dir).items()}
+        spec = json.loads(files["calibration/spec.json"])
+        used = {mid for rule in self.load()["rules"] for mid in rule["measurements"]}
+        self.assertEqual(set(spec["measurements"]), used)
+        self.assertNotIn("M7", json.dumps(spec))
+        self.assertEqual(spec["measurements"]["M2"]["value"], 3.0)
+        self.assertFalse([rel for rel in files if rel.startswith(("inputs/", "runs/")) or rel.endswith(".csv")])
+        blob = b"".join(files.values())
+        self.assertNotIn(b"%PDF", blob)
+        self.assertNotIn(b"Fig. 3", blob)
+
+    def test_bundle_refuses_unsafe_export_members(self):
+        import zipfile
+        bundle = self.root / self.load()["inputs"]["model"]["bundle"]
+        with zipfile.ZipFile(bundle, "a") as zf:
+            zf.writestr("model/../evil.py", "x = 1\n")
+        data = self.load()
+        data["inputs"]["model"]["sha256"] = sha(bundle.read_bytes())
+        self.save(data)
+        self.approve("ode-map-3")
+        with self.assertRaisesRegex(ValueError, "evil"):
+            self.build("ode-map-3")
+
+    def test_cli_build(self):
+        out = io.StringIO()
+        with mock.patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": str(self.root)}), \
+                mock.patch("sys.stdout", out):
+            code = build.main(["--mapping", MAP, "--approval", "ode-map-1", "--settings", SETTINGS])
+        self.assertEqual(code, 0)
+        self.assertIn("job-", out.getvalue())
+
+
+class RuntimeFileTests(unittest.TestCase):
+    def test_bootstrap_script_pins(self):
+        path = RUNTIME / "bootstrap.sh"
+        subprocess.run(["bash", "-n", str(path)], check=True)
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("UV_VERSION=0.13.4", text)
+        for triple in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin",
+                       "aarch64-apple-darwin"):
+            self.assertIn(triple, text)
+        self.assertEqual(len(set(re.findall(r"\b[0-9a-f]{64}\b", text))), 4)
+        self.assertIn("--require-hashes", text)
+        self.assertIn("selftest", text)
+        self.assertIn("env_report", text)
+
+    def test_launch_scripts_parse(self):
+        for name in ("local.sh", "remote.sh", "slurm.sbatch"):
+            subprocess.run(["bash", "-n", str(RUNTIME / name)], check=True)
+
+    def test_lock_pins_biomass(self):
+        text = (REPO / "setup" / "biomass-calibration.lock").read_text(encoding="utf-8")
+        self.assertIn("biomass==0.14.0", text)
+        self.assertIn("--hash=sha256:", text)
+        for line in text.splitlines():
+            if line and not line.startswith((" ", "#")):
+                self.assertRegex(line, r"^[A-Za-z0-9_.-]+==[^ ]+( ;.*)? \\$", line)
+
+    def test_runner_imports_without_numpy(self):
+        # run.py is imported by the repository tests and launch.py with the stdlib only.
+        source = (RUNTIME / "run.py").read_text(encoding="utf-8")
+        top = [line for line in source.splitlines() if line.startswith(("import ", "from "))]
+        self.assertFalse([line for line in top if re.search(r"numpy|scipy|biomass|matplotlib", line)], top)
+
+    def test_runner_times_exact(self):
+        spec = {"times_model": {"ctrl": [0.0, 7.5, 90.0], "dose": [0.0, 30.0]}}
+        self.assertEqual(run.model_times(spec, "ctrl"), [0.0, 7.5, 90.0])
+        self.assertTrue(all(type(t) is float for t in run.model_times(spec, "ctrl")))
+        spec = json.loads(json.dumps({"times_model": {"c": [90.0, 0.0, 7.5]}}))
+        self.assertEqual(run.model_times(spec, "c"), [0.0, 7.5, 90.0])
+        self.assertEqual(run.model_times({"times_model": {"c": [30]}}, "c"), [0.0, 30.0])
+
+    def test_gene_to_value_matches_biomass(self):
+        fit = [{"name": "k", "log10_lower": -3.0, "log10_upper": 1.0}]
+        self.assertAlmostEqual(run.gene2val(fit, [0.0])["k"], 1e-3)
+        self.assertAlmostEqual(run.gene2val(fit, [1.0])["k"], 10.0)
+        self.assertAlmostEqual(run.gene2val(fit, [0.5])["k"], 0.1)
+
+
+class LaunchTests(JobFixture):
+    def setUp(self):
+        super().setUp()
+        self.job_dir = self.build()
+        self.job_id = self.job_dir.name
+        self.cache = self.root / "cache"
+        env = mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.cache)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def fake_results(self, job_sha=None):
+        cache_job = launch.unpack(self.root, self.job_id)
+        self.assertEqual(cache_job, self.cache / "agentic-jobs" / self.job_id)
+        payload = json.dumps({"job_sha256": job_sha or sha((self.job_dir / "job.json").read_bytes()),
+                              "partial": False, "restarts": [], "files": {}}).encode()
+        with tarfile.open(cache_job / "results.tar.gz", "w:gz") as tf:
+            info = tarfile.TarInfo("results.json")
+            info.size = len(payload)
+            tf.addfile(info, io.BytesIO(payload))
+        return cache_job
+
+    def test_unpack_verifies_manifest(self):
+        cache_job = launch.unpack(self.root, self.job_id)
+        self.assertTrue((cache_job / "run.py").is_file())
+        self.assertTrue(os.access(cache_job / "env" / "bootstrap.sh", os.X_OK))
+        self.assertEqual(launch.unpack(self.root, self.job_id), cache_job)  # reused
+        (cache_job / "run.py").write_text("tampered\n")
+        with self.assertRaisesRegex(ValueError, "run.py"):
+            launch.unpack(self.root, self.job_id)
+
+    def test_unknown_job_refused(self):
+        with self.assertRaisesRegex(ValueError, "job id"):
+            launch.find_job(self.root, "../x")
+        with self.assertRaisesRegex(ValueError, "no job"):
+            launch.find_job(self.root, "job-000000000000")
+
+    def test_fetch_refuses_overwrite(self):
+        self.fake_results()
+        dest = launch.fetch(self.root, self.job_id)
+        self.assertEqual(dest.relative_to(self.root).as_posix(),
+                         f"inputs/calibration-results/{self.job_id}/results.tar.gz")
+        before = dest.read_bytes()
+        with self.assertRaisesRegex(ValueError, "overwrite"):
+            launch.fetch(self.root, self.job_id)
+        self.assertEqual(dest.read_bytes(), before)
+
+    def test_fetch_refuses_results_of_another_job(self):
+        self.fake_results(job_sha="0" * 64)
+        with self.assertRaisesRegex(ValueError, "job.json"):
+            launch.fetch(self.root, self.job_id)
+        self.assertFalse((self.root / "inputs" / "calibration-results").exists())
+
+    def test_fetch_without_results(self):
+        launch.unpack(self.root, self.job_id)
+        with self.assertRaisesRegex(ValueError, "results.tar.gz"):
+            launch.fetch(self.root, self.job_id)
+
+    def test_status_counts_restarts(self):
+        cache_job = launch.unpack(self.root, self.job_id)
+        for n, status in ((1, "ok"), (2, "failed")):
+            out = cache_job / "out" / f"restart-{n}"
+            out.mkdir(parents=True)
+            (out / "result.json").write_text(json.dumps({"restart": n, "status": status}))
+        info = launch.status(self.root, self.job_id)
+        self.assertEqual((info["restarts"], info["ok"], info["failed"]), (10, 1, 1))
+        self.assertEqual(info["pending"], list(range(3, 11)))
+        self.assertFalse(info["running"])
+        self.assertFalse(info["results"])
+
+
+if __name__ == "__main__":
+    unittest.main()

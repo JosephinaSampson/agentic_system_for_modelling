@@ -1,0 +1,36 @@
+BioMASS calibration job
+=======================
+
+This folder is a complete calibration job: the model, the measurements it is fitted to, the
+fitting settings (job.json) and the scripts to run it. You need a Linux or macOS machine with
+bash, curl (or wget), tar and internet access. Nothing else has to be installed: the first
+command downloads a checksum-verified uv, a Python 3.12 and biomass 0.14.0 (hash-locked) into
+this folder only.
+
+Three commands, run inside this folder:
+
+  1. bash env/bootstrap.sh
+       Sets up the environment and runs a short self-test (a few minutes).
+       Success: the last line is "bootstrap: environment ready" and env_report.json says
+       "status": "ok".
+
+  2. bash launch/local.sh            (or: bash launch/local.sh --parallel 8)
+       Runs all restarts (see "restarts" in job.json), several at a time, then collects.
+       Rerunning it resumes: finished restarts are kept.
+       Success: the last line is "results.tar.gz written: N/N restarts (... ok)".
+
+  3. Send back results.tar.gz (it contains the fitted values, scores, traces, figures, logs
+     and env_report.json).
+
+On a server you log in to with ssh, use launch/remote.sh instead of step 2, so the run keeps
+going after you log out:
+
+  bash launch/remote.sh setup
+  bash launch/remote.sh start --parallel 8
+  bash launch/remote.sh status
+  bash launch/remote.sh collect       (when status shows all restarts done; earlier = partial)
+
+On a SLURM cluster: bash launch/remote.sh setup on the login node, then see the header of
+launch/slurm.sbatch.
+
+Nothing here edits files outside this folder (uv's download cache is env/uv-cache).
