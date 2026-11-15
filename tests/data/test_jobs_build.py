@@ -5,9 +5,12 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
+import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -191,6 +194,18 @@ class BuildTests(JobFixture):
                                   job["export_sha256"], job["framework_commit"]]).encode())
         self.assertEqual(second.name, "job-" + expected[:12])
 
+    def test_settings_key_order_does_not_change_the_bundle(self):
+        first = self.build()
+        bundle = (first / "bundle.tar.gz").read_bytes()
+        shutil.rmtree(first)
+        data = template()
+        reordered = {key: data[key] for key in reversed(list(data))}
+        reordered["optimizer_options"] = dict(reversed(list(data["optimizer_options"].items())))
+        (self.root / SETTINGS).write_text(json.dumps(reordered, indent=4), encoding="utf-8")
+        second = self.build()
+        self.assertEqual(second.name, first.name)
+        self.assertEqual((second / "bundle.tar.gz").read_bytes(), bundle)
+
     def test_bundle_contents_and_manifest(self):
         job_dir = self.build()
         members = self.members(job_dir)
@@ -260,6 +275,106 @@ class BuildTests(JobFixture):
         self.assertIn("job-", out.getvalue())
 
 
+class FrameworkCommitTests(unittest.TestCase):
+    def git(self, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.org", "-C", str(self.repo), *args],
+                       check=True, capture_output=True)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = Path(tmp.name)
+        for rel in ("scripts/jobs/build.py", "scripts/ode/x.py", "setup/biomass-calibration.lock", "docs/a.md"):
+            (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / rel).write_text("v1\n")
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "init")
+        self.head = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], capture_output=True,
+                                   text=True, check=True).stdout.strip()
+
+    def test_dirty_marker_only_for_runtime_paths(self):
+        self.assertEqual(build.framework_commit(self.repo), self.head)
+        (self.repo / "docs/a.md").write_text("v2\n")
+        self.assertEqual(build.framework_commit(self.repo), self.head)
+        for rel in ("scripts/jobs/build.py", "setup/biomass-calibration.lock"):
+            (self.repo / rel).write_text("v2\n")
+            self.assertEqual(build.framework_commit(self.repo), self.head + "-dirty", rel)
+            self.git("checkout", "--", rel)
+        (self.repo / "scripts/ode/new.py").write_text("x\n")  # untracked counts too
+        self.assertEqual(build.framework_commit(self.repo), self.head + "-dirty")
+
+    def test_no_git_is_unknown(self):
+        with tempfile.TemporaryDirectory() as other:
+            self.assertEqual(build.framework_commit(Path(other)), "unknown")
+
+
+class RuntimeConcurrencyTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def test_concurrent_status_writes_never_raise(self):
+        import threading
+        target = self.root / "out" / "status.json"
+        errors = []
+
+        def writer(k):
+            try:
+                for i in range(200):
+                    run.write_json(target, {"writer": k, "i": i, "pad": "x" * 2000})
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(k,)) for k in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(json.loads(target.read_text())["i"], 199)
+        self.assertEqual([p.name for p in target.parent.iterdir()], ["status.json"])  # no temp files left
+
+    def job(self, restarts=2):
+        (self.root / "job.json").write_text(json.dumps({"job_id": "job-000000000000", "settings": {
+            "restarts": restarts, "seeds": [1, 2], "optimizer_options": {}, "workers": 1}}))
+
+    def test_calibrate_status_writes_are_best_effort(self):
+        self.job()
+        done = {"restart": 1, "seed": 1, "score": 1.0, "status": "ok", "params": {}, "wall_time_s": 0.0}
+        with mock.patch.object(run, "status", side_effect=FileNotFoundError("raced")), \
+                mock.patch.object(run, "run_restart", return_value=done) as restart, \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(run.cmd_calibrate(self.root, 1), 0)
+        restart.assert_called_once()
+        owner = json.loads((self.root / "out" / "restart-1" / "owner.json").read_text())
+        self.assertEqual(owner["pid"], os.getpid())
+
+    def test_selftest_cap_is_hard(self):
+        self.job()
+
+        def stubborn(*args, **kwargs):  # swallows ordinary exceptions, as Problem.__call__ does
+            give_up = time.monotonic() + 4
+            while time.monotonic() < give_up:
+                try:
+                    time.sleep(0.05)
+                except Exception:  # noqa: BLE001
+                    pass
+            return {"restart": 0, "seed": 1, "score": 1.0, "status": "ok", "params": {}, "wall_time_s": 4.0}
+
+        with mock.patch.object(run, "SELFTEST_CAP_S", 1), mock.patch.object(run, "run_restart", stubborn), \
+                mock.patch("sys.stdout", io.StringIO()):
+            started = time.monotonic()
+            self.assertEqual(run.cmd_selftest(self.root), 1)
+        self.assertLess(time.monotonic() - started, 3)
+        report = json.loads((self.root / "out" / "selftest" / "selftest.json").read_text())
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("cap", report["error"])
+        self.assertTrue(issubclass(run.SelftestTimeout, BaseException))
+        self.assertFalse(issubclass(run.SelftestTimeout, Exception))
+
+
 class RuntimeFileTests(unittest.TestCase):
     def test_bootstrap_script_pins(self):
         path = RUNTIME / "bootstrap.sh"
@@ -273,6 +388,11 @@ class RuntimeFileTests(unittest.TestCase):
         self.assertIn("--require-hashes", text)
         self.assertIn("selftest", text)
         self.assertIn("env_report", text)
+        # Every uv write stays in the job folder: no versioned python in ~/.local/bin, no ~/.local/share/uv.
+        self.assertRegex(text, r'"\$UV" python install --no-bin ')
+        for var in ("UV_PYTHON_BIN_DIR", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR", "UV_TOOL_DIR", "UV_TOOL_BIN_DIR",
+                    "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_BIN_HOME"):
+            self.assertRegex(text, rf'export {var}="\$\{{?JOB_DIR', var)
 
     def test_launch_scripts_parse(self):
         for name in ("local.sh", "remote.sh", "slurm.sbatch"):
@@ -373,8 +493,39 @@ class LaunchTests(JobFixture):
         info = launch.status(self.root, self.job_id)
         self.assertEqual((info["restarts"], info["ok"], info["failed"]), (10, 1, 1))
         self.assertEqual(info["pending"], list(range(3, 11)))
-        self.assertFalse(info["running"])
+        self.assertEqual((info["running"], info["stale"]), ([], []))
+        self.assertFalse(info["launcher_running"])
         self.assertFalse(info["results"])
+
+    def test_status_reports_stale_restarts(self):
+        cache_job = launch.unpack(self.root, self.job_id)
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        owners = {3: {"host": socket.gethostname(), "pid": os.getpid()},   # alive here
+                  4: {"host": socket.gethostname(), "pid": dead.pid},      # gone
+                  5: None,                                                 # no owner recorded
+                  6: {"host": "compute-node-17", "pid": 1}}               # another host (SLURM): cannot check
+        for n, owner in owners.items():
+            folder = cache_job / "out" / f"restart-{n}"
+            folder.mkdir(parents=True)
+            if owner:
+                (folder / "owner.json").write_text(json.dumps(owner))
+        info = run.status(cache_job, write=False)
+        self.assertEqual(info["running"], [3, 6])
+        self.assertEqual(info["stale"], [4, 5])
+        self.assertEqual(info["pending"], [1, 2, 7, 8, 9, 10])
+
+    def test_validate_refused_while_start_bootstraps(self):
+        cache_job = launch.unpack(self.root, self.job_id)
+        (cache_job / "launch.pid").write_text(f"{os.getpid()}\n")  # a live launcher, environment not ready
+        with mock.patch.object(launch.subprocess, "run") as called:
+            with self.assertRaisesRegex(ValueError, "running"):
+                launch.validate(self.root, self.job_id, None, "fit", None)
+            called.assert_not_called()
+        (cache_job / "env_report.json").write_text(json.dumps({"status": "ok"}))
+        with mock.patch.object(launch.subprocess, "run") as called:
+            called.return_value.returncode = 0
+            self.assertEqual(launch.validate(self.root, self.job_id, None, "fit", None), 0)
 
 
 if __name__ == "__main__":

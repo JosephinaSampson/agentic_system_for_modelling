@@ -7,7 +7,9 @@ writes runs/orchestrator/<p>/jobs/<job-id>/{bundle.tar.gz, job.json, build.json}
 
 The mapping must pass `ode_mapping.py check` and carry an `ode_mapping` stage_approval of exactly its
 bytes. Job id = "job-" + the first 12 hex digits of sha256 over (mapping sha256, approval id, settings
-sha256, export sha256, framework commit), one per line. The settings sha256 is the sha256 of their
+sha256, export sha256, framework commit), one per line. The framework commit is the HEAD of this
+checkout, suffixed "-dirty" when scripts/jobs/, scripts/ode/ or setup/biomass-calibration.lock have
+uncommitted changes. The settings sha256 is the sha256 of their
 canonical JSON (scripts/jobs/settings.py `digest`).
 
 bundle.tar.gz holds one directory `<job-id>/` with:
@@ -22,7 +24,10 @@ bundle.tar.gz holds one directory `<job-id>/` with:
 The archive has no timestamps or owners (mtime 0, uid/gid 0, empty names, sorted entries, gzip mtime 0
 and no file name), so the same inputs give the same bytes. build.json, outside the bundle, records the
 build time, the host and the bundle sha256. Rebuilding an existing job returns it untouched when the
-bundle is identical and refuses otherwise.
+bundle is identical and refuses otherwise. The tar bytes are fully deterministic, but the gzip stream
+depends on the build host's zlib: rebuilding on another machine gives the same job id and the same
+file hashes in job.json, yet possibly different bundle.tar.gz bytes, which the rebuild then refuses
+("exists with a different bundle"). Keep and ship the bundle that was built first.
 """
 
 from __future__ import annotations
@@ -69,17 +74,23 @@ RUNTIME_FILES = {
     "launch/slurm.sbatch": RUNTIME / "slurm.sbatch",
 }
 EXECUTABLE = {"run.py", "env/bootstrap.sh", "launch/local.sh", "launch/remote.sh", "launch/slurm.sbatch"}
+# framework paths whose uncommitted changes mark the framework commit "-dirty" (ruling S3-ode)
+DIRTY_PATHS = ("scripts/jobs", "scripts/ode", "setup/biomass-calibration.lock")
 REQUIRED_MODEL = ("model/__init__.py", "model/ode.py", "model/observable.py", "model/name2idx/__init__.py",
                   "model/name2idx/parameters.py", "model/name2idx/species.py")
 
 
-def framework_commit() -> str:
+def framework_commit(repo: Path = FRAMEWORK) -> str:
+    """HEAD of the framework checkout, + "-dirty" when the bundled runtime paths have uncommitted changes
+    (tracked or untracked, per `git status --porcelain`); "unknown" without git."""
     try:
-        out = subprocess.run(["git", "-C", str(FRAMEWORK), "rev-parse", "HEAD"], capture_output=True,
-                             text=True, timeout=30, check=True)
-        return out.stdout.strip()
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
+                              text=True, timeout=30, check=True).stdout.strip()
+        changes = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", *DIRTY_PATHS],
+                                 capture_output=True, text=True, timeout=30, check=True).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return "unknown"
+    return f"{head}-dirty" if changes else head
 
 
 def _sha(data: bytes) -> str:
@@ -158,7 +169,8 @@ def assemble(root: Path, mapping_rel: str, approval_id: str, settings_rel: str) 
     if errors:
         raise ValueError("the mapping does not pass ode_mapping check:\n  " + "\n  ".join(errors))
     approvals.require_ode_mapping_approval(root, approval_id, mapping_rel, mapping_sha)
-    settings = job_settings.load(state.artifact(root, settings_rel))
+    # canonical key order, so settings that differ only in key order or layout give identical bundles
+    settings = json.loads(job_settings.canonical(job_settings.load(state.artifact(root, settings_rel))))
     model = mapping["inputs"]["model"]
     export = state.artifact(root, model["bundle"]).read_bytes()
     export_sha = _sha(export)

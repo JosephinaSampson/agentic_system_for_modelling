@@ -136,15 +136,23 @@ def status(root: Path, job_id: str) -> dict:
     find_job(root, job_id)
     target = cache_root() / job_id
     if not target.is_dir():
-        return {"job_id": job_id, "cache_dir": str(target), "unpacked": False, "running": False}
+        return {"job_id": job_id, "cache_dir": str(target), "unpacked": False, "launcher_running": False}
     info = runtime.status(target, write=False)
     env = target / "env_report.json"
     try:
         env_status = json.loads(env.read_text(encoding="utf-8")).get("status") if env.is_file() else None
     except ValueError:
         env_status = "unreadable"
-    info.update(cache_dir=str(target), unpacked=True, running=_pid(target) is not None, environment=env_status)
+    info.update(cache_dir=str(target), unpacked=True, launcher_running=_pid(target) is not None,
+                environment=env_status)
     return info
+
+
+def _environment_ok(target: Path) -> bool:
+    try:
+        return json.loads((target / "env_report.json").read_text(encoding="utf-8")).get("status") == "ok"
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def _results_json(data: bytes) -> dict:
@@ -187,6 +195,10 @@ def fetch(root: Path, job_id: str) -> Path:
 
 def validate(root: Path, job_id: str, params: str | None, use: str, out: str | None) -> int:
     target = unpack(root, job_id)
+    if _pid(target) and not _environment_ok(target):
+        # a `start` is bootstrapping: a second bootstrap would rebuild .venv under it
+        raise ValueError(f"job {job_id} is running (pid {_pid(target)}) and its environment is not ready yet; "
+                         "retry when `launch.py local status` shows environment ok")
     subprocess.run(["bash", "env/bootstrap.sh"], cwd=target, check=True)
     command = [str(target / ".venv" / "bin" / "python"), "run.py", "validate", "--use", use]
     if params:

@@ -6,11 +6,12 @@
 # Needs: bash, curl or wget, tar, internet access. Steps:
 #   1. download uv 0.13.4 for this machine (uname -sm) into env/tools/ and verify its sha256
 #      (pinned below, from the official GitHub release .sha256 files);
-#   2. uv python install 3.12 (into env/python/, uv-managed CPython only);
+#   2. uv python install --no-bin 3.12 (into env/python/, uv-managed CPython only);
 #   3. uv venv .venv and uv pip sync --require-hashes env/requirements.lock;
 #   4. python run.py selftest (one tiny restart and a nominal validate, capped at 300 s);
 #   5. write env_report.json.
 # Safe to rerun: a ready environment (env_report.json with "status": "ok") is kept.
+# Nothing is written outside the job folder (uv, Python, caches and matplotlib config live under env/).
 set -euo pipefail
 
 JOB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,16 +94,26 @@ if [ ! -x "$UV" ]; then
 fi
 "$UV" --version
 
-# uv: ignore user/system uv.toml, keep Python and caches of this job in the job folder
+# uv: ignore user/system uv.toml; every uv write (Python, its executables, caches, tools) stays in the
+# job folder. Nothing is written to ~/.local/bin, ~/.local/share/uv or ~/.cache/uv; the XDG variables
+# are a backstop for anything uv or the selftest would otherwise put in the home directory.
 export UV_NO_CONFIG=1
-export UV_PYTHON_INSTALL_DIR="$JOB_DIR/env/python"
 export UV_PYTHON_PREFERENCE=only-managed
-export UV_CACHE_DIR="${UV_CACHE_DIR:-$JOB_DIR/env/uv-cache}"
+export UV_PYTHON_INSTALL_DIR="$JOB_DIR/env/python"
+export UV_PYTHON_BIN_DIR="$JOB_DIR/env/bin"
+export UV_CACHE_DIR="$JOB_DIR/env/uv-cache"
+export UV_TOOL_DIR="$JOB_DIR/env/uv-tools"
+export UV_TOOL_BIN_DIR="$JOB_DIR/env/bin"
+export XDG_DATA_HOME="$JOB_DIR/env/xdg/data"
+export XDG_CACHE_HOME="$JOB_DIR/env/xdg/cache"
+export XDG_CONFIG_HOME="$JOB_DIR/env/xdg/config"
+export XDG_BIN_HOME="$JOB_DIR/env/bin"
+export MPLCONFIGDIR="$JOB_DIR/env/mplconfig"
 unset VIRTUAL_ENV PYTHONPATH PYTHONHOME || true
 
-# 2. pinned Python
+# 2. pinned Python (--no-bin: no versioned python executable on the user's PATH)
 say "installing Python $PYTHON_VERSION (uv-managed)"
-"$UV" python install "$PYTHON_VERSION"
+"$UV" python install --no-bin "$PYTHON_VERSION"
 
 # 3. virtual environment from the hash-locked lock
 say "creating .venv and syncing env/requirements.lock (--require-hashes)"

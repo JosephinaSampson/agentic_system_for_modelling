@@ -14,6 +14,11 @@ Exact keys (missing or extra keys are refused):
 
 `workers` is the BioMASS `optimizer_options["workers"]`; it is kept at the top level so a single
 value governs it, and the runner passes it to differential_evolution.
+
+When few parameters are fitted, raise `popsize` and/or `maxiter`: the population is popsize x n
+members (at least 5), so with the BioMASS defaults 2 fitted parameters give a population of 6 that
+collapses and stops early at a poor score (seen live: SSE 0.4 after 10 generations where 1.6e-6 was
+attainable). More restarts alone do not fix this.
 """
 
 from __future__ import annotations

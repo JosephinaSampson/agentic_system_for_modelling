@@ -51,7 +51,9 @@ import platform
 import shutil
 import signal
 import sys
+import socket
 import tarfile
+import tempfile
 import time
 import traceback
 import warnings
@@ -97,11 +99,19 @@ def read_json(path: Path):
 
 
 def write_json(path: Path, data) -> None:
+    """Atomic write; a unique temp file per writer, so concurrent restarts never collide."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    text = json.dumps(data, indent=2, allow_nan=False) + "\n"
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def _finite_or_none(value):
@@ -119,11 +129,34 @@ def load_compare(root: Path = ROOT):
     raise FileNotFoundError("calibration/compare.py is missing")
 
 
+def _owner_alive(folder: Path) -> bool:
+    """A restart folder without result.json is running if its owner.json names a live process on this host,
+    or a process on another host (a SLURM compute node: it cannot be checked from here); otherwise stale."""
+    try:
+        owner = read_json(folder / "owner.json")
+        host, pid = owner["host"], int(owner["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if host != socket.gethostname():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def status(root: Path = ROOT, write: bool = True) -> dict:
-    """Progress of the restarts from out/restart-N/result.json (stdlib; also used by launch.py)."""
+    """Progress of the restarts from out/restart-N/ (stdlib; also used by launch.py).
+
+    done = result.json written (ok or failed); running = no result yet and its owner process is alive
+    (or on another host); stale = no result and no live owner (killed or crashed: rerun it); pending = not started.
+    """
     job = read_json(root / "job.json")
     total = job["settings"]["restarts"]
-    ok, failed, running, pending = [], [], [], []
+    ok, failed, running, stale, pending = [], [], [], [], []
     for n in range(1, total + 1):
         folder = root / OUT / f"restart-{n}"
         result = folder / "result.json"
@@ -134,11 +167,11 @@ def status(root: Path = ROOT, write: bool = True) -> dict:
                 state = "failed"
             (ok if state == "ok" else failed).append(n)
         elif folder.is_dir():
-            running.append(n)
+            (running if _owner_alive(folder) else stale).append(n)
         else:
             pending.append(n)
     info = {"job_id": job["job_id"], "updated_at": now(), "restarts": total, "ok": len(ok), "failed": len(failed),
-            "done": sorted(ok + failed), "running": running, "pending": pending,
+            "done": sorted(ok + failed), "running": running, "stale": stale, "pending": pending,
             "results": (root / "results.tar.gz").is_file()}
     if write and (root / OUT).is_dir():
         write_json(root / OUT / "status.json", info)
@@ -348,6 +381,9 @@ def run_restart(root: Path, restart: int, seed: int, options: dict, workers: int
         log(f"finished: {res.message} nit {res.nit} nfev {res.nfev}; score {score!r} status {result['status']}")
     except Exception as exc:  # noqa: BLE001 - recorded as a failed restart
         log(f"FAILED: {type(exc).__name__}: {exc}\n{traceback.format_exc()}")
+    except BaseException as exc:  # the selftest cap or an interrupt: record it, then let it propagate
+        log(f"STOPPED: {type(exc).__name__}: {exc}")
+        raise
     finally:
         result["wall_time_s"] = round(time.monotonic() - start, 3)
         if not trace_path.exists():
@@ -355,6 +391,14 @@ def run_restart(root: Path, restart: int, seed: int, options: dict, workers: int
         write_json(out_dir / "result.json", result)
         log.close()
     return result
+
+
+def _status_best_effort(root: Path) -> None:
+    """status.json is informative only: a failed write must never cost a restart."""
+    try:
+        status(root)
+    except (OSError, ValueError) as exc:
+        print(f"warning: status.json not updated: {exc}", file=sys.stderr)
 
 
 def cmd_calibrate(root: Path, restart: int) -> int:
@@ -368,12 +412,13 @@ def cmd_calibrate(root: Path, restart: int) -> int:
         print(f"restart {restart} already done (out/restart-{restart}/result.json); not rerun")
         return 0
     if out_dir.exists():
-        shutil.rmtree(out_dir)  # an interrupted attempt; start the restart again from its seed
+        shutil.rmtree(out_dir)  # an interrupted (stale) attempt; start the restart again from its seed
     out_dir.mkdir(parents=True)
-    status(root)
+    write_json(out_dir / "owner.json", {"host": socket.gethostname(), "pid": os.getpid(), "started_at": now()})
+    _status_best_effort(root)
     result = run_restart(root, restart, settings["seeds"][restart - 1], settings["optimizer_options"],
                          settings["workers"], out_dir)
-    status(root)
+    _status_best_effort(root)
     print(f"restart {restart}: {result['status']} score={result['score']} wall_time_s={result['wall_time_s']}")
     return 0 if result["status"] == "ok" else 1
 
@@ -428,14 +473,18 @@ def cmd_validate(root: Path, params_file: str | None, use: str, out: str | None)
 
 # ---------------------------------------------------------------- selftest
 
+class SelftestTimeout(BaseException):
+    """The selftest cap. A BaseException, so the objective's `except Exception` cannot swallow it."""
+
+
 class _Cap:
-    """Raise TimeoutError after `seconds` (SIGALRM, POSIX)."""
+    """Raise SelftestTimeout after `seconds` (SIGALRM, POSIX)."""
 
     def __init__(self, seconds: int):
         self.seconds = seconds
 
     def _fire(self, *_):
-        raise TimeoutError(f"selftest exceeded its {self.seconds} s cap")
+        raise SelftestTimeout(f"selftest exceeded its {self.seconds} s cap")
 
     def __enter__(self):
         if hasattr(signal, "SIGALRM"):
@@ -470,7 +519,7 @@ def cmd_selftest(root: Path) -> int:
             write_json(out_dir / "validate.json", check)
             report["validate_nominal_score"] = check["score"]
         report["status"] = "ok" if result["status"] == "ok" else "failed"
-    except Exception as exc:  # noqa: BLE001
+    except (Exception, SelftestTimeout) as exc:  # noqa: BLE001 - run_restart's finally wrote result.json
         report["error"] = f"{type(exc).__name__}: {exc}"
     report["wall_time_s"] = round(time.monotonic() - start, 3)
     write_json(out_dir / "selftest.json", report)
@@ -669,6 +718,7 @@ def cmd_collect(root: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("MPLBACKEND", "Agg")
+    os.environ.setdefault("MPLCONFIGDIR", str(ROOT / "env" / "mplconfig"))  # keep matplotlib's cache in the job
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("selftest")
