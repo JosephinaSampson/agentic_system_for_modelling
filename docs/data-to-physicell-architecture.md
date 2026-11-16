@@ -131,7 +131,8 @@ outline:
 - **Dispatch lineage:** `lineage.dispatched_with` finds, in
   `runs/multicellular-configurator/<session>/invocation/*/task.txt`, a line 2 that is exactly the
   design or projection `DATA_INPUT` form naming that path and sha256, under a well-formed line-1
-  `STAGE_GATE` (`gate.stage_gate_form`) bound to the design, for a projection to its design (`gate.design_upstream`:
+  `STAGE_GATE` (`gate.stage_gate_form`, the one STAGE_GATE parser: `check_task` and the MaBoSS mapping
+  checks use it too, so duplicate keys are refused at dispatch and in lineage alike) bound to the design, for a projection to its design (`gate.design_upstream`:
   `upstream_session_id` is the design's one MaBoSS handoff session; `standalone_decision_id` only without
   handoffs, and its `standalone_approval` must exist, `gate.standalone`), whose `approval` is a real approval of the matching stage binding
   exactly that path and sha256 (`approvals.require_physicell_design_approval` /

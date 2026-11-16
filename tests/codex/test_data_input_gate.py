@@ -1293,6 +1293,22 @@ class PhysiCellDataInputTests(ProjectionBase):
         self.refused(self.task(self.design_line(), gate_line=bad_gate), "approval")
         self.refused(self.task(self.projection_line(), gate_line=bad_gate), "approval")
 
+    def test_duplicate_key_stage_gate_refused_by_the_hook(self):
+        # PR #17 review 4587426903: one parser (gate.stage_gate_form) defines a well-formed STAGE_GATE; check_task
+        # refuses duplicate keys as lineage does, so the hook never dispatches a brief lineage would refuse
+        twice = ('STAGE_GATE {"upstream_session_id": "x", "upstream_session_id": "%s", "outputs": ["A", "B"]}'
+                 % MC_MABOSS)
+        for prompt in (f"{twice}\nImport the approved handoff.", self.task(self.design_line(), gate_line=twice),
+                       self.task(self.projection_line(), gate_line=twice)):
+            with self.subTest(prompt=prompt.splitlines()[1]):
+                self.refused(prompt, "STAGE_GATE has duplicate keys")
+        with self.assertRaisesRegex(ValueError, "STAGE_GATE has duplicate keys"):
+            gate.check_task(self.root, "multicellular_configurator", twice)
+        result = self.hook("boolean-dynamics-modeler", twice.replace(MC_MABOSS, "neko-1") + "\nImport.")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("STAGE_GATE has duplicate keys", result.stderr)
+        self.accepted(f"{MC_GATE}\nImport the approved handoff.")
+
     def test_stage_gate_only_brief_naming_a_mapping_file_refused(self):
         # Intended (CLAUDE.md): model input files, recognised by content, are named only on a DATA_INPUT line
         rel = "runs/orchestrator/p5/mapping.json"

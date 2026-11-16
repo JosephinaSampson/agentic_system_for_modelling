@@ -235,10 +235,10 @@ STAGE_GATE_FORMS = ({"upstream_session_id", "outputs"}, {"standalone_decision_id
 
 
 def stage_gate_form(line):
-    """The value of a well-formed line-1 `STAGE_GATE` (strict JSON object: exactly upstream_session_id or
-    standalone_decision_id, an identifier, and outputs, a nonempty unique list of node names); ValueError otherwise.
-    Shape only: check_task resolves it against the durable records (lineage uses this to recognise a recorded brief
-    whose dispatch the hook verified)."""
+    """The value of a well-formed line-1 `STAGE_GATE` (strict JSON object, duplicate keys refused: exactly
+    upstream_session_id or standalone_decision_id, an identifier, and outputs, a nonempty unique list of node names);
+    ValueError otherwise. Shape only, and the one definition of a well-formed STAGE_GATE: check_task (which then
+    resolves it against the durable records), _gate_anchor, check_mapping_outputs and lineage all parse with it."""
     if not isinstance(line, str) or not line.startswith("STAGE_GATE "):
         raise ValueError("line 1 is not a STAGE_GATE line")
     value = _strict_object(line[len("STAGE_GATE "):], "STAGE_GATE")
@@ -260,14 +260,10 @@ def check_task(root, specialist, task):
     first = task.splitlines()[0] if task else ""
     if not first.startswith("STAGE_GATE "):
         raise ValueError("downstream dispatch requires first-line STAGE_GATE JSON; run scripts/gate.py first")
-    value = json.loads(first[len("STAGE_GATE "):])
-    if not isinstance(value, dict):
-        raise ValueError("STAGE_GATE must be a JSON object")
+    value = stage_gate_form(first)  # the shape: one parser for the hook, the executor and lineage
     stage = SPECIALIST_STAGE[specialist]
-    if set(value) == {"standalone_decision_id", "outputs"}:
+    if "standalone_decision_id" in value:
         return standalone(root, stage, value["standalone_decision_id"], value["outputs"])
-    if set(value) != {"upstream_session_id", "outputs"}:
-        raise ValueError("STAGE_GATE requires upstream_session_id and outputs")
     return check(root, stage, value["upstream_session_id"], value["outputs"])
 
 
@@ -400,11 +396,12 @@ REDRAFT_HINT = "redraft with mapping.py draft --from"
 
 def _gate_anchor(first_line):
     """(STAGE_GATE key, value) of a MaBoSS brief's line 1: its upstream_session_id or standalone_decision_id."""
-    gate_value = _strict_object(first_line[len("STAGE_GATE "):], "STAGE_GATE") if first_line.startswith("STAGE_GATE ") else {}
-    for key in NETWORK_ANCHORS:
-        if isinstance(gate_value.get(key), str):
-            return key, gate_value[key]
-    raise ValueError("a MaBoSS DATA_INPUT needs a line-1 STAGE_GATE naming upstream_session_id or standalone_decision_id")
+    if not first_line.startswith("STAGE_GATE "):
+        raise ValueError("a MaBoSS DATA_INPUT needs a line-1 STAGE_GATE naming upstream_session_id or "
+                         "standalone_decision_id")
+    gate_value = stage_gate_form(first_line)
+    key = next(key for key in NETWORK_ANCHORS if key in gate_value)
+    return key, gate_value[key]
 
 
 def check_mapping_network(root, network, first_line):
@@ -458,9 +455,7 @@ def check_mapping_outputs(data, first_line):
     from scripts.data import mapping
     if not first_line.startswith("STAGE_GATE "):
         raise ValueError("a MaBoSS DATA_INPUT needs a line-1 STAGE_GATE naming its approved outputs")
-    outputs = _strict_object(first_line[len("STAGE_GATE "):], "STAGE_GATE").get("outputs")
-    if not isinstance(outputs, list) or any(not isinstance(x, str) for x in outputs):
-        raise ValueError("STAGE_GATE outputs must be a list of node names")
+    outputs = stage_gate_form(first_line)["outputs"]
     missing = [node for node in mapping.readout_nodes(data) if node not in outputs]
     if missing:
         raise ValueError(f"mapping readout node(s) {', '.join(missing)} are not among the STAGE_GATE outputs "
