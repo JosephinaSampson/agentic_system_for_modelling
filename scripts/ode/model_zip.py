@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
 import zipfile
 from pathlib import Path
 
@@ -136,6 +137,82 @@ def introspect(zip_path: Path) -> dict:
                 "observables": _literal_names(_read(zf, files["observable.py"]),
                                               files["observable.py"], "obs_names", "self"),
             }
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"not a zip file: {exc}") from exc
+
+
+def _literal(node):
+    """A finite number from a literal node (incl. a unary minus), else None."""
+    try:
+        value = ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _defaults_from(source: str, names: list[str]) -> dict:
+    """{parameter: default or None} from ode.py's `param_values()` as Text2Model writes it:
+    `x = [v] * C.NUM` (or a list literal), then `x[C.name] = literal` lines, then `return x`; or
+    `return [v, ...]`. Anything else (an expression, a call, a loop) leaves that name (or every name) None."""
+    unknown = {name: None for name in names}
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return unknown
+    funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "param_values"]
+    if len(funcs) != 1:
+        return unknown
+    current: dict = {}  # variable name -> {parameter: value or None}
+
+    def from_list(node):
+        if isinstance(node, ast.List) and len(node.elts) == len(names):
+            return {name: _literal(elt) for name, elt in zip(names, node.elts)}
+        if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult) and isinstance(node.left, ast.List)
+                and len(node.left.elts) == 1):
+            value = _literal(node.left.elts[0])
+            return {name: value for name in names}
+        return None
+
+    for stmt in funcs[0].body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            continue  # the docstring
+        if isinstance(stmt, ast.Return):
+            if isinstance(stmt.value, ast.Name) and stmt.value.id in current:
+                return dict(current[stmt.value.id])
+            return from_list(stmt.value) or unknown
+        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+            return unknown
+        target = stmt.targets[0]
+        if isinstance(target, ast.Name):
+            values = from_list(stmt.value)
+            if values is None:
+                return unknown
+            current[target.id] = values
+        elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id in current:
+            index = target.slice
+            if isinstance(index, ast.Attribute) and isinstance(index.value, ast.Name) and index.value.id == "C" \
+                    and index.attr in names:
+                current[target.value.id][index.attr] = _literal(stmt.value)
+            elif isinstance(index, ast.Constant) and type(index.value) is int and 0 <= index.value < len(names):
+                current[target.value.id][names[index.value]] = _literal(stmt.value)
+            else:
+                return unknown
+        else:
+            return unknown
+    return unknown
+
+
+def parameter_defaults(zip_path: Path) -> dict:
+    """{parameter: model default (float) or None when it cannot be read statically} of an export zip, read from
+    the package's ode.py `param_values()` syntax tree (never imported or executed)."""
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            pkg = find_package(zf.namelist())
+            names = _literal_names(_read(zf, pkg + "name2idx/parameters.py"), pkg + "name2idx/parameters.py",
+                                   "NAMES", None)
+            return _defaults_from(_read(zf, pkg + "ode.py"), names)
     except zipfile.BadZipFile as exc:
         raise ValueError(f"not a zip file: {exc}") from exc
 

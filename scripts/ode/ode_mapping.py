@@ -12,9 +12,12 @@ Schema (schema_version 1; every key below is required unless marked optional):
                                                          runs/ode-modeler/<ode_session>/ (model/ = the revision
                                                          folder, the Text2Model package in model/generated_model/);
                                                          revision = the captured revision (rev_<32 hex>) whose
-                                                         integrity.json, under runs/ode-modeler/<ode_session>/, is
-                                                         byte-identical to the zip's model/integrity.json, and the
-                                                         zip's model/ files must match that inventory
+                                                         integrity.json, in every captured folder of that name
+                                                         (runs/ode-modeler/<ode_session>/captures/<capture>/<rev>/,
+                                                         where record_ode_artifacts puts it; folders elsewhere are
+                                                         ignored), is byte-identical to the zip's
+                                                         model/integrity.json, and the zip's model/ files must match
+                                                         that inventory
   inputs.measurements: {path, sha256}                    a .csv under runs/orchestrator/ (orchestrator route; each
                                                          row's `source` is a declared source id)
                     or {session, proposal, approval}     an approved data-analyst `ode_measurements` proposal
@@ -41,19 +44,25 @@ Schema (schema_version 1; every key below is required unless marked optional):
   rules: [{rule_id, type, measurements: [ids], ...}]
       time_course: method in fold_change_vs_t0|relative_to_condition|max_normalized|absolute
                    (reference = a condition, for relative_to_condition only). Data and predictions are
-                   normalised the same way:
-                     fold_change_vs_t0      each row / the mean of the time-0 rows of the same readout, condition
-                                            and use (required, non-zero; t0 rows are kept, target 1)
+                   normalised the same way. Divisor rows: a fit row is divided by fit rows only (hold-out rows
+                   never change a fit target); a hold-out row by the hold-out rows of the same kind when there are
+                   some, else by the fit rows:
+                     fold_change_vs_t0      each row / the mean of the time-0 rows of the same readout and condition
+                                            (divisor rows as above; required, non-zero; t0 rows are kept, target 1)
                      relative_to_condition  each row / the mean of the reference-condition rows of the same
-                                            readout and use at the same converted time (required, non-zero; the
-                                            reference rows belong to the rule)
-                     max_normalized         each row / the max of the rule's rows of the same readout and use
-                                            (positive); the prediction uses the same rows' simulated max, so
-                                            hold-out rows never change fit targets or fit predictions
+                                            readout at the same converted time (divisor rows as above; required,
+                                            non-zero; the reference rows belong to the rule)
+                     max_normalized         every row / the max of the rule's FIT rows of the same readout
+                                            (positive; hold-out rows too, so they are scored on the fit's scale;
+                                            hold-out rows without fit rows of their readout are refused); the
+                                            prediction uses the same fit rows' simulated max
                      absolute               value x values.readouts factor (model unit)
+                   One value_unit per (readout, condition) group (fold_change) or per readout (the others).
       endpoint_contrast: method in ratio|difference, test, reference (conditions), time (model time unit)
       dose_response: drug_entry = {form: target_activity_scaling, parameter, K: number | {fit: name}}
                                 or {form: inhibitor_species, species}
+                     a fitted K needs a positive model default (read from ode.py param_values without importing
+                     it): hold-out scoring keeps the default of a K the researcher did not accept
                      viability = {observable, untreated (condition), time (model time unit)}
                      every dose row's time, converted, must equal viability.time (dose rows are evaluated there),
                      and every row's readout must map (readouts) to viability.observable
@@ -67,7 +76,9 @@ Schema (schema_version 1; every key below is required unless marked optional):
   unmapped: [{measurement_id, reason}]
 
 Every measurement row is used by exactly one rule or listed in unmapped with a real reason, and at
-least one use=fit row is scored by a rule (a contrast reference row is not scored). A fitted name that a
+least one use=fit row is scored by a rule with information: a contrast reference row is not scored, and a row
+whose normalised target and prediction are 1 by construction does not count (a fold_change_vs_t0 row at time 0,
+a relative_to_condition row of the reference condition, the only fit row of a max_normalized group). A fitted name that a
 condition overrides (or an inhibitor_species dose sets) is refused: the override would mask it there.
 
 CLI:
@@ -94,6 +105,7 @@ if __package__ in (None, ""):
 from scripts import state  # noqa: E402
 from scripts.data import approvals  # noqa: E402
 from scripts.data import sources as user_sources  # noqa: E402
+from scripts.data.common import finite_number as _is_number  # noqa: E402
 from scripts.data.common import RUNS_ROOT, project_root, reject_symlinks, sha256_file, strict_json  # noqa: E402
 from scripts.ode import measurements as table, model_zip  # noqa: E402
 
@@ -182,34 +194,61 @@ def measurement_table(root: Path, meas: dict) -> tuple[Path, str]:
     return _proposal_entry(root, meas)
 
 
-def captured_revisions(root: Path, session: str, integrity: bytes) -> set[str]:
-    """Names of the captured revision folders (rev_<32 hex>) under runs/ode-modeler/<session>/ whose
-    integrity.json is byte-identical to `integrity` (symlinks are never followed)."""
-    base = Path(root) / ODE_RUNS[0] / ODE_RUNS[1] / session
-    reject_symlinks(base, Path(root))
-    found = set()
-    for dirpath, _dirs, files in os.walk(base):
-        folder = Path(dirpath)
-        candidate = folder / "integrity.json"
-        if REVISION.fullmatch(folder.name) and "integrity.json" in files and not candidate.is_symlink() \
-                and candidate.read_bytes() == integrity:
-            found.add(folder.name)
+def _revision_folders(root: Path, session: str) -> dict[str, list[tuple[str, bytes | None]]]:
+    """{revision name: [(folder, integrity.json bytes or None)]} of the captured revision folders of a session:
+    exactly runs/ode-modeler/<session>/captures/<capture>/rev_<32 hex>/, where record_ode_artifacts puts the
+    BioMASS server's <session>/rev_<hex>/ revision folders. A folder named rev_<hex> anywhere else (scratch,
+    exports, nested deeper) is not a capture and is ignored; symlinks are never followed."""
+    root = Path(root)
+    base = root / ODE_RUNS[0] / ODE_RUNS[1] / session
+    reject_symlinks(base, root)
+    captures = base / "captures"
+    found: dict = {}
+    if captures.is_symlink() or not captures.is_dir():
+        return found
+    for capture in sorted(captures.iterdir()):
+        if capture.is_symlink() or not capture.is_dir():
+            continue
+        for folder in sorted(capture.iterdir()):
+            if not REVISION.fullmatch(folder.name) or folder.is_symlink() or not folder.is_dir():
+                continue
+            seal = folder / "integrity.json"
+            data = seal.read_bytes() if seal.is_file() and not seal.is_symlink() else None
+            found.setdefault(folder.name, []).append((folder.relative_to(root).as_posix(), data))
     return found
+
+
+def captured_revisions(root: Path, session: str, integrity: bytes) -> set[str]:
+    """Names of the captured revisions (see _revision_folders) whose integrity.json is byte-identical to
+    `integrity` in EVERY captured folder of that name (one disagreeing copy and the name is never returned)."""
+    return {name for name, copies in _revision_folders(root, session).items()
+            if all(data == integrity for _folder, data in copies)}
 
 
 def bundle_revision(root: Path, session: str, bundle: Path, revision=None) -> str:
     """The captured revision the export zip was made from (its model/integrity.json); ValueError when there is
-    none, when `revision` is given and is not it, when several captured revisions match and none is given, or
-    when the zip's model/ files are not exactly the ones that integrity.json seals."""
-    names = captured_revisions(root, session, model_zip.integrity(bundle))
+    none, when `revision` is given and is not it, when several captured revisions match and none is given, when
+    captured copies of the revision disagree, or when the zip's model/ files are not exactly the ones that
+    integrity.json seals."""
+    sealed = model_zip.integrity(bundle)
+    folders = _revision_folders(root, session)
+    names = {name for name, copies in folders.items() if all(data == sealed for _folder, data in copies)}
     shown = ", ".join(sorted(names)) or "none"
     if revision is not None:
         if revision not in names:
+            copies = folders.get(revision, [])
+            if any(data == sealed for _folder, data in copies):
+                differ = ", ".join(folder for folder, data in copies if data != sealed)
+                raise ValueError(f"captured folders of revision {revision!r} disagree: {differ} do(es) not carry "
+                                 "the export zip's model/integrity.json (every captured copy of a revision must be "
+                                 "identical)")
             raise ValueError(f"revision {revision!r} is not the captured revision of the export zip (captured "
-                             f"revisions under runs/ode-modeler/{session}/ with its model/integrity.json: {shown})")
+                             f"revisions under runs/ode-modeler/{session}/captures/<capture>/ with its "
+                             f"model/integrity.json: {shown})")
     elif not names:
-        raise ValueError(f"no captured revision under runs/ode-modeler/{session}/ has the export zip's "
-                         "model/integrity.json; capture the revision the bundle was exported from first")
+        raise ValueError(f"no captured revision under runs/ode-modeler/{session}/captures/<capture>/ has the export "
+                         "zip's model/integrity.json (in every captured copy); capture the revision the bundle was "
+                         "exported from first")
     elif len(names) > 1:
         raise ValueError(f"several captured revisions match the export zip ({shown}); pass --revision")
     model_zip.verify_inventory(bundle)  # the sealed inventory binds the package files too
@@ -279,10 +318,6 @@ def draft(root: Path, purpose: str, *, ode_session: str, bundle_rel: str, measur
 
 # ---------------------------------------------------------------- check
 
-def _is_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
 def _is_text(value) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
@@ -305,6 +340,8 @@ class _Checker:
         self.readouts: set[str] = set()
         self.readout_observable: dict[str, object] = {}
         self.scored: set[str] = set()  # measurement ids that are fit targets of a rule (not references)
+        self.trivial: dict[str, str] = {}  # scored id -> why its normalised target is 1 by construction
+        self.defaults: dict | None = None  # parameter -> model default (None: not readable), from ode.py
         self.conditions: set[str] = set()
         self.fit_names: set[str] = set()
         self.fit_kinds: dict[str, object] = {}
@@ -342,6 +379,7 @@ class _Checker:
             return
         try:
             self.names = model_zip.introspect(path)
+            self.defaults = model_zip.parameter_defaults(path)
         except (ValueError, OSError) as exc:
             self.error(f"inputs.model: cannot read {model['bundle']}: {exc}")
             return
@@ -719,42 +757,75 @@ class _Checker:
             groups.setdefault(tuple(row[k] for k in keys), []).append(row)
         return groups
 
+    @staticmethod
+    def _divisors(rows: list[dict], use) -> list[dict]:
+        """compare._divisors: a fit row divides by fit rows only; a hold-out row by the hold-out rows when there
+        are some, else by the fit rows."""
+        same = [row for row in rows if row["use"] == use]
+        return same if same or use == "fit" else [row for row in rows if row["use"] == "fit"]
+
     def normalised(self, label: str, method, rows: list[dict], reference) -> None:
-        """Decision N: the data of a normalised time_course are divided like the predictions; check the divisor."""
+        """Decision N: the data of a normalised time_course are divided like the predictions; check the divisor.
+        Rows whose target is 1 by construction are noted in self.trivial (they carry no information)."""
         if any(self.converted(row) is None or not _is_number(row["value"]) for row in rows):
             return  # reported by the time section / the table check
         if method == "fold_change_vs_t0":
-            for (readout, cond, use), group in self._groups(rows, "readout", "condition", "use").items():
-                self.one_unit(label, group, f"readout {readout} in condition {cond} (use={use})")
-                t0 = [row["value"] for row in group if self.converted(row) == 0.0]
-                if not t0:
-                    for row in group:
-                        self.error(f"{label}: measurement {row['measurement_id']} has no time-0 row of the same "
-                                   "readout, condition and use (fold_change_vs_t0 divides data and predictions by "
-                                   "their t0 value)")
-                elif sum(t0) / len(t0) == 0:
-                    self.error(f"{label}: the t0 value of readout {readout} in condition {cond} (use={use}) is 0; "
-                               "fold_change_vs_t0 cannot divide by it")
-        elif method == "relative_to_condition":
-            for (readout, use), group in self._groups(rows, "readout", "use").items():
-                self.one_unit(label, group, f"readout {readout} (use={use})")
+            for (readout, cond), group in self._groups(rows, "readout", "condition").items():
+                self.one_unit(label, group, f"readout {readout} in condition {cond}")
+                zero = [row for row in group if self.converted(row) == 0.0]
+                for row in zero:
+                    self.trivial[row["measurement_id"]] = f"{label}: {row['measurement_id']} (a time-0 row)"
+                reported = set()
                 for row in group:
+                    t0 = self._divisors(zero, row["use"])
+                    if not t0:
+                        among = ("a fit time-0 row (a fit row is never divided by a hold-out row)"
+                                 if row["use"] == "fit" else "a time-0 row (hold-out or fit)")
+                        self.error(f"{label}: measurement {row['measurement_id']} has no time-0 row of the same "
+                                   f"readout and condition: it needs {among}; fold_change_vs_t0 divides data and "
+                                   "predictions by their t0 value")
+                        continue
+                    key = tuple(r["measurement_id"] for r in t0)
+                    if sum(r["value"] for r in t0) / len(t0) == 0 and key not in reported:
+                        reported.add(key)
+                        self.error(f"{label}: the t0 value of readout {readout} in condition {cond} "
+                                   f"({', '.join(key)}) is 0; fold_change_vs_t0 cannot divide by it")
+        elif method == "relative_to_condition":
+            for readout, group in self._groups(rows, "readout").items():
+                readout = readout[0]
+                self.one_unit(label, group, f"readout {readout}")
+                for row in group:
+                    if row["condition"] == reference:
+                        self.trivial[row["measurement_id"]] = (f"{label}: {row['measurement_id']} (a row of the "
+                                                               "reference condition)")
                     t = self.converted(row)
-                    refs = [o["value"] for o in group if o["condition"] == reference
-                            and math.isclose(self.converted(o), t, rel_tol=TIME_RTOL)]
+                    refs = self._divisors([o for o in group if o["condition"] == reference
+                                           and math.isclose(self.converted(o), t, rel_tol=TIME_RTOL)], row["use"])
                     if not refs:
+                        among = "fit reference rows" if row["use"] == "fit" else "reference rows (hold-out or fit)"
                         self.error(f"{label}: measurement {row['measurement_id']} has no reference row (condition "
-                                   f"{reference!r}, same readout and use) at time {t!r}; relative_to_condition "
-                                   "divides data and predictions by the reference")
-                    elif sum(refs) / len(refs) == 0:
+                                   f"{reference!r}, same readout) at time {t!r}: it needs {among}; "
+                                   "relative_to_condition divides data and predictions by the reference")
+                    elif sum(o["value"] for o in refs) / len(refs) == 0:
                         self.error(f"{label}: measurement {row['measurement_id']}: the reference value (condition "
                                    f"{reference!r}) at time {t!r} is 0; relative_to_condition cannot divide by it")
         elif method == "max_normalized":
-            for (readout, use), group in self._groups(rows, "readout", "use").items():
-                self.one_unit(label, group, f"readout {readout} (use={use})")
-                top = max(row["value"] for row in group)
+            for readout, group in self._groups(rows, "readout").items():
+                readout = readout[0]
+                self.one_unit(label, group, f"readout {readout}")
+                fit = [row for row in group if row["use"] == "fit"]
+                if not fit:
+                    shown = ", ".join(row["measurement_id"] for row in group)
+                    self.error(f"{label}: measurements {shown} (readout {readout}) have no fit row of the same "
+                               "readout in this rule; max_normalized divides every row, hold-out rows included, by "
+                               "the fit rows' maximum")
+                    continue
+                if len(fit) == 1:
+                    self.trivial[fit[0]["measurement_id"]] = (f"{label}: {fit[0]['measurement_id']} (the only fit "
+                                                              f"row of readout {readout})")
+                top = max(row["value"] for row in fit)
                 if top <= 0:
-                    self.error(f"{label}: the max of readout {readout} (use={use}) is {top!r}; max_normalized "
+                    self.error(f"{label}: the max of the fit rows of readout {readout} is {top!r}; max_normalized "
                                "needs a positive maximum")
 
     def same_time(self, label: str, rows: list[dict], time, what: str) -> None:
@@ -859,6 +930,14 @@ class _Checker:
                     self.error(f"{label}: drug_entry K fits {fitted!r}, which is not under fit")
                 elif self.fit_kinds[fitted] != "parameter":
                     self.error(f"{label}: drug_entry K fits {fitted!r}, which must be a fit entry of kind parameter")
+                elif self.defaults is not None:
+                    default = self.defaults.get(fitted)
+                    if default is None or not default > 0:
+                        shown = "cannot be read from ode.py param_values (a literal)" if default is None \
+                            else f"is {default!r}"
+                        self.error(f"{label}: drug_entry K fits {fitted!r}, whose model default {shown}; a fitted K "
+                                   "needs a positive model default, because hold-out scoring keeps the default of "
+                                   "a parameter the researcher does not accept (1/(1 + D/K) needs K > 0)")
             elif not _is_number(k) or k <= 0:
                 self.error(f"{label}: drug_entry K must be a positive number or {{\"fit\": name}}")
         elif form == "inhibitor_species" and set(entry) == {"form", "species"}:
@@ -904,9 +983,13 @@ class _Checker:
                            "fitted value in every dose condition")
 
     def fit_targets(self) -> None:
-        if self.rows and not any(self.rows[mid]["use"] == "fit" for mid in self.scored if mid in self.rows):
-            self.error("no use=fit measurement is scored by a rule (contrast reference rows are not scored): "
-                       "the calibration objective would be empty")
+        """At least one use=fit row is scored with information; rows 1 by construction (self.trivial) do not count."""
+        fit = sorted(mid for mid in self.scored if mid in self.rows and self.rows[mid]["use"] == "fit")
+        if self.rows and not [mid for mid in fit if mid not in self.trivial]:
+            trivial = "; ".join(self.trivial[mid] for mid in fit)
+            self.error("no use=fit measurement is scored by a rule with information (contrast reference rows are not "
+                       "scored; a normalised row that is 1 by construction carries none"
+                       + (f": {trivial}" if trivial else "") + "): the calibration objective would be constant")
 
     def coverage(self) -> None:
         for mid, labels in self.uses.items():

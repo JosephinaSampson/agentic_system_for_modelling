@@ -52,7 +52,31 @@ class CompareTests(unittest.TestCase):
                 row("h1", "ctrl", 30.0, 4000.0, use="holdout")]
         ms = compare.resolve(mapping([tc("fold_change_vs_t0", ["a0", "a1", "b0", "b1", "h1"])]), rows)["measurements"]
         self.assertEqual((ms["a1"]["target"], ms["b1"]["target"]), (3.0, 0.5))
-        self.assertTrue(math.isnan(ms["h1"]["target"]))  # no hold-out t0 row: nan (the mapping check refuses it)
+        # review 2 ode_mapping.py:727: no hold-out t0 row, so the hold-out row is divided by the fit t0 rows
+        self.assertEqual(ms["h1"]["target"], 4.0)
+
+    def test_fold_change_divisor_rows_by_use(self):
+        # review 2 ode_mapping.py:727: fit rows divide by fit t0 rows only; hold-out rows by hold-out t0 rows when
+        # there are some, else by the fit t0 rows; the prediction is v(t) / v(0) for every use
+        rows = [row("a0", "ctrl", 0.0, 2.0), row("a1", "ctrl", 30.0, 6.0), row("a2", "ctrl", 60.0, 8.0, use="holdout")]
+        spec = compare.resolve(mapping([tc("fold_change_vs_t0", ["a0", "a1", "a2"])]), rows)
+        self.assertEqual([spec["measurements"][m]["target"] for m in ("a0", "a1", "a2")], [1.0, 3.0, 4.0])
+        pred = compare.predict(spec, {"ctrl": {"obs": {0.0: 1.0, 30.0: 2.0, 60.0: 5.0}}})
+        self.assertEqual(pred["a2"], 5.0)
+        with_h0 = rows + [row("h0", "ctrl", 0.0, 4.0, use="holdout")]
+        ms = compare.resolve(mapping([tc("fold_change_vs_t0", ["a0", "a1", "a2", "h0"])]), with_h0)["measurements"]
+        self.assertEqual((ms["a1"]["target"], ms["a2"]["target"]), (3.0, 2.0))  # fit: a0 only; hold-out: h0
+
+    def test_relative_to_condition_hold_out_row_may_use_fit_references(self):
+        # review 2 ode_mapping.py:739: a hold-out row at time t whose reference rows at t are fit rows
+        rows = [row("m1", "ctrl", 10.0, 3.0), row("r1", "ref", 10.0, 1.5), row("h1", "drug", 10.0, 6.0, use="holdout")]
+        ms = compare.resolve(mapping([tc("relative_to_condition", ["m1", "r1", "h1"], reference="ref")]),
+                             rows)["measurements"]
+        self.assertEqual((ms["m1"]["target"], ms["h1"]["target"]), (2.0, 4.0))
+        rows.append(row("hr", "ref", 10.0, 3.0, use="holdout"))  # a hold-out reference at t: used for hold-out rows
+        ms = compare.resolve(mapping([tc("relative_to_condition", ["m1", "r1", "h1", "hr"], reference="ref")]),
+                             rows)["measurements"]
+        self.assertEqual((ms["m1"]["target"], ms["h1"]["target"]), (2.0, 2.0))
 
     def test_absolute(self):
         spec = compare.resolve(mapping([tc("absolute", ["m1"])]), [row("m1", "ctrl", 5.0, 1.0)])
@@ -95,8 +119,28 @@ class CompareTests(unittest.TestCase):
         for mid in ("m1", "m2"):
             self.assertEqual(both["measurements"][mid]["target"], alone["measurements"][mid]["target"])
             self.assertEqual(compare.predict(both, sims)[mid], compare.predict(alone, sims)[mid])
-        self.assertEqual(both["measurements"]["h1"]["target"], 1.0)
-        self.assertEqual(compare.predict(both, sims)["h1"], 1.0)
+        # review 2 compare.py:150: the hold-out row is divided by the FIT rows' maximum (data and prediction)
+        self.assertEqual(both["measurements"]["h1"]["target"], 10.0)
+        self.assertEqual(compare.predict(both, sims)["h1"], 100.0)
+
+    def test_max_normalized_single_hold_out_row_is_scored_on_the_fit_scale(self):
+        # review 2 compare.py:150: fit rows at t=0 and t=30, one hold-out row at t=60; the hold-out score must
+        # depend on the simulation (it was 0.0 for every parameter set)
+        rows = [row("f0", "ctrl", 0.0, 1.0), row("f1", "ctrl", 30.0, 4.0), row("h1", "ctrl", 60.0, 2.0, use="holdout")]
+        spec = compare.resolve(mapping([tc("max_normalized", ["f0", "f1", "h1"])]), rows)
+        self.assertEqual(spec["measurements"]["h1"]["target"], 0.5)
+        self.assertEqual(compare.needed(spec, "holdout"), {"ctrl": [0.0, 30.0, 60.0]})  # the fit points too
+        self.assertEqual(compare.needed(spec, "fit"), {"ctrl": [0.0, 30.0]})
+        scores = set()
+        for late in (1.0, 2.0, 8.0):
+            sims = {"ctrl": {"obs": {0.0: 1.0, 30.0: 4.0, 60.0: late}}}
+            scores.add(compare.objective(spec, compare.predict(spec, sims), use="holdout"))
+        self.assertEqual(len(scores), 3, scores)
+        self.assertIn(0.0, scores)  # late = 2.0 reproduces the data
+        fit_only = {"ctrl": {"obs": {0.0: 1.0, 30.0: 4.0}}}  # fit predictions never need the hold-out time
+        self.assertEqual(compare.objective(spec, compare.predict(spec, fit_only)), 0.0)
+        alone = compare.resolve(mapping([tc("max_normalized", ["h1"])]), rows[2:])  # no fit row: nan target
+        self.assertTrue(math.isnan(alone["measurements"]["h1"]["target"]))
 
     def test_zero_denominator_is_nan(self):
         rows = [row("m0", "ctrl", 0.0, 1.0), row("m1", "ctrl", 30.0, 1.0)]

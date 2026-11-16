@@ -571,7 +571,7 @@ class CheckTests(OdeFixture):
     def test_dose_response_readout_must_map_to_viability_observable(self):
         two = OBSERVABLE_PY.replace("'pR',\n", "'pR',\n            'pS',\n")
         make_zip(self.root / BUNDLE, observable=two)
-        capture(self.root, rev_dir=REV_DIR.replace("captures/c1", "captures/c2"))  # that revision, captured too
+        capture(self.root)  # that revision, captured (every captured folder of one revision name must agree)
 
         def viability_ps(d):
             d["inputs"]["model"]["sha256"] = sha(self.root / BUNDLE)
@@ -675,6 +675,131 @@ class CheckTests(OdeFixture):
         (self.root / MAP).symlink_to(real)
         with self.assertRaises(ValueError):
             ode_mapping.check(self.root, MAP)
+
+
+class ReviewRound2CheckTests(OdeFixture):
+    """PR 16 follow-up review: divisor rows by use, informative fit rows, max_normalized hold-out scale,
+    fitted K default, canonical revision folders."""
+
+    def setUp(self):
+        super().setUp()
+        self.data = self.complete()
+
+    def mapping_with(self, rows, rules, unmapped=()):
+        data = copy.deepcopy(self.data)
+        self.write_rows(rows)
+        data["inputs"]["measurements"]["sha256"] = sha(self.root / MEAS)
+        data["rules"] = rules
+        data["unmapped"] = [{"measurement_id": m, "reason": "not used in this calibration"} for m in unmapped]
+        data["dose"] = {"model_unit": "", "factors": {}}
+        return self.errors(data)
+
+    @staticmethod
+    def tc(method, ids, **kw):
+        return {"rule_id": "T1", "type": "time_course", "method": method, "measurements": ids, **kw}
+
+    @staticmethod
+    def row(mid, cond, time, value, use):
+        return f"{mid},pR,{cond},{time},min,,,{value},a.u.,,,,{use},s1,Fig. 1"
+
+    # ode_mapping.py:727 / 739 (divisor rows of any use for hold-out rows; fit rows divide by fit rows only)
+    def test_later_time_point_can_be_held_out_with_a_single_t0_row(self):
+        rows = [self.row("A0", "ligand", 0, 1.0, "fit"), self.row("A1", "ligand", 30, 3.0, "fit"),
+                self.row("A2", "ligand", 60, 4.0, "holdout")]
+        self.assertEqual(self.mapping_with(rows, [self.tc("fold_change_vs_t0", ["A0", "A1", "A2"])]), [])
+
+    def test_fit_row_is_never_divided_by_a_hold_out_t0_row(self):
+        rows = [self.row("H0", "ligand", 0, 1.0, "holdout"), self.row("A1", "ligand", 30, 3.0, "fit"),
+                self.row("A2", "ligand", 60, 4.0, "fit")]
+        errors = self.mapping_with(rows, [self.tc("fold_change_vs_t0", ["H0", "A1", "A2"])])
+        self.assertError(errors, "T1", "A1", "time-0", "fit")
+
+    def test_hold_out_row_may_use_fit_reference_rows(self):
+        rows = [self.row("A1", "ligand", 30, 3.0, "fit"), self.row("R1", "ctrl", 30, 1.5, "fit"),
+                self.row("H1", "ligand", 60, 4.0, "holdout"), self.row("R2", "ctrl", 60, 2.0, "fit")]
+        rule = self.tc("relative_to_condition", ["A1", "R1", "H1", "R2"], reference="ctrl")
+        self.assertEqual(self.mapping_with(rows, [rule]), [])
+        # a fit row whose only reference at its time is a hold-out row is refused
+        rows[3] = self.row("R2", "ctrl", 60, 2.0, "holdout")
+        rows[2] = self.row("H1", "ligand", 60, 4.0, "fit")
+        self.assertError(self.mapping_with(rows, [rule]), "T1", "H1", "reference")
+
+    # ode_mapping.py:906 (only fit rows that carry information count)
+    def test_fit_rows_that_are_one_by_construction_do_not_count(self):
+        fold = [self.row("A0", "ligand", 0, 1.0, "fit"), self.row("H0", "ligand", 0, 1.1, "holdout"),
+                self.row("H1", "ligand", 30, 3.0, "holdout")]
+        errors = self.mapping_with(fold, [self.tc("fold_change_vs_t0", ["A0", "H0", "H1"])])
+        self.assertError(errors, "use=fit", "T1", "A0")
+        relative = [self.row("R1", "ctrl", 30, 1.5, "fit"), self.row("H1", "ligand", 30, 3.0, "holdout")]
+        errors = self.mapping_with(relative, [self.tc("relative_to_condition", ["R1", "H1"], reference="ctrl")])
+        self.assertError(errors, "use=fit", "T1", "R1")
+        single = [self.row("A1", "ligand", 30, 3.0, "fit"), self.row("H1", "ligand", 60, 4.0, "holdout")]
+        errors = self.mapping_with(single, [self.tc("max_normalized", ["A1", "H1"])])
+        self.assertError(errors, "use=fit", "T1", "A1")
+        # one informative fit row is enough
+        fold.append(self.row("A1", "ligand", 30, 3.0, "fit"))
+        self.assertEqual(self.mapping_with(fold, [self.tc("fold_change_vs_t0", ["A0", "H0", "H1", "A1"])]), [])
+
+    # compare.py:150 (a max_normalized hold-out row is divided by the fit rows' maximum)
+    def test_max_normalized_hold_out_rows_need_fit_rows_of_their_readout(self):
+        rows = [self.row("A1", "ligand", 30, 3.0, "fit"), self.row("A2", "ligand", 60, 4.0, "fit"),
+                self.row("H1", "ligand", 90, 4.0, "holdout")]
+        self.assertEqual(self.mapping_with(rows, [self.tc("max_normalized", ["A1", "A2", "H1"])]), [])
+        rule = {"rule_id": "T2", "type": "time_course", "method": "max_normalized", "measurements": ["H1"]}
+        errors = self.mapping_with(rows, [self.tc("absolute", ["A1", "A2"]), rule])
+        self.assertError(errors, "T2", "H1", "fit")
+
+    # compare.py:258 (a fitted dose-response K needs a positive model default)
+    def rezip(self, ode_py):
+        make_zip(self.root / BUNDLE, extra={f"{PACKAGE}ode.py": ode_py})
+        capture(self.root)
+        data = copy.deepcopy(self.data)
+        data["inputs"]["model"]["sha256"] = sha(self.root / BUNDLE)
+        return self.errors(data)
+
+    def test_fitted_k_needs_a_positive_model_default(self):
+        text2model = ("from .name2idx import C, V\n\n\ndef param_values():\n    \"\"\"Parameter values\"\"\"\n"
+                      "    x = [1] * C.NUM\n    x[C.kf1] = {}\n    x[C.kf2] = 0.5\n\n    return x\n")
+        self.assertEqual(self.rezip(text2model.format("2.0")), [])
+        self.assertError(self.rezip(text2model.format("0.0")), "R3", "kf1", "default")
+        self.assertError(self.rezip(text2model.format("-1")), "R3", "kf1", "default")
+        self.assertError(self.rezip(text2model.format("2.0 * C.NUM")), "R3", "kf1", "default")
+        self.assertError(self.rezip("from .name2idx import C, V\n\n\ndef param_values():\n    return [0, 1, 1, 1]\n"),
+                         "R3", "kf1", "default")
+
+    def test_parameter_defaults_are_read_without_import(self):
+        text = ("from .name2idx import C, V\n\n\ndef param_values():\n    x = [1] * C.NUM\n"
+                "    x[C.kf1] = 2.5\n    x[C.kr1] = -1.0\n    x[C.kf2] = 3 * 2\n    return x\n")
+        path = self.root / "defaults.zip"
+        make_zip(path, extra={f"{PACKAGE}ode.py": text})
+        self.assertEqual(model_zip.parameter_defaults(path), {"kf1": 2.5, "kr1": -1.0, "kf2": None, "kf3": 1.0})
+        make_zip(path)
+        self.assertEqual(model_zip.parameter_defaults(path), {"kf1": 1.0, "kr1": 1.0, "kf2": 1.0, "kf3": 1.0})
+        make_zip(path, extra={f"{PACKAGE}ode.py": "def other():\n    return 1\n"})
+        self.assertEqual(model_zip.parameter_defaults(path), {n: None for n in PARAMS})
+
+    # ode_mapping.py:185 (only canonical capture folders, and all copies of a revision must agree)
+    def test_stray_revision_folder_is_not_a_capture(self):
+        other = "rev_" + "b" * 32
+        sealed = (self.root / REV_DIR / "integrity.json").read_bytes()
+        stray = self.root / f"runs/ode-modeler/ode-1/scratch/{other}"
+        stray.mkdir(parents=True)
+        (stray / "integrity.json").write_bytes(sealed)  # the zip's integrity.json under a hand-made folder
+        data = copy.deepcopy(self.data)
+        data["inputs"]["model"]["revision"] = other
+        self.assertError(self.errors(data), "revision", other)
+        deep = self.root / f"runs/ode-modeler/ode-1/captures/c2/nested/{other}"  # not directly in a capture
+        deep.mkdir(parents=True)
+        (deep / "integrity.json").write_bytes(sealed)
+        self.assertError(self.errors(data), "revision", other)
+
+    def test_every_captured_copy_of_the_revision_must_agree(self):
+        twin = self.root / REV_DIR.replace("captures/c1", "captures/c2")
+        twin.mkdir(parents=True)
+        (twin / "integrity.json").write_bytes((self.root / REV_DIR / "integrity.json").read_bytes())
+        self.assertEqual(self.errors(), [])
+        (twin / "integrity.json").write_text('{"other": "model"}\n')
+        self.assertError(self.errors(), "revision", REV, "captures/c2")
 
 
 class ApprovalTests(OdeFixture):

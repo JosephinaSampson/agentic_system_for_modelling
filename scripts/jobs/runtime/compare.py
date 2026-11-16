@@ -33,13 +33,20 @@ Runner contract:
   * `objective(spec, predictions, use)`.
 
 Rules (per measurement; a missing sim, solver failure or zero denominator gives nan, never raises). The data
-target is normalised the same way as the prediction (decision N); "group" = the rule's rows of the same readout
-and use, so hold-out rows never change a fit target or a fit prediction:
+target is normalised the same way as the prediction (decision N). "Group" = the rule's rows of the same readout;
+a divisor is never taken from hold-out rows for a fit row, so hold-out rows never change a fit target or a fit
+prediction. The divisor rows of a fit row are fit rows; those of a hold-out row are the hold-out rows of the same
+kind when there are some, else the fit rows (a t0 value or a reference is only a normaliser, and the fit sees it):
   fold_change_vs_t0       v(t) / v(0); target = value / mean of the group's time-0 rows of the same condition
+                          (divisor rows as above)
   relative_to_condition   v_cond(t) / v_reference(t); target = value / mean of the group's reference-condition
-                          rows at the same converted time (math.isclose, rel_tol 1e-9)
-  max_normalized          v(t) / max of v over the simulated points (condition, time) of the group's rows;
-                          target = value / max of the group's values (nan unless that max is > 0)
+                          rows at the same converted time (math.isclose, rel_tol 1e-9; divisor rows as above)
+  max_normalized          every row of the group, fit or hold-out, is divided by the FIT rows' scale: prediction
+                          v(t) / max of v over the simulated points (condition, time) of the group's fit rows;
+                          target = value / max of the group's fit values (nan unless that max is > 0, or when the
+                          group has no fit row). A hold-out row is thus scored on the fit's scale (a single
+                          hold-out row is not 1/1 by construction), and needed(spec, "holdout") includes the fit
+                          rows' points of such a group.
   absolute                v(t); target = value * mapping["values"]["readouts"][readout]["factors"][value_unit]
                           (ValueError when that factor is missing or not positive)
   endpoint_contrast       every row's condition must be the test or the reference (ValueError otherwise) and its
@@ -134,20 +141,29 @@ def _fit_overrides(mapping: dict) -> None:
             raise ValueError(f"fit {drug['species']}: rule {rule['rule_id']} sets it to the dose (inhibitor_species)")
 
 
+def _divisors(rows: list[dict], use: str) -> list[dict]:
+    """The divisor rows of a row of this `use`, among candidate `rows` (same rule, readout and condition or
+    time): a fit row is divided by fit rows only; a hold-out row by the hold-out rows when there are some, else
+    by the fit rows."""
+    same = [o for o in rows if o["use"] == use]
+    return same if same or use == "fit" else [o for o in rows if o["use"] == "fit"]
+
+
 def _normalise_time_course(rule: dict, entries: list[dict]) -> None:
     """The data side of a time_course rule, normalised exactly like the predictions (decision N)."""
     method = rule["method"]
     for e in entries:
-        group = [o for o in entries if o["readout"] == e["readout"] and o["use"] == e["use"]]
+        group = [o for o in entries if o["readout"] == e["readout"]]
         if method == "fold_change_vs_t0":
-            t0 = [o["value"] for o in group if o["condition"] == e["condition"] and o["time"] == 0.0]
-            e["target"] = _ratio(e["value"], _mean(t0) if t0 else math.nan)
+            t0 = _divisors([o for o in group if o["condition"] == e["condition"] and o["time"] == 0.0], e["use"])
+            e["target"] = _ratio(e["value"], _mean([o["value"] for o in t0]) if t0 else math.nan)
         elif method == "relative_to_condition":
-            refs = [o["value"] for o in group if o["condition"] == rule["reference"]
-                    and math.isclose(o["time"], e["time"], rel_tol=TIME_RTOL)]
-            e["target"] = _ratio(e["value"], _mean(refs) if refs else math.nan)
+            refs = _divisors([o for o in group if o["condition"] == rule["reference"]
+                              and math.isclose(o["time"], e["time"], rel_tol=TIME_RTOL)], e["use"])
+            e["target"] = _ratio(e["value"], _mean([o["value"] for o in refs]) if refs else math.nan)
         elif method == "max_normalized":
-            top = max(o["value"] for o in group)
+            fit = [o["value"] for o in group if o["use"] == "fit"]
+            top = max(fit) if fit else math.nan
             e["target"] = e["value"] / top if top > 0 else math.nan
 
 
@@ -227,6 +243,10 @@ def needed(spec: dict, use: str = "fit") -> dict:
     def add(name: str, time: float) -> None:
         out.setdefault(name, {0.0}).add(float(time))
 
+    fit_points: dict = {}  # (rule, readout) -> the fit rows' points of a max_normalized group (its scale)
+    for m in spec["measurements"].values():
+        if m["type"] == "time_course" and m["use"] == "fit" and rules[m["rule_id"]]["method"] == "max_normalized":
+            fit_points.setdefault((m["rule_id"], m["readout"]), []).append((m["condition"], m["time"]))
     for m in spec["measurements"].values():
         if (use != "all" and m["use"] != use) or m["role"] == "reference":
             continue
@@ -235,6 +255,9 @@ def needed(spec: dict, use: str = "fit") -> dict:
             add(m["condition"], t)
             if rule["method"] == "relative_to_condition":
                 add(rule["reference"], t)
+            elif rule["method"] == "max_normalized" and m["use"] != "fit":
+                for condition, time in fit_points.get((m["rule_id"], m["readout"]), []):
+                    add(condition, time)  # a hold-out row is divided by the fit rows' simulated maximum
         elif m["type"] == "endpoint_contrast":
             add(rule["test"], t)
             add(rule["reference"], t)
@@ -290,10 +313,10 @@ def _ratio(num: float, den: float) -> float:
 def predict(spec: dict, sims: dict) -> dict:
     meas = spec["measurements"]
     rules = {r["rule_id"]: r for r in spec["rules"]}
-    maxima: dict = {}  # one normaliser per (rule, readout, use): hold-out rows never change fit predictions
+    maxima: dict = {}  # one normaliser per (rule, readout), from its fit rows: hold-out rows never change it
     for mid, m in meas.items():
-        if m["type"] == "time_course" and rules[m["rule_id"]]["method"] == "max_normalized":
-            key = (m["rule_id"], m["readout"], m["use"])
+        if m["type"] == "time_course" and m["use"] == "fit" and rules[m["rule_id"]]["method"] == "max_normalized":
+            key = (m["rule_id"], m["readout"])
             maxima.setdefault(key, []).append(_get(sims, m["condition"], m["observable"], m["time"]))
     out = {}
     for mid, m in meas.items():
@@ -310,8 +333,8 @@ def predict(spec: dict, sims: dict) -> dict:
             elif method == "relative_to_condition":
                 out[mid] = _ratio(v, _get(sims, rule["reference"], obs, t))
             else:
-                points = maxima[(m["rule_id"], m["readout"], m["use"])]
-                out[mid] = _ratio(v, max(points)) if all(math.isfinite(p) for p in points) else math.nan
+                points = maxima.get((m["rule_id"], m["readout"]), [])
+                out[mid] = _ratio(v, max(points)) if points and all(math.isfinite(p) for p in points) else math.nan
         elif m["type"] == "endpoint_contrast":
             test = _get(sims, rule["test"], obs, t)
             ref = _get(sims, rule["reference"], obs, t)

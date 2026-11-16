@@ -94,24 +94,34 @@ Calibration is a portable job the researcher approves step by step; no specialis
    `model_summary.json`, ...) with the Text2Model package in `model/generated_model/` (the single folder
    under `model/` holding `ode.py` and `name2idx/`; zero or several are refused), plus `simulate_*/`,
    `requirements.txt` and `run_simulation.py`. `draft` derives `inputs.model.revision` from it: the
-   captured revision folder (`rev_<32 hex>`, under `runs/ode-modeler/<session>/`) whose `integrity.json`
-   is byte-identical to the zip's `model/integrity.json`, and the zip's `model/` files must be exactly the
+   captured revision folder (`rev_<32 hex>` directly in `runs/ode-modeler/<session>/captures/<capture>/`,
+   where `record_ode_artifacts.py` puts it; folders elsewhere are ignored) whose `integrity.json` is
+   byte-identical to the zip's `model/integrity.json` in every captured copy of that revision (copies that
+   disagree are refused), and the zip's `model/` files must be exactly the
    ones that inventory seals; `check` refuses any other revision, so the revision the ode-modeler later
    compares is the one that was fitted. The calibration bundle carries only the package's `.py` files, at
    their export path, and the runner imports the package by its own name. The mapping fixes
    observables, condition overrides, comparison rules, fitted parameters with bounds and justification,
    hold-out rows (`use=holdout`) and the reasons for any unmapped row. `check` requires at least one
-   `use=fit` row scored by a rule (a contrast reference row is not scored), every endpoint-contrast row and
+   `use=fit` row scored by a rule with information (a contrast reference row is not scored, and rows whose
+   normalised target is 1 by construction do not count: `fold_change_vs_t0` rows at time 0,
+   `relative_to_condition` rows of the reference condition, the only fit row of a `max_normalized` readout),
+   a fitted dose-response `K` with a positive model default (read from `ode.py` `param_values()`, never
+   imported: hold-out scoring keeps the default of a non-accepted `K`), every endpoint-contrast row and
    every dose row measured at the rule's time once converted (`time.factors`; compared with relative
    tolerance 1e-9: a rule `"time": 24` meant as hours against a minute model is refused, not silently read
    as 24 min), and the rows of a dose-response rule to have a readout mapped to `viability.observable`.
    **Values and units.** The table holds raw values with their `value_unit`; each rule normalises the data
-   exactly as it normalises the predictions. `fold_change_vs_t0` divides each row by the time-0 row(s) of
-   the same readout, condition and `use` (required, non-zero; t0 rows stay, target 1);
-   `relative_to_condition` divides by the reference-condition rows of the same readout and `use` at the
-   same converted time (required, in the rule, non-zero); `max_normalized` divides by the max of the
-   rule's rows of the same readout and `use` (positive), and the prediction by the simulated max at those
-   same rows, so hold-out rows never change fit targets or fit predictions; `endpoint_contrast` compares
+   exactly as it normalises the predictions. A fit row is divided only by fit rows, so hold-out rows never
+   change a fit target or a fit prediction; a hold-out row is divided by hold-out divisor rows when there
+   are some, else by the fit rows (a t0 value or a reference is only a normaliser), so a later time point
+   can be held out with a single t0 replicate. `fold_change_vs_t0` divides each row by the time-0 row(s) of
+   the same readout and condition (required, non-zero; t0 rows stay, target 1); `relative_to_condition`
+   divides by the reference-condition rows of the same readout at the same converted time (required, in
+   the rule, non-zero); `max_normalized` divides every row, hold-out rows included, by the max of the
+   rule's FIT rows of the same readout (positive), and the prediction by the simulated max at those fit
+   rows, so a hold-out row is scored on the fit's scale (hold-out rows without fit rows of their readout are
+   refused); `endpoint_contrast` compares
    the test row with the mean of the reference rows of the same readout and `use` (only the test and
    reference conditions are allowed; a ratio needs a non-zero reference mean and is unitless; a
    `difference` keeps the data unit, so its target is converted with the `values.readouts` factor, like an
