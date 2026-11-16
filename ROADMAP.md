@@ -52,3 +52,4 @@ reordered as work progresses. Released changes are listed in
 - Combine MaBoSS models from several MaBoSS sessions in one PhysiCell design.
 - Substrates in units other than mmHg, and control over PhysiCell's default substrate,
   once the server supports them.
+- Hill rules that also apply to dead cells, once the server supports them.
