@@ -33,10 +33,11 @@ requires it to equal the model value within relative 1e-12. The model value is
   identity v*factor, unit_factor v*factor, reciprocal factor/v, ln2_over factor*ln(2)/v
 (value finite, factor finite and > 0, v != 0 for reciprocal/ln2_over). The converted unit (converted_unit):
   - a conversion, factor != 1 or unit_factor: target_unit, required (the researcher's approved conversion; the
-    entry's justification explains it);
+    entry's justification explains it); unit_factor with factor 1 is refused (it converts nothing: use identity
+    with matching units);
   - identity, reciprocal or ln2_over with factor == 1: derived, never converted: identity keeps value_unit,
     reciprocal/ln2_over give "1/<u>" (or <rest> when u is "1/<rest>"); a compound unit (containing "/", "*", "(" or
-    spaces) is never inverted, so that combination is refused (convert with a factor or unit_factor instead). A
+    spaces) is never inverted, so that combination is refused (convert with a factor != 1 instead). A
     target_unit given here must equal the derived unit exactly.
 Units are never inferred. This holds for setting entries and rule and link quantities alike.
 
@@ -125,9 +126,10 @@ def model_value(q: dict) -> float:
 def converted_unit(q: dict) -> str:
     """The unit of model_value(q), as the module docstring says; ValueError otherwise.
 
-    A conversion (factor != 1, or unit_factor) needs target_unit, the researcher's approved converted unit. Without
-    one (identity, reciprocal or ln2_over with factor 1) the unit is derived, and a given target_unit must be exactly
-    that derived unit: a factor-1 "conversion" between different units converts nothing."""
+    A conversion (factor != 1, or unit_factor) needs target_unit, the researcher's approved converted unit; a
+    unit_factor of 1 is refused (it converts nothing). Without a conversion (identity, reciprocal or ln2_over with
+    factor 1) the unit is derived, and a given target_unit must be exactly that derived unit: a factor-1
+    "conversion" between different units converts nothing."""
     if not isinstance(q, dict):
         raise ValueError("a quantity must be an object")
     unit = q.get("value_unit")
@@ -139,13 +141,14 @@ def converted_unit(q: dict) -> str:
     transform, factor = q.get("transform"), q.get("factor")
     if transform not in TRANSFORMS:
         raise ValueError(f"transform must be one of {', '.join(TRANSFORMS)}, not {transform!r}")
+    if transform == "unit_factor" and finite_number(factor) and factor == 1:
+        raise ValueError("a unit_factor of 1 converts nothing; use identity with matching units")
     if transform == "unit_factor" or not finite_number(factor) or factor != 1:
         if "target_unit" not in q:
             raise ValueError(f"the converted unit of {transform} with factor {factor!r} is not derivable: give "
                              "target_unit (units are never inferred)")
         return target
-    convert = ("convert with a factor != 1 or with unit_factor, giving target_unit and an explicit justification of "
-               "the conversion")
+    convert = "convert with a factor != 1, giving target_unit and an explicit justification of the conversion"
     derived = unit
     if transform in ("reciprocal", "ln2_over"):
         inner = unit[2:] if unit.startswith("1/") else unit

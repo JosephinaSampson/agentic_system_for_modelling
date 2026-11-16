@@ -328,7 +328,18 @@ class SettingTests(ProjectionBase):
     def test_factor_one_compound_reciprocal_with_target_unit_refused(self):
         data = self.setting(value=2, value_unit="min/cell", transform="reciprocal", target_unit="1/min",
                             target_unit_justification="j")
-        self.assertRefused(data, "set1", "not derivable", "unit_factor", "justification")
+        self.assertRefused(data, "set1", "not derivable", "factor != 1", "justification")
+        # PR #17 review 4587426548: the hint no longer points at a factor-1 unit_factor
+        self.assertNotIn("unit_factor", " ".join(self.errors(data)))
+
+    def test_unit_factor_of_one_refused(self):
+        # PR #17 review 4587426548: a unit_factor of 1 converts nothing (1/hour -> 1/min would be 60x off)
+        data = self.setting(value=2e-5, value_unit="1/hour", transform="unit_factor", factor=1, target_unit="1/min",
+                            target_unit_justification="the XML's units")
+        self.assertRefused(data, "set1", "a unit_factor of 1 converts nothing; use identity with matching units")
+        data, entry = self.entry("rule1")
+        entry["half_max"] = q(5, "min", "unit_factor", 1.0, target_unit="min")
+        self.assertRefused(data, "rule1", "half_max", "a unit_factor of 1 converts nothing")
 
     def test_tool_hint_required(self):
         self.assertRefused(self.setting(tool_hint=""), "tool_hint")
@@ -371,15 +382,18 @@ class TransformTests(unittest.TestCase):
         self.assertEqual(pp.converted_unit(q(1, "min", "reciprocal")), "1/min")
         self.assertEqual(pp.converted_unit(q(1, "1/min", "ln2_over")), "min")
         self.assertEqual(pp.converted_unit(q(1, "h", factor=60, target_unit="min")), "min")
-        self.assertEqual(pp.converted_unit(q(1, "1/h", "unit_factor", target_unit="1/min")), "1/min")
+        self.assertEqual(pp.converted_unit(q(1, "1/h", "unit_factor", 1 / 60, target_unit="1/min")), "1/min")
         self.assertEqual(pp.converted_unit(q(1, "min", target_unit="min")), "min")
         self.assertEqual(pp.converted_unit(q(1, "min", "reciprocal", target_unit="1/min")), "1/min")
         for bad in (q(1, "1/hour", target_unit="1/min"), q(1, "hour", "reciprocal", target_unit="1/min"),
                     q(1, "1/hour", "ln2_over", target_unit="min"), q(1, "min/cell", "reciprocal", target_unit="x")):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "target_unit"):
                 pp.converted_unit(bad)
-        for bad in (q(1, "h", factor=60), q(1, "h", "unit_factor"), q(1, "micron/min", "reciprocal")):
+        for bad in (q(1, "h", factor=60), q(1, "h", "unit_factor", 60), q(1, "micron/min", "reciprocal")):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "target_unit"):
+                pp.converted_unit(bad)
+        for bad in (q(1, "h", "unit_factor"), q(1, "1/h", "unit_factor", 1.0, target_unit="1/min")):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "a unit_factor of 1 converts nothing"):
                 pp.converted_unit(bad)
 
 
