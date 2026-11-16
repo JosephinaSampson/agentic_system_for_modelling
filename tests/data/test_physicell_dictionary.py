@@ -168,7 +168,7 @@ class DictionaryTests(Base):
         self.assertTrue(self.run_capture(self.good() + after).is_file())
 
     def test_read_only_set_is_explicit(self):
-        # server 2.5.2: the readOnlyHint tools, plus the two exports (they write files, never the lists' structure)
+        # server 2.5.2: the readOnlyHint tools, plus the three exports (they write files, never the lists' structure)
         self.assertEqual(cd.READ_ONLY, frozenset({
             "list_sessions", "list_artifact_sessions", "get_workflow_status", "get_maboss_context",
             "validate_xml_file", "list_loaded_components", "get_available_cycle_models", SIGNALS_TOOL, BEHAVIORS_TOOL,
