@@ -469,6 +469,17 @@ class ConformanceTests(DictionaryTests):
         for cell in ("tumor", "tumor_hypoxic"):
             self.assertTrue(any(p.startswith(f"cell definition {cell}: its MaBoSS .bnd") for p in problems), problems)
 
+    def test_basis_tree_is_the_verified_bytes(self):
+        # PR #17 review 4586112201: the basis tree comes from the bytes sx.capture hashed (simulated: the file
+        # replaced between the hash and a later sx.load)
+        from unittest import mock
+        if self.design["basis"] is None:
+            return  # a new configuration has no basis
+        tampered = cd.sx.load(self.root / self.design["basis"]["capture"] / "package/config" / cd.sx.XML_NAME)
+        tampered.find("domain/x_max").text = "500"
+        with mock.patch.object(cd.sx, "load", return_value=tampered):
+            self.assertEqual(cd.conformance(self.root, self.design, self.capture), [])
+
     def test_no_enabled_rules_ruleset(self):
         self.refused_capture("enabled rules ruleset", rules=True)
 

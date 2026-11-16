@@ -114,8 +114,7 @@ def orchestrator_json(root: Path, rel, what: str = "design") -> Path:
 def _basis_facts(root: Path, capture_rel: str) -> dict:
     """{session, cell_definitions: {name: cycle model}, substrates: {name: units|None}, values: {name:
     settings_xml.substrate_facts}} of a verified capture."""
-    bound = sx.capture(root, capture_rel)
-    tree = sx.load(root / bound["xml_path"])
+    bound, tree = sx.capture_tree(root, capture_rel)  # the tree of exactly the verified bytes
     cells = {name: sx.cycle_model(tree, name) for name in sx.cell_definitions(tree)}
     values = sx.substrate_facts(tree)
     subs = {name: facts["units"] for name, facts in values.items()}

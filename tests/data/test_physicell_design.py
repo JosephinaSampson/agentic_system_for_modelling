@@ -301,6 +301,19 @@ class NonTextJsonTests(Base):
                 self.assertNotIn("Traceback", err.getvalue())
 
 
+class VerifiedBasisBytesTests(Base):
+    """PR #17 review 4586112201: the basis facts come from the bytes sx.capture hashed, never from a second read
+    (simulated here: the file replaced between the hash and a later sx.load)."""
+
+    def test_basis_facts_ignore_a_replaced_file(self):
+        from unittest import mock
+        data = self.complete()
+        tampered = pd.sx.load(self.root / self.capture / "package/config" / pd.sx.XML_NAME)
+        tampered.find("microenvironment_setup/variable[@name='oxygen']/physical_parameter_set/decay_rate").text = "9"
+        with mock.patch.object(pd.sx, "load", return_value=tampered):
+            self.assertEqual(self.errors(data), [])
+
+
 class DraftTests(Base):
     def test_draft_prefills_from_basis_and_never_overwrites(self):
         (self.root / REL).unlink(missing_ok=True)

@@ -161,6 +161,21 @@ class CaptureBindingTests(unittest.TestCase):
             sx.capture(self.project, self.rel)
         self.assertEqual(len(reads), 1)
 
+    def test_capture_tree_is_parsed_from_the_verified_bytes(self):
+        # PR #17 review 4586112201: the tree comes from the bytes whose hash was verified, read once
+        reads = []
+        original = Path.read_bytes
+
+        def counting(path):
+            if path.name == sx.XML_NAME:
+                reads.append(path)
+            return original(path)
+        with unittest.mock.patch.object(Path, "read_bytes", counting):
+            bound, tree = sx.capture_tree(self.project, self.rel)
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(bound, sx.capture(self.project, self.rel))  # the binding itself is unchanged
+        self.assertEqual(sx.normalise(tree), sx.normalise(sx.load(self.project / bound["xml_path"])))
+
     def test_capture_without_rules(self):
         shutil.rmtree(self.project / "runs")
         text = (self.source / "config/PhysiCell_settings.xml").read_text().replace('format="csv" enabled="true"', 'format="csv" enabled="false"')

@@ -420,15 +420,10 @@ def conformance(root: Path, design: dict, capture_rel: str) -> list[str]:
     .bnd/.cfg bytes (sha256) of its design handoff's bnd_file/cfg_file, no PhysiBoSS link and no enabled rules
     ruleset."""
     root = Path(root)
-    bound = sx.capture(root, capture_rel)
-    raw = (root / bound["xml_path"]).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != bound["xml_sha256"]:
-        raise ValueError(f"capture {capture_rel}: its settings XML changed while being read")
-    tree = sx.parse_bytes(raw)
+    bound, tree = sx.capture_tree(root, capture_rel)  # trees of exactly the verified bytes, never a second read
     basis_tree = None
     if design["basis"] is not None:
-        basis = sx.capture(root, design["basis"]["capture"])
-        basis_tree = sx.load(root / basis["xml_path"])
+        basis_tree = sx.capture_tree(root, design["basis"]["capture"])[1]
     problems: list[str] = []
     _cells(design, tree, problems)
     _carrier_models(tree, bound["manifest"], _handoff_models(root, design, problems), problems)
