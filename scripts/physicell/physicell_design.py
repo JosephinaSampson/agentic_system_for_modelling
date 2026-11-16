@@ -86,7 +86,7 @@ def _basis_facts(root: Path, capture_rel: str) -> dict:
     return {"session": bound["session"], "cell_definitions": cells, "substrates": subs}
 
 
-def _write_new(root: Path, path: Path, text: str) -> None:
+def write_new(root: Path, path: Path, text: str) -> None:
     reject_symlinks(path, root)
     path.parent.mkdir(parents=True, exist_ok=True)
     reject_symlinks(path, root)
@@ -132,7 +132,7 @@ def draft(root: Path, purpose: str, *, basis_capture: str | None, sources: list 
               "cell_definitions": cells, "substrates": subs, "intracellular": [], "coupling_plan": [],
               "sources": declared, "data": proposals, "unmapped": []}
     try:
-        _write_new(root, target, json.dumps(design, indent=2) + "\n")
+        write_new(root, target, json.dumps(design, indent=2) + "\n")
     except FileExistsError as exc:
         raise ValueError(f"{target.relative_to(root).as_posix()} exists; drafts never overwrite a design") from exc
     return target

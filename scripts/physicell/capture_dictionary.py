@@ -7,7 +7,9 @@ physicell_dictionary.json next to the design (write-new, never overwrites):
    signals: [..], behaviors: {cell_definition: [..]}, source_sha256 (of tool_calls.json)}
 
 Server order is kept (nothing sorted); exact repeats are dropped. Only successful list calls count, and only
-those after the last successful structure-changing call of the session. Per-cell behaviors come only from calls
+those whose tool_use comes after the tool_result of the last successful structure-changing call of the session.
+A structure-changing tool_use without a result refuses the capture; one whose result is an error is ignored (the
+server rejected it, so the configuration is unchanged). Items are {name, type} from either result form. Per-cell behaviors come only from calls
 whose cell_type equals that cell definition. Calls naming another session are ignored; calls without a session id
 belong to the invocation's session. Stdlib only.
 """
@@ -73,7 +75,13 @@ def _payload_error(value, depth=0) -> bool:
     return False
 
 
-def _parse_markdown(content, kind_key: str) -> list[dict]:
+def _item(name, kind, where: str) -> dict:
+    if not isinstance(name, str) or not name.strip() or not isinstance(kind, str) or not kind.strip():
+        raise ValueError(f"malformed {where} item (name and type must be non-empty text): {name!r}, {kind!r}")
+    return {"name": name, "type": kind}
+
+
+def _parse_markdown(content, tool: str) -> list[dict]:
     items, kind = [], None
     for text in _texts(content):
         for line in text.splitlines():
@@ -83,16 +91,22 @@ def _parse_markdown(content, kind_key: str) -> list[dict]:
                 continue
             match = ITEM.match(line)
             if match:
-                items.append({"name": match.group(1), kind_key: kind, "description": match.group(2)})
+                if kind is None:
+                    raise ValueError(f"{tool}: markdown item {match.group(1)!r} has no ### TYPE heading")
+                items.append(_item(match.group(1), kind, tool))
     return items
 
 
 def _parse(content, tool: str) -> list[dict]:
     key, kind_key = ("signals", "signal_type") if tool == SIGNALS else ("behaviors", "behavior_type")
     payload = _structured(content)
-    found = payload.get(key) if isinstance(payload, dict) else None
-    items = found if isinstance(found, list) and all(isinstance(i, dict) and i.get("name") for i in found) \
-        else _parse_markdown(content, kind_key)
+    if isinstance(payload, dict) and key in payload:
+        found = payload[key]
+        if not isinstance(found, list) or not all(isinstance(i, dict) for i in found):
+            raise ValueError(f"{tool}: malformed structured payload ({key} is not a list of objects)")
+        items = [_item(i.get("name"), i.get(kind_key), tool) for i in found]
+    else:
+        items = _parse_markdown(content, tool)
     unique = []
     for item in items:
         if item not in unique:
@@ -101,51 +115,59 @@ def _parse(content, tool: str) -> list[dict]:
 
 
 def _calls(blocks: list, session: str) -> list[dict]:
-    """Successful calls of this session, in result order: {index, tool, input, content}."""
-    uses = {b["id"]: b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use" and "id" in b}
+    """Successful calls of this session: {use, result, tool, input, content} (block positions).
+
+    A structure-changing tool_use of this session with no tool_result refuses the capture. A call whose result is an
+    error is dropped: the server rejected it, so the configuration is unchanged."""
+    results = {b.get("tool_use_id"): (n, b) for n, b in enumerate(blocks)
+               if isinstance(b, dict) and b.get("type") == "tool_result"}
     out = []
-    for index, block in enumerate(blocks):
-        if not isinstance(block, dict) or block.get("type") != "tool_result":
+    for position, use in enumerate(blocks):
+        if not isinstance(use, dict) or use.get("type") != "tool_use":
             continue
-        use = uses.get(block.get("tool_use_id"))
-        name = use.get("name") if use else None
+        name = use.get("name")
         if not isinstance(name, str) or not name.startswith(PREFIX):
             continue
+        tool = name[len(PREFIX):]
+        given = use.get("input") if isinstance(use.get("input"), dict) else {}
+        if use.get("id") not in results:
+            if tool in STRUCTURE and given.get("session_id") in (None, session):
+                raise ValueError(f"structure-changing call {tool} (id {use.get('id')}) has no result; "
+                                 "the configuration state is unknown")
+            continue
+        index, block = results[use["id"]]
         content = block.get("content")
         if block.get("is_error") is True or _payload_error(content):
             continue
-        given = use.get("input") if isinstance(use.get("input"), dict) else {}
         payload = _structured(content)
         named = given.get("session_id") or (payload.get("session_id") if isinstance(payload, dict) else None)
         if named is not None and named != session:
             continue
-        out.append({"index": index, "tool": name[len(PREFIX):], "input": given, "content": content})
+        out.append({"use": position, "result": index, "tool": tool, "input": given, "content": content})
     return out
 
 
 def collect(blocks: list, session: str, cells: list[str]) -> tuple[list, dict]:
     calls = _calls(blocks, session)
-    last_change = max((c["index"] for c in calls if c["tool"] in STRUCTURE), default=-1)
-    live = [c for c in calls if c["index"] > last_change]
+    boundary = max((c["result"] for c in calls if c["tool"] in STRUCTURE), default=-1)
+    live = [c for c in calls if c["use"] > boundary]
+    after = "after the last structure-changing call"
     errors, signals, behaviors = [], None, {}
     mine = [c for c in live if c["tool"] == SIGNALS]
     if mine:
         signals = _parse(mine[-1]["content"], SIGNALS)
+        if not signals:
+            errors.append("the signals list is empty or unreadable")
     else:
-        errors.append("no successful list_all_available_signals after the last structure-changing call")
+        errors.append(f"no successful list_all_available_signals {after}")
     for cell in cells:
         found = [c for c in live if c["tool"] == BEHAVIORS and c["input"].get("cell_type") == cell]
-        if found:
-            behaviors[cell] = _parse(found[-1]["content"], BEHAVIORS)
-        else:
-            errors.append(f"no successful list_all_available_behaviors(cell_type={cell}) after the last "
-                          "structure-changing call")
-    if signals == []:
-        errors.append("the signals list is empty or unreadable")
-    errors += [f"the behaviors list of {c} is empty or unreadable" for c, v in behaviors.items() if not v]
-    if errors:
-        errors = [e if "after the last structure-changing" in e else e + " (lists must come after the last "
-                  "structure-changing call)" for e in errors]
+        if not found:
+            errors.append(f"no successful list_all_available_behaviors(cell_type={cell}) {after}")
+            continue
+        behaviors[cell] = _parse(found[-1]["content"], BEHAVIORS)
+        if not behaviors[cell]:
+            errors.append(f"the behaviors list of {cell} is empty or unreadable")
     return errors, {"signals": signals, "behaviors": behaviors}
 
 
@@ -179,9 +201,9 @@ def capture_dictionary(root: Path, invocation_rel: str, capture_rel: str, design
            "behaviors": found["behaviors"], "source_sha256": hashlib.sha256(raw).hexdigest()}
     target = (root / design_rel).with_name("physicell_dictionary.json")
     try:
-        pd._write_new(root, target, json.dumps(out, indent=2) + "\n")
+        pd.write_new(root, target, json.dumps(out, indent=2) + "\n")
     except FileExistsError as exc:
-        raise ValueError(f"{target.relative_to(root).as_posix()} exists; the dictionary is never overwritten") from exc
+        raise ValueError(f"{target.relative_to(root).as_posix()} exists; the dictionary is never overwritten; re-capture against a new design purpose directory; never delete the old dictionary") from exc
     return target
 
 
