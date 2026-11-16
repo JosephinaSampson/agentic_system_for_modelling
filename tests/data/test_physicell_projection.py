@@ -10,11 +10,14 @@ import os
 import unittest
 from unittest import mock
 
+import xml.etree.ElementTree as ET
+
 from scripts import state
+from scripts.capture.record_physicell_config import record_physicell
 from scripts.data import approvals
 from scripts.physicell import capture_dictionary as cd
 from scripts.physicell import physicell_projection as pp
-from tests.data.test_physicell_design import REL, SESSION, Base
+from tests.data.test_physicell_design import FIXTURES, MABOSS, REL, SESSION, Base
 from tests.data.test_physicell_dictionary import INVOCATION, good_calls
 
 PROJ = "runs/orchestrator/p1/physicell_projection.json"
@@ -33,12 +36,35 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def built_capture(root, session, capture_id):
+    """Record a capture of the fixture configuration whose tumor carries the PhysiBoSS fixture fragment (the
+    configuration the configurator built from the design): captured input link pressure -> B, output A -> apoptosis."""
+    source = root.parent / f"source-{session}-{capture_id}"
+    (source / "config").mkdir(parents=True)
+    tree = ET.parse(FIXTURES / "PhysiCell_settings.xml")
+    tumor = tree.getroot().find("cell_definitions/cell_definition[@name='tumor']/phenotype")
+    tumor.append(ET.parse(FIXTURES / "intracellular_tumor.xml").getroot())
+    tree.write(source / "config/PhysiCell_settings.xml", encoding="utf-8", xml_declaration=True)
+    (source / "config/cell_rules.csv").write_bytes((FIXTURES / "cell_rules.csv").read_bytes())
+    (source / "config/tumor.bnd").write_text("Node A { logic = A; }\nNode B { logic = B; }\nNode C { logic = C; }\n")
+    (source / "config/tumor.cfg").write_text("A.istate=0;")
+    record_physicell(root, source, source / "config/PhysiCell_settings.xml", session, capture_id)
+    return f"runs/multicellular-configurator/{session}/configs/{capture_id}"
+
+
 class ProjectionBase(Base):
-    """A checked, approved design, its captured dictionary and a drafted projection over the fixture capture."""
+    """A checked, approved design, its captured dictionary and a drafted projection over the built capture.
+
+    The tumor's MaBoSS handoff has nodes A, B, C and declared outputs A, B only."""
+
+    def make_handoff(self, session=MABOSS, nodes=("A", "B", "C"), outputs=("A", "B"), **kw):
+        return super().make_handoff(session, nodes=nodes, outputs=outputs, **kw)
 
     def setUp(self):
         super().setUp()
-        self.design = self.complete()
+        self.design = self.complete()  # its basis is the fixture capture cap-1
+        self.basis = self.capture
+        self.capture = built_capture(self.root, SESSION, "cap-2")
         self.write(self.design)
         self.design_sha = sha(self.root / REL)
         state.update(self.root, "record", {
@@ -47,7 +73,7 @@ class ProjectionBase(Base):
             "authorization": "approved", "artifact": {"path": REL, "sha256": self.design_sha}})
         invocation = self.root / INVOCATION
         invocation.parent.mkdir(parents=True, exist_ok=True)
-        invocation.write_text(json.dumps(good_calls()))
+        invocation.write_text(json.dumps(good_calls(extra_behaviors=("necrosis", "apoptosis"))))
         cd.capture_dictionary(self.root, INVOCATION, self.capture, REL)
         path = pp.draft(self.root, "p1", capture=self.capture, design=REL, design_approval="design-1",
                         sources=[("s1", "inputs/paper.txt")])
@@ -393,6 +419,117 @@ class BindingTests(ProjectionBase):
         data = self.projection()
         data["extra"] = 1
         self.assertRefused(data, "keys must be exactly")
+
+
+class OneWriterTests(ProjectionBase):
+    """Ruling T4-d: one writer per behavior; the captured rules CSV and PhysiBoSS links are consulted."""
+
+    def rule(self, entry_id="rule9", signal="oxygen", behavior="necrosis"):
+        entry = copy.deepcopy(self.entries()[2])
+        entry.update(entry_id=entry_id, signal=signal, behavior=behavior)
+        return entry
+
+    def output(self, entry_id="out9", node="A", behavior="migration speed"):
+        entry = copy.deepcopy(self.entries()[1])
+        entry.update(entry_id=entry_id, node=node, behavior=behavior)
+        return entry
+
+    def test_rule_already_in_captured_rules_csv_refused(self):
+        data = self.projection([self.rule()])
+        self.assertRefused(data, "rule9", "captured rules CSV row 1", "tumor,oxygen,decreases,necrosis")
+        self.assertEqual(self.errors(self.projection([self.rule(behavior="migration speed")])), [])
+
+    def test_no_captured_rules_csv_nothing_to_compare(self):
+        self.assertEqual(pp.captured_rules(self.root, {"rules_path": None, "rules_sha256": None}), [])
+
+    def test_output_on_behavior_driven_by_captured_rule_refused(self):
+        data = self.projection([self.output("out9", "A", "necrosis")])
+        self.assertRefused(data, "out9", "captured rules CSV row 1")
+
+    def test_changed_rules_csv_refused(self):
+        csv = self.root / self.capture / "package/config/cell_rules.csv"
+        csv.write_text(csv.read_text() + "tumor,oxygen,increases,apoptosis,1,1,1,0\n")
+        self.assertRefused(self.projection(), "capture")
+
+    def test_two_outputs_on_one_behavior_refused(self):
+        data = self.projection([self.output("out1", "A"), self.output("out2", "B")])
+        self.assertRefused(data, "out2", "out1", "migration speed")
+
+    def test_rule_and_output_on_one_behavior_refused(self):
+        rule = self.rule("rule9", "pressure", "migration speed")
+        self.assertRefused(self.projection([self.output("out1"), rule]), "rule9", "out1")
+        self.assertRefused(self.projection([rule, self.output("out1")]), "out1", "rule9")
+
+    def test_two_rules_on_one_behavior_with_different_signals_pass(self):
+        rules = [self.rule("r1", "oxygen", "migration speed"), self.rule("r2", "pressure", "migration speed")]
+        self.assertEqual(self.errors(self.projection(rules)), [])
+
+    def test_input_link_already_in_captured_xml_refused(self):
+        data, entry = self.entry("in1")
+        entry.update(signal="pressure", node="B")
+        self.assertRefused(data, "in1", "captured XML", "pressure -> B")
+
+    def test_output_on_behavior_linked_in_captured_xml_refused(self):
+        data = self.projection([self.output("out9", "B", "apoptosis")])
+        self.assertRefused(data, "out9", "captured XML", "A -> apoptosis")
+
+    def test_rule_on_behavior_linked_in_captured_xml_refused(self):
+        data = self.projection([self.rule("rule9", "oxygen", "apoptosis")])
+        self.assertRefused(data, "rule9", "captured XML", "A -> apoptosis")
+
+    def test_setting_inside_intracellular_refused(self):
+        entry = copy.deepcopy(self.entries()[3])
+        entry.update(path=f"{TUMOR}/intracellular/mapping/output/settings/value", value=0.001,
+                     target_unit="1/min", target_unit_justification="j")
+        self.assertRefused(self.projection([entry]), "set1", "intracellular")
+
+
+class ReviewMinorTests(ProjectionBase):
+    """Ruling T4-e."""
+
+    def test_case_variant_refused_with_hint(self):
+        data, entry = self.entry("in1")
+        entry["signal"] = "Oxygen"
+        self.assertRefused(data, "unknown signal 'Oxygen'", "closest: oxygen")
+
+    def rewrite_dictionary(self, **changes):
+        dictionary = json.loads((self.root / DICT).read_text())
+        dictionary.update(changes)
+        (self.root / DICT).write_text(json.dumps(dictionary))
+        data = self.projection()
+        data["dictionary"]["sha256"] = sha(self.root / DICT)
+        return data
+
+    def test_dictionary_session_mismatch_refused(self):
+        self.assertRefused(self.rewrite_dictionary(session="other-session"), "other-session", "capture's session")
+
+    def test_dictionary_invocation_changed_refused(self):
+        (self.root / INVOCATION).write_text((self.root / INVOCATION).read_text() + "\n")
+        self.assertRefused(self.projection(), "invocation record")
+
+    def test_dictionary_schema_version_strict(self):
+        self.assertRefused(self.rewrite_dictionary(schema_version=1.0), "schema_version")
+        self.assertRefused(self.rewrite_dictionary(schema_version=True), "schema_version")
+
+    def test_design_approval_session_differs_from_capture(self):
+        other = built_capture(self.root, "mc-session-2", "cap-9")
+        manifest = self.root / other / "capture.json"
+        data = self.rewrite_dictionary(session="mc-session-2", capture={"path": other, "sha256": sha(manifest)})
+        data["capture"] = {"path": other, "sha256": sha(manifest)}
+        self.assertRefused(data, "design approval design-1 is for session 'mc-session-1'")
+
+    def test_justification_without_target_unit_refused(self):
+        data, entry = self.entry("set1")
+        entry["target_unit_justification"] = "why"
+        self.assertRefused(data, "target_unit_justification", "without target_unit")
+
+    def test_output_link_on_non_output_node_refused(self):
+        data, entry = self.entry("out1")
+        entry["node"] = "C"
+        self.assertRefused(data, "MaBoSS output node or readout 'C' of tumor")
+        data, entry = self.entry("in1")
+        entry["node"] = "C"
+        self.assertEqual(self.errors(data), [])
 
 
 class ApprovalTests(ProjectionBase):

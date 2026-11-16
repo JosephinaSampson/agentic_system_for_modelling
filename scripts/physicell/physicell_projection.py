@@ -34,15 +34,21 @@ output nodes and readouts); an unknown name lists up to 3 close matches. A setti
 element of the captured XML holding a number; its converted unit equals the element's units attribute exactly (no
 spelling normalisation); without a units attribute, target_unit plus a non-empty target_unit_justification is
 required, and target_unit must equal the units the parent element declares, if any. Rule model values satisfy
-half_max > 0, hill_power > 0, saturation_value >= 0. One rule per (cell_definition, signal, behavior); each link and
-each XML element at most once. `from` is "basis" (the captured configuration), {source, locator}, {data, locator}
+half_max > 0, hill_power > 0, saturation_value >= 0. One writer per behavior: one rule per (cell_definition, signal,
+behavior), not already a row of the captured rules CSV; at most one physiboss_output per (cell_definition, behavior),
+and never a rule and an output link on the same (cell_definition, behavior), counting the captured rules CSV and the
+captured XML's PhysiBoSS output links; an input link not already in the captured XML; each XML element at most once,
+never inside a cell definition's phenotype/intracellular (the links own it). target_unit_justification needs
+target_unit. `from` is "basis" (the captured configuration), {source, locator}, {data, locator}
 or a non-empty list of those; every declared source and proposal is cited by an entry or an unmapped row.
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import difflib
 import hashlib
+import io
 import json
 import math
 import sys
@@ -106,10 +112,10 @@ def converted_unit(q: dict) -> str:
     if not isinstance(q, dict):
         raise ValueError("a quantity must be an object")
     unit = q.get("value_unit")
-    if not pd._real_text(unit):
+    if not pd.real_text(unit):
         raise ValueError(f"value_unit must be stated (never inferred), not {unit!r}")
     if "target_unit" in q:
-        if not pd._real_text(q["target_unit"]):
+        if not pd.real_text(q["target_unit"]):
             raise ValueError(f"target_unit must be a non-empty unit, not {q['target_unit']!r}")
         return q["target_unit"]
     transform, factor = q.get("transform"), q.get("factor")
@@ -137,6 +143,31 @@ def _read(root: Path, rel: str, what: str) -> bytes:
 
 def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def captured_rules(root: Path, bound: dict) -> list[tuple[int, list[str]]]:
+    """(line number, stripped fields) of each rule row of a capture's rules CSV ([] without one).
+
+    `bound` is settings_xml.capture(...). The CSV is the server's export (physicell_config save_rules_to_csv): no
+    header, CBHG v3.0 columns cell_type,signal,direction,behavior,saturation_value,half_max,hill_power,apply_to_dead.
+    Blank lines and lines starting with // or # are skipped."""
+    if bound.get("rules_path") is None:
+        return []
+    path = Path(root) / bound["rules_path"]
+    reject_symlinks(path, Path(root))
+    raw = path.read_bytes()
+    if _sha(raw) != bound["rules_sha256"]:
+        raise ValueError("its rules CSV changed while being read")
+    rows = []
+    for number, fields in enumerate(csv.reader(io.StringIO(raw.decode("utf-8"))), 1):
+        fields = [f.strip() for f in fields]
+        if not any(fields) or fields[0].startswith(("//", "#")):
+            continue
+        if len(fields) < 4:
+            raise ValueError(f"rules CSV row {number} has {len(fields)} columns, not the CBHG v3.0 layout "
+                             "cell_type,signal,direction,behavior,...")
+        rows.append((number, fields))
+    return rows
 
 
 # ---------------------------------------------------------------- draft
@@ -192,6 +223,10 @@ class _Checker(pd.Citations):
         self.behaviors: dict | None = None
         self.used: set = set()
         self.targets: dict = {}
+        self.writers: dict = {}               # (cell, behavior) -> [(kind, label)] of entries
+        self.captured_rules: dict = {}        # (cell, signal, behavior) -> description of the CSV row
+        self.captured_writers: dict = {}      # (cell, behavior) -> description of a captured rule or output link
+        self.captured_inputs: dict = {}       # (cell, signal, node) -> description of the captured input link
 
     def head(self, data: dict) -> None:
         if data.get("kind") != "physicell_projection" or type(data.get("schema_version")) is not int \
@@ -214,16 +249,32 @@ class _Checker(pd.Citations):
             if _sha(raw) != bound["xml_sha256"]:
                 raise ValueError("its settings XML changed while being read")
             self.xml = sx.parse_bytes(raw)
-        except (ValueError, OSError) as exc:
+            rules = captured_rules(self.root, bound)
+        except (ValueError, OSError, UnicodeDecodeError) as exc:
+            self.xml = None
             self.error(f"capture {ref['path']!r}: {exc}")
             return
         self.parents = {child: parent for parent in self.xml.iter() for child in parent}
         self.capture = ref
         self.session = bound["session"]
+        for number, fields in rules:
+            cell, signal, behavior = fields[0], fields[1], fields[3]
+            where = f"captured rules CSV row {number} ({','.join(fields[:4])})"
+            self.captured_rules.setdefault((cell, signal, behavior), where)
+            self.captured_writers.setdefault((cell, behavior), where)
+        for definition in self.xml.findall("cell_definitions/cell_definition"):
+            cell = definition.get("name")
+            for link in definition.findall("phenotype/intracellular/mapping/input"):
+                signal, node = link.get("physicell_name"), link.get("intracellular_name")
+                self.captured_inputs.setdefault(
+                    (cell, signal, node), f"captured XML input link {signal} -> {node} on {cell}")
+            for link in definition.findall("phenotype/intracellular/mapping/output"):
+                node, behavior = link.get("intracellular_name"), link.get("physicell_name")
+                self.captured_writers[(cell, behavior)] = f"captured XML output link {node} -> {behavior} on {cell}"
 
     def design_section(self, ref) -> None:
         if not isinstance(ref, dict) or set(ref) != {"path", "sha256", "approval"} \
-                or not all(pd._is_text(v) for v in ref.values()):
+                or not all(pd.is_text(v) for v in ref.values()):
             self.error("design must be exactly {path, sha256, approval} (non-empty strings)")
             return
         try:
@@ -274,7 +325,7 @@ class _Checker(pd.Citations):
                 raise ValueError("its sha256 differs from the projection's")
             data = strict_json(raw)
             if not isinstance(data, dict) or data.get("kind") != "physicell_dictionary" \
-                    or data.get("schema_version") != 1:
+                    or type(data.get("schema_version")) is not int or data["schema_version"] != 1:
                 raise ValueError('kind must be "physicell_dictionary" and schema_version 1')
             if self.capture is not None and data.get("capture") != self.capture:
                 raise ValueError(f"it was captured for {data.get('capture')!r}, not the projection's capture")
@@ -377,7 +428,23 @@ class _Checker(pd.Citations):
         self.choice(label, "action", e["action"], ACTIONS)
         self.quantity(label, "threshold", e["threshold"])
         self.integer(label, "smoothing", e["smoothing"])
-        self.once(label, ("input", cell, e["signal"], e["node"]), f"link {e['signal']} -> {e['node']} on {cell}")
+        key = (cell, e["signal"], e["node"])
+        if key in self.captured_inputs:
+            self.error(f"{label}: input link {e['signal']} -> {e['node']} on {cell} already exists "
+                       f"({self.captured_inputs[key]})")
+        self.once(label, ("input", *key), f"link {e['signal']} -> {e['node']} on {cell}")
+
+    def write_behavior(self, label: str, kind: str, cell: str, behavior: str) -> None:
+        """One writer per (cell, behavior): an output link excludes every other writer; rules exclude outputs."""
+        key = (cell, behavior)
+        captured = self.captured_writers.get(key)
+        if captured is not None and (kind == "physiboss_output" or "output link" in captured):
+            self.error(f"{label}: behavior {behavior!r} of {cell} is already written by {captured}")
+        clashes = [other for other_kind, other in self.writers.get(key, ())
+                   if kind == "physiboss_output" or other_kind == "physiboss_output"]
+        if clashes:
+            self.error(f"{label}: behavior {behavior!r} of {cell} is already written by {'; '.join(clashes)}")
+        self.writers.setdefault(key, []).append((kind, label))
 
     def physiboss_output(self, label: str, e: dict) -> None:
         cell = e["cell_definition"]
@@ -389,7 +456,7 @@ class _Checker(pd.Citations):
         self.quantity(label, "base_value", e["base_value"])
         self.integer(label, "smoothing", e["smoothing"])
         self.integer(label, "steepness", e["steepness"], nullable=True)
-        self.once(label, ("output", cell, e["node"], e["behavior"]), f"link {e['node']} -> {e['behavior']} on {cell}")
+        self.write_behavior(label, "physiboss_output", cell, e["behavior"])
 
     def rule(self, label: str, e: dict) -> None:
         cell = e["cell_definition"]
@@ -402,15 +469,22 @@ class _Checker(pd.Citations):
             value = self.quantity(label, key, e[key])
             if value is not None and not test(value):
                 self.error(f"{label}: {key} model value must be {domain}, not {value!r}")
-        key = ("rule", cell, e["signal"], e["behavior"])
+        triple = (cell, e["signal"], e["behavior"])
+        if triple in self.captured_rules:
+            self.error(f"{label}: duplicate rule for ({cell}, {e['signal']}, {e['behavior']}): already "
+                       f"{self.captured_rules[triple]}")
+        key = ("rule", *triple)
         if key in self.targets:
             self.error(f"{label}: duplicate rule for ({cell}, {e['signal']}, {e['behavior']}) "
                        f"(also {self.targets[key]})")
         else:
             self.targets[key] = label
+        self.write_behavior(label, "rule", cell, e["behavior"])
 
     def setting(self, label: str, e: dict) -> None:
-        if not pd._real_text(e["tool_hint"]):
+        if "target_unit_justification" in e and "target_unit" not in e:
+            self.error(f"{label}: target_unit_justification without target_unit; give both or neither")
+        if not pd.real_text(e["tool_hint"]):
             self.error(f"{label}: tool_hint must name the configurator tool to use, not {e['tool_hint']!r}")
         q = {k: e[k] for k in (*QUANTITY, "target_unit") if k in e}
         unit = None
@@ -429,6 +503,13 @@ class _Checker(pd.Citations):
         except ValueError as exc:
             self.error(f"{label}: {exc}")
             return
+        ancestor, child = self.parents.get(element), element
+        while ancestor is not None:
+            if child.tag == "intracellular" and ancestor.tag == "phenotype":
+                self.error(f"{label}: path {e['path']} lies inside a cell definition's phenotype/intracellular, "
+                           "which PhysiBoSS links own; use a physiboss_input or physiboss_output entry")
+                return
+            ancestor, child = self.parents.get(ancestor), ancestor
         if len(element):
             self.error(f"{label}: path {e['path']} must name a leaf element, not <{element.tag}> with children")
             return
@@ -445,7 +526,7 @@ class _Checker(pd.Citations):
             if "target_unit" not in e:
                 self.error(f"{label}: <{element.tag}> has no units attribute: give target_unit and "
                            f"target_unit_justification")
-            elif not pd._real_text(e.get("target_unit_justification")):
+            elif not pd.real_text(e.get("target_unit_justification")):
                 self.error(f"{label}: <{element.tag}> has no units attribute: target_unit needs a non-empty "
                            f"target_unit_justification")
             parent = self.parents.get(element)
@@ -480,7 +561,7 @@ class _Checker(pd.Citations):
                 self.error(f"{label}: duplicate entry_id {entry_id}")
             else:
                 ids.append(entry_id)
-            if not pd._real_text(e["justification"]):
+            if not pd.real_text(e["justification"]):
                 self.error(f"{label}: justification must be a non-empty reason, not empty or TODO")
             self.cite_from(label, e["from"])
             for key in ("cell_definition", "signal", "node", "behavior", "path"):
@@ -512,7 +593,7 @@ class _Checker(pd.Citations):
             if key in seen:
                 self.error(f"{label}: {ref} is listed twice")
             seen.add(key)
-            if not pd._real_text(item["reason"]):
+            if not pd.real_text(item["reason"]):
                 self.error(f"{label}: reason must be a non-empty explanation, not empty or TODO")
 
 

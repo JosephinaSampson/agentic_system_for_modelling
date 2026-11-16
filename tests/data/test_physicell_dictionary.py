@@ -51,12 +51,15 @@ def blocks(*calls):
     return [b for c in calls for b in c]
 
 
-def good_calls(extra_before=(), cells=("default", "tumor", "tumor_hypoxic")):
-    """A tool_calls.json block list holding fresh signal and per-cell behavior lists (used by projection tests)."""
+def good_calls(extra_before=(), cells=("default", "tumor", "tumor_hypoxic"), extra_behaviors=()):
+    """A tool_calls.json block list holding fresh signal and per-cell behavior lists (used by projection tests);
+    `extra_behaviors` names are appended to every cell's behavior list."""
+    extra = [{"name": n, "behavior_type": "death", "aliases": [], "description": n, "requires": []}
+             for n in extra_behaviors]
     return blocks(*extra_before,
                   call(10, "list_all_available_signals", {"session_id": SESSION}, structured("signals", SIGNALS)),
                   *[call(11 + i, "list_all_available_behaviors", {"session_id": SESSION, "cell_type": c},
-                         structured("behaviors", behaviors(c)))
+                         structured("behaviors", behaviors(c) + extra))
                     for i, c in enumerate(cells)])
 
 

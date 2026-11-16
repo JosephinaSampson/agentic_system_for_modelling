@@ -43,7 +43,8 @@ class Base(unittest.TestCase):
             shutil.copyfile(state.ROOT / "templates" / name, self.root / name)
         self.handoff = self.make_handoff()
 
-    def make_handoff(self, session=MABOSS, nodes=("A", "B"), export=True, cell_type="tumor"):
+    def make_handoff(self, session=MABOSS, nodes=("A", "B"), export=True, cell_type="tumor", outputs=None):
+        outputs = list(nodes if outputs is None else outputs)
         folder = self.root / "runs/boolean-dynamics-modeler" / session
         folder.mkdir(parents=True)
         bnd = folder / "model.bnd"
@@ -52,7 +53,7 @@ class Base(unittest.TestCase):
         cfg.write_text("A.istate=0;")
         manifest = {"schema_name": "mcp-biomodelling-handoff", "schema_version": "1.0",
                     "handoff_type": "maboss-to-physicell", "source": {"server": "MaBoSS", "session_id": session},
-                    "network": {"nodes": list(nodes), "output_nodes": list(nodes)},
+                    "network": {"nodes": list(nodes), "output_nodes": outputs},
                     "bnd_file": file_ref(self.root, bnd, "MaBoSS", session, "maboss_bnd"),
                     "cfg_file": file_ref(self.root, cfg, "MaBoSS", session, "maboss_cfg"),
                     "lineage": [], "simulation": {}, "target": {"cell_type": cell_type}}
@@ -66,7 +67,7 @@ class Base(unittest.TestCase):
             report.write_text("independent bounded review")
             review[role] = {"path": str(report.relative_to(self.root)), "sha256": state.digest(report)}
         approval = {"id": f"approval-{session}", "kind": "stage_approval", "session_id": session,
-                    "stage": "boolean-dynamics", "downstream_stage": "multicellular", "outputs": list(nodes),
+                    "stage": "boolean-dynamics", "downstream_stage": "multicellular", "outputs": outputs,
                     "approved_by": "researcher", "authorization": "approved", "artifact": ref}
         state.update(self.root, "registry-add", dict(zip(state.REGISTRY, [
             "boolean-dynamics-modeler", session, "boolean-dynamics", "active", "—", "pending", ref["path"]])))

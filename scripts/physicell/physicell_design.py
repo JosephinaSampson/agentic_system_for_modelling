@@ -61,12 +61,12 @@ BASIS_FROM = "basis"
 TODO = "TODO"
 
 
-def _is_text(value) -> bool:
+def is_text(value) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _real_text(value) -> bool:
-    return _is_text(value) and value.strip().upper() != TODO
+def real_text(value) -> bool:
+    return is_text(value) and value.strip().upper() != TODO
 
 
 def orchestrator_json(root: Path, rel, what: str = "design") -> Path:
@@ -187,7 +187,7 @@ class Citations:
             return
         for n, item in enumerate(items):
             here = f"data[{n}]"
-            if not isinstance(item, dict) or set(item) != DATA_KEYS or not all(_is_text(v) for v in item.values()):
+            if not isinstance(item, dict) or set(item) != DATA_KEYS or not all(is_text(v) for v in item.values()):
                 self.error(f"{here} must have exactly id, session, proposal, approval (non-empty strings)")
                 continue
             if item["id"] in self.data_ids:
@@ -264,7 +264,7 @@ class _Checker(Citations):
                 self.error("cycle_models is absent: record the server's cycle models first "
                            "(configurator get_available_cycle_models) before drafting a new configuration")
             models = []
-        if not isinstance(models, list) or not all(_real_text(m) for m in models) or len(set(models)) != len(models):
+        if not isinstance(models, list) or not all(real_text(m) for m in models) or len(set(models)) != len(models):
             self.error("cycle_models must be null or a list of unique non-empty names")
             return
         self.cycle_allowed = set(models)
@@ -272,7 +272,7 @@ class _Checker(Citations):
             self.cycle_allowed |= set(self.basis["cell_definitions"].values())
 
     def entity_common(self, label: str, item: dict) -> None:
-        if not _real_text(item.get("description")):
+        if not real_text(item.get("description")):
             self.error(f"{label}: description must be a non-empty reason, not empty or TODO")
         self.cite(label, item.get("from"))
 
@@ -289,7 +289,7 @@ class _Checker(Citations):
                 continue
             name = item["name"]
             label = f"{label} ({name})"
-            if not _real_text(name):
+            if not real_text(name):
                 self.error(f"{label}: name must be non-empty text")
                 continue
             if name in self.cells:
@@ -339,7 +339,7 @@ class _Checker(Citations):
                 continue
             name = item["name"]
             label = f"{label} ({name})"
-            if not _real_text(name):
+            if not real_text(name):
                 self.error(f"{label}: name must be non-empty text")
                 continue
             if name in seen:
@@ -348,7 +348,7 @@ class _Checker(Citations):
             seen.add(name)
             if name in self.cells:
                 self.error(f"{label}: name is also a cell definition; names must be distinct")
-            if not _real_text(item["units"]):
+            if not real_text(item["units"]):
                 self.error(f"{label}: units must be stated (never inferred), not empty or TODO")
             self.entity_common(label, item)
             if self.basis is not None:
@@ -362,7 +362,7 @@ class _Checker(Citations):
 
     def maboss_handoff(self, label: str, maboss, cell) -> None:
         if not isinstance(maboss, dict) or set(maboss) != {"handoff", "sha256"} \
-                or not all(_is_text(v) for v in maboss.values()):
+                or not all(is_text(v) for v in maboss.values()):
             self.error(f"{label}: maboss must be exactly {{handoff, sha256}}")
             return
         rel, digest = maboss["handoff"], maboss["sha256"]
@@ -426,13 +426,13 @@ class _Checker(Citations):
             cell, group, route = item["cell_definition"], item["behavior_group"], item["route"]
             if cell not in self.cells:
                 self.error(f"{label}: cell definition {cell!r} is not declared")
-            if not _real_text(group):
+            if not real_text(group):
                 self.error(f"{label}: behavior_group must be non-empty text")
             if route not in ROUTES:
                 self.error(f"{label}: route must be one of {', '.join(ROUTES)}, not {route!r}")
             elif route == "physiboss" and cell in self.cells and cell not in self.intracellular:
                 self.error(f"{label}: route physiboss needs an intracellular MaBoSS model on {cell}")
-            if not _real_text(item["notes"]):
+            if not real_text(item["notes"]):
                 self.error(f"{label}: notes must be a non-empty explanation, not empty or TODO")
             if (cell, group) in seen:
                 self.error(f"{label}: duplicate coupling for {cell!r}, {group!r}")
@@ -443,9 +443,9 @@ class _Checker(Citations):
             self.error("unmapped must be a list")
             return
         for n, item in enumerate(items):
-            if not isinstance(item, dict) or set(item) != {"item", "reason"} or not _is_text(item["item"]):
+            if not isinstance(item, dict) or set(item) != {"item", "reason"} or not is_text(item["item"]):
                 self.error(f"unmapped[{n}] must have exactly item and reason")
-            elif not _real_text(item["reason"]):
+            elif not real_text(item["reason"]):
                 self.error(f"unmapped[{n}] ({item['item']}): reason must be a non-empty explanation, not empty or TODO")
 
 
