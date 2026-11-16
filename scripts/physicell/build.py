@@ -238,21 +238,26 @@ def _scan_members(archive: tarfile.TarFile, stage: Path) -> None:
             raise ValueError(f"archive member {name!r} is a special file")
         if member.issym() or member.islnk():
             link = PurePosixPath(member.linkname)
+            if ".." in link.parts or (member.issym() and link.is_absolute()):
+                raise ValueError(f"archive member {name!r} links to {member.linkname!r}: an absolute or `..` "
+                                 "link target is refused")
+            if member.islnk() and link.is_absolute():
+                raise ValueError(f"archive member {name!r} is a hardlink to the absolute path {member.linkname!r}")
             if member.issym():
                 target = (base / PurePosixPath(name).parent / link).resolve()
             else:  # a hardlink target is a path from the archive root
                 target = (base / link).resolve()
-            if link.is_absolute() or not target.is_relative_to(base):
+            if not target.is_relative_to(base):
                 raise ValueError(f"archive member {name!r} links to {member.linkname!r}, outside the extraction folder")
 
 
 def _extract(archive_path: Path, stage: Path) -> None:
+    if not hasattr(tarfile, "data_filter"):
+        raise ValueError("this Python cannot filter archive extraction: needs Python >=3.12, or 3.8.17+/3.9.17+/"
+                         "3.10.12+/3.11.4+ with tarfile extraction filters")
     with tarfile.open(archive_path, "r:gz") as archive:
         _scan_members(archive, stage)
-        if hasattr(tarfile, "data_filter"):
-            archive.extractall(stage, filter="data")
-        else:
-            archive.extractall(stage)
+        archive.extractall(stage, filter="data")
 
 
 def download(tool: dict, env: dict, version: str, template: str, dest: Path) -> tuple[Path, str | None]:

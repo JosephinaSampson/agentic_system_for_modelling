@@ -301,13 +301,14 @@ class UnsafeArchiveTests(Base):
         info.linkname = linkname
         return info
 
-    def refuses(self, *members):
+    def refuses(self, *members, escape=None):
+        """`escape` is where the malicious archive would write if extracted unchecked."""
         self.archive(extra=[(m, None) for m in members])
-        outside = self.tmp / "evil"
         _, report = self.build()
         self.assertEqual((report["status"], report["failed_step"]), ("failed", "download"))
         self.assertIn("archive refused", report["error"])
-        self.assertFalse(outside.exists())
+        if escape is not None:
+            self.assertFalse(os.path.lexists(escape), f"{escape} was written")
         self.assertEqual(list(self.dest.iterdir()), [])  # no folder, staging cleaned up
         self.assertEqual(self.log.read_text().count("make"), 0)
 
@@ -315,16 +316,42 @@ class UnsafeArchiveTests(Base):
         self.refuses(self.member(tarfile.SYMTYPE, "PhysiCell-1.14.2/link", "/etc"))
 
     def test_relative_symlink_escaping_is_refused(self):
-        self.refuses(self.member(tarfile.SYMTYPE, "PhysiCell-1.14.2/link", "../../evil"))
+        self.refuses(self.member(tarfile.SYMTYPE, "PhysiCell-1.14.2/link", "../../evil"),
+                     escape=self.dest / "evil")
 
     def test_hardlink_outside_is_refused(self):
-        self.refuses(self.member(tarfile.LNKTYPE, "PhysiCell-1.14.2/hard", "../../etc/passwd"))
+        self.refuses(self.member(tarfile.LNKTYPE, "PhysiCell-1.14.2/hard", "../../etc/passwd"),
+                     escape=self.dest / "etc")
 
     def test_dotdot_member_is_refused(self):
-        self.refuses(self.member(tarfile.REGTYPE, "../evil"))
+        self.refuses(self.member(tarfile.REGTYPE, "../evil"), escape=self.dest / "evil")
 
     def test_absolute_member_is_refused(self):
-        self.refuses(self.member(tarfile.REGTYPE, str(self.tmp / "evil")))
+        self.refuses(self.member(tarfile.REGTYPE, str(self.tmp / "evil")), escape=self.tmp / "evil")
+
+    def test_symlink_chain_escaping_is_refused(self):
+        top = "PhysiCell-1.14.2"
+        self.refuses(self.member(tarfile.SYMTYPE, f"{top}/a", ".."),
+                     self.member(tarfile.SYMTYPE, f"{top}/l", "a/../.."),
+                     self.member(tarfile.REGTYPE, f"{top}/l/x"), escape=self.tmp / "x")
+
+    def test_hardlink_with_dotdot_is_refused(self):
+        self.refuses(self.member(tarfile.LNKTYPE, "PhysiCell-1.14.2/h", "PhysiCell-1.14.2/../README"))
+
+    def test_symlink_with_dotdot_inside_the_folder_is_refused(self):
+        self.refuses(self.member(tarfile.SYMTYPE, "PhysiCell-1.14.2/s", "sub/../README"))
+
+    def test_python_without_extraction_filters_is_refused(self):
+        fake = mock.Mock(spec=tarfile)
+        fake.open = tarfile.open
+        fake.TarError = tarfile.TarError
+        del fake.data_filter
+        with mock.patch.object(build, "tarfile", fake):
+            _, report = self.build()
+        self.assertEqual((report["status"], report["failed_step"]), ("failed", "download"))
+        self.assertIn("needs Python >=3.12, or 3.8.17+/3.9.17+/3.10.12+/3.11.4+ with tarfile extraction filters",
+                      report["error"])
+        self.assertEqual(list(self.dest.iterdir()), [])
 
     def test_special_members_are_refused(self):
         self.refuses(self.member(tarfile.FIFOTYPE, "PhysiCell-1.14.2/fifo"))
