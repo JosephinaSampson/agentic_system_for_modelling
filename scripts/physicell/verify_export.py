@@ -47,7 +47,6 @@ import csv
 import hashlib
 import io
 import json
-import math
 import re
 import sys
 from collections import Counter
@@ -61,11 +60,10 @@ from scripts.physicell import physicell_design as pd  # noqa: E402
 from scripts.physicell import physicell_projection as pp  # noqa: E402
 from scripts.physicell import settings_xml as sx  # noqa: E402
 
-REL_TOL = 1e-9
+REL_TOL = 1e-9  # floats: settings_xml.number (strict ASCII decimal) and settings_xml.close
 CSV_COLUMNS = ("cell_type", "signal", "direction", "behavior", "saturation_value", "half_max", "hill_power",
                "apply_to_dead")
 INTEGER = re.compile(r"[+-]?[0-9]+")
-DECIMAL = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")  # ASCII; no _, nan or inf
 LINK_ATTRIBUTES = {"physicell_name", "intracellular_name"}
 ENABLED_RULESET = {"protocol": "CBHG", "version": "3.0", "format": "csv"}
 RULES_FOLDER = "./config"
@@ -74,14 +72,6 @@ LINKS = {"physiboss_input": ("input", "signal"), "physiboss_output": ("output", 
 
 def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
-
-
-def _close(found, expected: float) -> bool:
-    text = str(found).strip()
-    if not DECIMAL.fullmatch(text):
-        return False
-    value = float(text)
-    return math.isfinite(value) and math.isclose(value, expected, rel_tol=REL_TOL, abs_tol=0.0)
 
 
 def _exact_int(found, expected: int) -> bool:
@@ -147,7 +137,7 @@ def _link_check(xml, entry: dict, created_mapping: bool) -> dict:
                 if k == "action":
                     good = found[k] == want
                 elif k in floats:
-                    good = _close(found[k], want)
+                    good = sx.close(sx.number(str(found[k])), want, REL_TOL)
                 else:
                     good = _exact_int(found[k], want)
                 if not good:
@@ -213,7 +203,7 @@ def _setting_check(xml, entry: dict) -> dict:
     text = (element.text or "").strip()
     if len(element):
         return _result(expected, text, [f"{entry['path']} is no longer a leaf element"])
-    if not _close(text, expected):
+    if not sx.close(sx.number(text), expected, REL_TOL):
         return _result(expected, text, [f"{entry['path']} holds {text!r}, expected {expected!r}"])
     return _result(expected, text, [])
 
@@ -228,7 +218,7 @@ def _rule_expected(entry: dict) -> dict:
 def _row_matches(row: list, expected: dict) -> bool:
     if len(row) != len(CSV_COLUMNS) or row[:4] != [expected[k] for k in CSV_COLUMNS[:4]]:
         return False
-    return all(_close(row[i], expected[CSV_COLUMNS[i]]) for i in (4, 5, 6)) and _exact_int(row[7], 0)
+    return all(sx.close(sx.number(str(row[i])), expected[CSV_COLUMNS[i]], REL_TOL) for i in (4, 5, 6)) and _exact_int(row[7], 0)
 
 
 def _csv_rows(raw: bytes | None) -> list:
