@@ -81,6 +81,18 @@ When the stage applies a calibration (`ode_mapping.json`, `calibration_proposal.
 - hold-out: scored once, with the stated parameter choice; compare it to the fit score and say if it is
   unconvincing or missing.
 
+## PhysiCell data-stage checklist
+
+When the stage applies a `physicell_design.json` or `physicell_projection.json`:
+- design values: every domain, substrate and cycle-model value cites a source (or the basis) whose locator
+  actually supports that number; no value is a tool default or a "typical" value;
+- units: each design unit is exactly the one the exported XML writes (`micron`, `min`, `micron^2/min`, `1/min`,
+  the concentration unit), and each projection converted unit equals the XML `units` attribute;
+- conformance: the stage-A capture conforms to the design (its dictionary was recorded by `capture_dictionary.py`);
+- projection transforms: each transform, factor and target unit is justified by its source, and `model_value` is
+  the value the check computed;
+- one writer per behavior: one rule or one PhysiBoSS output link per (cell definition, behavior), never both.
+
 ## Data-stage and mapping checklist
 
 When the stage uses data proposals or a `mapping.json`:

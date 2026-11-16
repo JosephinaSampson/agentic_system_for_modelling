@@ -252,19 +252,25 @@ uses the bundled model with only the accepted values (the rest keep the model de
 hold-out prediction fails, and is independent of when the ode-modeler applies them. See
 docs/ode-workflow.md.
 
-Data reach PhysiCell in two researcher-approved stages, never through brief prose. Stage A:
-`scripts/physicell/physicell_design.py draft|check` (cell definitions, substrates, the MaBoSS handoff of each cell
-type, coupling plan; `physicell_design` approval whose `session_id` is the design's anchor: the basis capture's
+Data reach PhysiCell in two researcher-approved stages, never through brief prose. A new configuration first
+needs a configurator discovery run (`STAGE_GATE` without `DATA_INPUT`) calling `get_available_cycle_models`, whose
+recorded output the design's `cycle_models` copies. Stage A:
+`scripts/physicell/physicell_design.py draft|check` (domain, cell definitions, substrates with every server argument
+cited, the MaBoSS handoff of each cell type, coupling plan; `physicell_design` approval whose `session_id` is the design's anchor: the basis capture's
 session, else `<p>`) -> multicellular-configurator with line 2
 `DATA_INPUT {"design": "...physicell_design.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<anchor>"}`
 (its handoffs come from the `STAGE_GATE` MaBoSS session; a standalone gate means none) -> `recover.py`, capture ->
-`scripts/physicell/capture_dictionary.py` (signal/behavior lists from the invocation record). Every run is a new
+`scripts/physicell/capture_dictionary.py` (the capture must conform to the design; signal/behavior lists from the
+invocation record) -> validate-stage on the stage-A capture before the projection is drafted against it. Every run is a new
 session: the stage-A capture is bound to the design by that DATA_INPUT line in its recorded task.txt. Stage B:
 `physicell_projection.py draft|check` (`physicell_projection` approval: `session_id` = the capture's session,
 `outputs` = the entry ids) -> configurator with line 2
 `DATA_INPUT {"projection": "...physicell_projection.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<capture session>"}`
 (a new session replays the design, then applies only the entries) -> `recover.py`, capture ->
-`scripts/physicell/verify_export.py <projection> <capture>`; use only a passed verification, optionally with the
-`physicell-build` skill. Limitations: a design basis may have no input files (rules, MaBoSS, initial cells), since
+`scripts/physicell/verify_export.py <projection> <capture>` -> validate-stage on the verified capture before build
+or closure; use only a passed verification, optionally with the `physicell-build` skill. Registry: the stage-A row
+has `Derived from` = the `STAGE_GATE` upstream MaBoSS session or standalone decision id (plus the basis capture's
+session with a basis), Artifacts the design path and short sha256; the stage-B row has `Derived from` = the stage-A
+session, Artifacts the projection path and short sha256 and the verification file. Limitations: a design basis may have no input files (rules, MaBoSS, initial cells), since
 the server cannot reload them; a design takes its MaBoSS models from one MaBoSS session. Applied values are tagged
 `data-derived` (projection path, short sha256, approval id). See docs/data-workflow.md.

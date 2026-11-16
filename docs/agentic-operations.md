@@ -277,6 +277,13 @@ was predicted, any hold-out prediction failed or the score is the penalty.
 
 ### PhysiCell design, projection and verification
 
+Discovery (a new configuration only): dispatch the multicellular-configurator with `STAGE_GATE` and no `DATA_INPUT`
+to call `get_available_cycle_models`; the design's `cycle_models` copies the recorded `{key, name}` output. The
+stage-A capture passes validate-stage before the projection is drafted against it, the verified stage-B capture
+before build or closure. Registry: stage A `Derived from` = the `STAGE_GATE` upstream MaBoSS session or standalone
+decision id (plus the basis capture's session), Artifacts the design path and short sha256; stage B `Derived from` =
+the stage-A session, Artifacts the projection path and short sha256 and the verification file.
+
 ```
 python3 scripts/physicell/physicell_design.py draft --purpose P [--basis runs/multicellular-configurator/S/configs/C] [--source ID:inputs/FILE ...] [--data ID:SESSION:PROPOSAL:APPROVAL ...]
 python3 scripts/physicell/physicell_design.py check runs/orchestrator/P/physicell_design.json

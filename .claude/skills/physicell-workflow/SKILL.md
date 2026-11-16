@@ -54,13 +54,19 @@ configurations active.
 4. Apply targeted changes using the same configuration tools.
 5. Recheck `get_simulation_summary()`, export to a new session artifact.
 
+**Discovery run (`STAGE_GATE`, no `DATA_INPUT`):** before a new configuration's design, call
+`get_available_cycle_models()` and report every key and name verbatim; build nothing (the orchestrator copies
+them into the design's `cycle_models`).
+
 **Approved design or projection (`DATA_INPUT` on line 2):** the brief's line 2,
 after `STAGE_GATE`, names an approved `physicell_design.json` (stage A) or
 `physicell_projection.json` (stage B), its sha256, approval and
 `record_session_id`, all verified by the dispatch hook.
 - `record_session_id` is a lineage anchor, never a live session (MCP sessions end with each run).
   Create a new PhysiCell session for either form. Never pass `record_session_id` to any tool.
-  Report the new full session ID; the orchestrator registers it with `Derived from` = `record_session_id`.
+  Report the new full session ID; the orchestrator registers it (stage A: `Derived from` = the `STAGE_GATE`
+  upstream MaBoSS session or standalone decision id, plus the basis capture's session with a basis; stage B:
+  `Derived from` = the stage-A session).
 - Read only the verified file; for a design, also the MaBoSS handoff manifests it lists;
   for a projection, also the design its `design.path` names and the MaBoSS handoff manifests that design lists.
   Return `blocked` if a MaBoSS handoff manifest the design names is missing or fails `import_maboss_handoff`'s verification.

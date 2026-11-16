@@ -84,4 +84,7 @@ relative paths, NeKo/MaBoSS lineage, exact mappings, node/behavior existence, re
 exclusivity, timing/units, cycle phase exits/base rates, initial cells and declared
 parameters. Read exported values after patches, especially apoptosis/necrosis/motility.
 Record missing coverage as unverified; never equate valid XML/configuration with
-an executed or scientifically validated multicellular simulation.
+an executed or scientifically validated multicellular simulation. For data reaching
+PhysiCell, the stage-A capture (built from an approved `physicell_design.json`) passes
+this review and audit before a projection is drafted against it, and the verified
+stage-B capture passes it again before build or closure (PhysiCell data-stage checklists).

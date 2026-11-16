@@ -369,16 +369,19 @@ multicellular-configurator from a `DATA_INPUT` line (line 2, after `STAGE_GATE`)
 
 | Step | Command or dispatch | Output |
 |---|---|---|
+| discovery | configurator, `STAGE_GATE` without `DATA_INPUT`: create a session and call `get_available_cycle_models` (a new configuration only) | the recorded `{key, name}` list the design's `cycle_models` copies verbatim |
 | design | `python3 scripts/physicell/physicell_design.py draft --purpose P [--basis CAPTURE] [--source ID:inputs/FILE ...] [--data ID:SESSION:PROPOSAL:APPROVAL ...]`, then `check runs/orchestrator/P/physicell_design.json` | the stage-A design: the domain, cell definitions (cycle model keys) and variants, substrates with every `add_single_substrate` value, the MaBoSS handoff of each cell type, coupling plan |
 | design approval | `state.py record`: `stage_approval`, stage `physicell_design`, `artifact` the design path and sha256, `session_id` the design's anchor (the basis capture's session, else `P`), `outputs` the cell definition and substrate names | |
 | build | configurator, line 2 `DATA_INPUT {"design": "runs/orchestrator/P/physicell_design.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<the design's anchor>"}` | a new PhysiCell session builds the design, lists signals and behaviors, exports |
 | capture | `scripts/capture/recover.py`, `scripts/capture/record_physicell_config.py` | `runs/multicellular-configurator/<session>/configs/<capture>` |
+| review A | validate-stage on the stage-A capture: independent scientific review and reproducibility audit | before the projection is drafted against it |
 | dictionary | `python3 scripts/physicell/capture_dictionary.py runs/multicellular-configurator/<session>/invocation/<id>/tool_calls.json CAPTURE runs/orchestrator/P/physicell_design.json` | `runs/orchestrator/P/physicell_dictionary.json` (write-new), only for a capture that conforms to the design |
 | projection | `python3 scripts/physicell/physicell_projection.py draft --purpose P --capture CAPTURE --design DESIGN --design-approval RECORD_ID [--dictionary FILE] [--source ...] [--data ...]`, then `check runs/orchestrator/P/physicell_projection.json` | entries: `physiboss_input`, `physiboss_output`, `rule`, `setting` |
 | projection approval | `stage_approval`, stage `physicell_projection`, `artifact` the projection path and sha256, `session_id` the capture's session, `outputs` the entry ids | |
 | apply | configurator, line 2 `DATA_INPUT {"projection": "runs/orchestrator/P/physicell_projection.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<the capture's session>"}` | a new session replays the projection's design exactly, applies only the entries, exports the rules CSV before the XML |
 | capture | `recover.py`, `record_physicell_config.py` | the stage-B capture |
 | verify | `python3 scripts/physicell/verify_export.py runs/orchestrator/P/physicell_projection.json CAPTURE` | `runs/orchestrator/P/physicell_verification.<session>.<capture>.json`; exit 0 passed, 1 failed, 2 refused |
+| review B | validate-stage on the verified stage-B capture | before build or closure |
 | build (optional) | `physicell-build` skill: `python3 scripts/physicell/build.py --template template\|template_BM [--version 1.14.2] [--dest DIR] [--verification runs/orchestrator/P/physicell_verification.<session>.<capture>.json] [--jobs N]` | report `runs/orchestrator/physicell-build/<UTC>-<template>/report.{json,md}`; the run command is printed, never executed |
 
 **Session anchor and dispatch lineage.** The design's `session` is a lineage anchor, never a live session: the
@@ -436,8 +439,10 @@ design basis may have no input files (rules CSV, MaBoSS models, initial cells) a
 enabled rules; a revised projection is re-applied from the stage-A capture. A design takes its MaBoSS models from
 one MaBoSS session (the `STAGE_GATE` upstream).
 
-**Registry and tags.** Each configurator run is a new session, registered with `Derived from` =
-`record_session_id`. Applied values are tagged `data-derived`, citing the projection path, short sha256 and
+**Registry and tags.** Each configurator run is a new session. The stage-A row has `Derived from` = the
+`STAGE_GATE` upstream MaBoSS session or the standalone decision id (plus the basis capture's session with a basis);
+its Artifacts cite the design path and short sha256. The stage-B row has `Derived from` = the stage-A session; its
+Artifacts cite the projection path and short sha256 and the verification file. Applied values are tagged `data-derived`, citing the projection path, short sha256 and
 approval id.
 
 **Smoke test.** `python3 tests/integration/physicell_smoke.py` runs the chain in a temporary repo copy under

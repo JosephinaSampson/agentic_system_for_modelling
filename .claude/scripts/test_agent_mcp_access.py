@@ -195,7 +195,9 @@ class DataAnalystAccessTests(unittest.TestCase):
 PHYSICELL_DATA_RULES = (
     "`record_session_id` is a lineage anchor, never a live session", "Create a new PhysiCell session for either form",
     "Never pass `record_session_id` to any tool", "Report the new full session ID",
-    "the orchestrator registers it with `Derived from` = `record_session_id`", "Never infer units",
+    "the orchestrator registers it (stage A: `Derived from` = the `STAGE_GATE`\n  upstream MaBoSS session or standalone "
+    "decision id, plus the basis capture's session with a basis; stage B:\n  `Derived from` = the stage-A session).",
+    "Never infer units", "get_available_cycle_models()",
     "take names and values only from the verified files named on the `DATA_INPUT` line",
     "Never re-add a captured configuration's rules by hand; if the captured configuration has a rules CSV, return blocked.",
     "for a projection, also the design its `design.path` names and the MaBoSS handoff manifests that design lists",
@@ -207,7 +209,7 @@ PHYSICELL_DATA_RULES = (
     "blocked. Add no rule, link or other value.",
 )
 # Ruling T5-e: a projection is applied by replaying its design in a new session, never by loading its capture.
-PHYSICELL_STALE = ("for every projection", "projection's `capture.path`", "On the loaded capture", "on the loaded capture",
+PHYSICELL_STALE = ("`Derived from` = `record_session_id`", "for every projection", "projection's `capture.path`", "On the loaded capture", "on the loaded capture",
                    "load the captured configuration's packaged XML",
                    "Add no rule, link, parameter or other value while building", "Add no rule, link or value while building",
                    # ruling T9-e: the configurator copies model values, never computes them
@@ -244,10 +246,25 @@ class DataHandoffInstructionTests(unittest.TestCase):
                 "rel 1e-9", "return `blocked` on any difference", "Apply only the projection entries",
                 "at each quantity's `model_value`, applied verbatim (no arithmetic)",
                 "Then export (rules CSV before XML)."),
-            ".claude/agents/scientific-reviewer.md": ("Data-stage and mapping checklist", "unmapped", "locator"),
-            ".claude/agents/reproducibility-auditor.md": ("Data-stage and mapping checklist", "data-derived", "locator", "seeds"),
+            # review M6: one key per file, so every assertion runs
+            ".claude/agents/scientific-reviewer.md": (
+                "Data-stage and mapping checklist", "unmapped", "locator",
+                "ODE calibration checklist", "poorly_constrained", "hold-out",
+                "PhysiCell data-stage checklist", "no value is a tool default", "exactly the one the exported XML writes",
+                "the stage-A capture conforms to the design", "projection transforms", "`model_value` is",
+                "one writer per behavior"),
+            ".claude/agents/reproducibility-auditor.md": (
+                "Data-stage and mapping checklist", "data-derived", "locator", "seeds",
+                "ODE calibration checklist", "holdout_score.json", "results_sha256",
+                "PhysiCell data-stage checklist", "hashes:", "lineage:", "task.txt", "verification file:",
+                "build report:"),
             ".claude/skills/validate-stage/SKILL.md": ("data_mapping", "mapping.py check", "data_seeds", "--stage-gate"),
-            "CLAUDE.md": ("DATA_INPUT", "data_mapping", "never paste data values", "seeds.json", "sha256 + locator", "--standalone-network", "draft --from"),
+            "CLAUDE.md": ("DATA_INPUT", "data_mapping", "never paste data values", "seeds.json", "sha256 + locator", "--standalone-network", "draft --from",
+                          "configurator discovery run (`STAGE_GATE` without `DATA_INPUT`) calling `get_available_cycle_models`",
+                          "validate-stage on the stage-A capture before the projection is drafted against it",
+                          "validate-stage on the verified capture before build\nor closure",
+                          "the stage-A row\nhas `Derived from` = the `STAGE_GATE` upstream MaBoSS session or standalone decision id",
+                          "the stage-B row has `Derived from` = the stage-A\nsession"),
             ".claude/skills/neko-workflow/SKILL.md": ("seeds.json", "hgnc_symbol"),
             ".claude/skills/maboss-workflow/SKILL.md": ("standalone approval",),
             ".claude/agents/ode-modeler.md": ("Applying an approved calibration", "record_session_id", "data-calibrated",
@@ -258,16 +275,27 @@ class DataHandoffInstructionTests(unittest.TestCase):
                                                          "no dispatcher check", "never infer units", REVISION_RULE),
             "docs/ode-workflow.md": ("Calibrating parameters to measurements", "ode_calibration", "score_holdout.py",
                                      "popsize", "heuristic", "Only the bundle"),
-            "docs/data-workflow.md": ("Data to ODE: calibration", "data-calibrated", "popsize"),
-            "docs/agentic-operations.md": ("score_holdout.py", "dispatch.jsonl", "hosts.json", "import_results.py"),
-            ".claude/agents/scientific-reviewer.md": ("ODE calibration checklist", "poorly_constrained", "hold-out"),
-            ".claude/agents/reproducibility-auditor.md": ("ODE calibration checklist", "holdout_score.json", "results_sha256"),
+            "docs/data-workflow.md": ("Data to ODE: calibration", "data-calibrated", "popsize",
+                                      "| discovery | configurator, `STAGE_GATE` without `DATA_INPUT`", "| review A | validate-stage",
+                                      "| review B | validate-stage", "The stage-A row has `Derived from` = the",
+                                      "The stage-B row has `Derived from` = the stage-A session"),
+            "docs/agentic-operations.md": ("score_holdout.py", "dispatch.jsonl", "hosts.json", "import_results.py",
+                                           "Discovery (a new configuration only)", "passes validate-stage before the projection"),
         }
         for path, phrases in expected.items():
             text = (ROOT / path).read_text(encoding="utf-8")
             for phrase in phrases:
                 with self.subTest(path=path, phrase=phrase):
                     self.assertIn(phrase, text)
+
+    def test_expected_pins_have_no_repeated_key(self):
+        # review M6: a repeated dict key silently drops the earlier tuple, so its assertions never run
+        import ast
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Dict):
+                keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
+                self.assertEqual(sorted({k for k in keys if keys.count(k) > 1}), [], keys)
 
     def test_configurator_never_loads_a_projection_capture(self):
         for path in (".claude/agents/multicellular-configurator.md", ".claude/skills/physicell-workflow/SKILL.md"):

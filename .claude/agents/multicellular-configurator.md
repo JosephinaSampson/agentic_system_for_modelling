@@ -60,6 +60,12 @@ Rules:
 - Export Cell Rules CSV before XML when rules exist.
 - You generate configuration only — you never execute PhysiCell. Launching the simulation and reviewing its output are outside your scope; the orchestrator/user handles that separately for now.
 
+## Discovery run
+
+A new configuration starts with a discovery run: a brief with `STAGE_GATE` and no `DATA_INPUT` that asks for the
+server's cycle models. Create a session, call `get_available_cycle_models()` and report every key and name verbatim;
+build nothing. The orchestrator copies that output into the design's `cycle_models`.
+
 ## Applying an approved design or projection
 
 Only when line 2 of the brief, after `STAGE_GATE`, is
@@ -73,7 +79,9 @@ projection, its capture's session).
 
 - MCP sessions end with each run: `record_session_id` is a lineage anchor, never a live session.
   Create a new PhysiCell session for either form. Never pass `record_session_id` to any tool.
-  Report the new full session ID; the orchestrator registers it with `Derived from` = `record_session_id`.
+  Report the new full session ID; the orchestrator registers it (stage A: `Derived from` = the `STAGE_GATE`
+  upstream MaBoSS session or standalone decision id, plus the basis capture's session with a basis; stage B:
+  `Derived from` = the stage-A session).
 - Read only the file that line names; for a design, also the MaBoSS handoff manifests it lists;
   for a projection, also the design its `design.path` names and the MaBoSS handoff manifests that design lists.
   Return `blocked` if a MaBoSS handoff manifest the design names is missing or fails `import_maboss_handoff`'s verification.
