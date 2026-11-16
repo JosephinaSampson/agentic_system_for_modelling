@@ -1,28 +1,47 @@
 # Roadmap
 
-## Done
+Planned releases, in order. Versions after 1.1.0 are indicative and may be
+reordered as work progresses. Released changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
 
-- Data analyst specialist: guarded data retrieval and analysis, with reviewed proposals.
-- Typed data handoffs to NeKo and MaBoSS, including researcher sources and researcher networks.
-- Data to ODE (BioMASS): measurement mapping and portable calibration jobs (local, SSH, SLURM).
+## 1.1.0: data layer (next release)
 
-## In progress
+- A data-analyst specialist retrieves and analyses public and researcher data, and
+  returns proposals that you review.
+- Approved data reach NeKo and MaBoSS only through typed, hash-checked handoffs. These
+  can use your own sources in any format and your own networks.
+- Data → ODE: measurements are mapped onto BioMASS models. Calibration jobs run on this
+  machine, a lab machine over SSH, or a SLURM cluster. Results come back as proposals
+  you approve.
 
-- Data to PhysiCell: approved multicellular design (cell definitions, substrates, MaBoSS assignment, signal/behavior coupling), data projection into settings, and a PhysiCell build skill.
+## 1.2.0: data to PhysiCell
 
-## Planned
+- You approve the multicellular design first:
+  - cell definitions and variants;
+  - substrates;
+  - which cell type carries which MaBoSS model;
+  - how signals drive behaviors (PhysiBoSS links or Hill-function rules).
+- Data are then projected into the PhysiCell settings and checked against the live
+  signal/behavior dictionary and the settings file's own units.
+- A build skill compiles a PhysiCell project (plain or PhysiBoSS template) ready to run
+  your approved settings.
 
-- Spatial data (images, spatial transcriptomics) as PhysiCell initial conditions.
-- ODE-derived proposals for PhysiCell (rules and rates from calibrated ODE responses).
+## 1.3.0: spatial data as initial conditions
 
-## Blocked
+- Images and spatial transcriptomics define PhysiCell initial conditions: cell
+  positions, and cell types matched to the approved cell definitions.
+- Existing tools, such as the BIWT extension of PhysiCell Studio, will be evaluated
+  first.
 
-- Direct ODE–PhysiCell coupling through libRoadRunner: BioMASS does not export SBML yet.
+## 1.4.0: ODE-informed PhysiCell
 
-## To do
+- Calibrated ODE responses become proposals for PhysiCell rules and rates.
+
+## Later
 
 - Spatial data as a PhysiCell fitting condition.
 - Identifiability analysis for ODE calibration.
 - Codex parity.
 - Offline installation of calibration environments.
 - OS-level sandboxing of specialists.
+- Direct ODE–PhysiCell coupling through libRoadRunner, once BioMASS can export SBML.
