@@ -314,6 +314,26 @@ class VerifiedBasisBytesTests(Base):
             self.assertEqual(self.errors(data), [])
 
 
+class BasisBoundOnceTests(Base):
+    """PR #17 review 4586113191: one design check binds its basis capture once (capture.json and the package XML
+    each read and hashed once)."""
+
+    def test_basis_read_once_per_check(self):
+        from unittest import mock
+        data = self.complete()
+        self.write(data)
+        reads = []
+        original = Path.read_bytes
+
+        def counting(path):
+            if path.name in ("capture.json", pd.sx.XML_NAME) and "configs" in path.parts:
+                reads.append(path.name)
+            return original(path)
+        with mock.patch.object(Path, "read_bytes", counting):
+            self.assertEqual(pd.check(self.root, REL), [])
+        self.assertEqual(sorted(reads), ["PhysiCell_settings.xml", "capture.json"])
+
+
 class DraftTests(Base):
     def test_draft_prefills_from_basis_and_never_overwrites(self):
         (self.root / REL).unlink(missing_ok=True)
@@ -498,16 +518,18 @@ class CheckTests(Base):
         self.assertRefused(data, "package/config/tumor.bnd")
 
     def test_basis_input_files_refuses_a_missing_dependency_list(self):
-        self.assertEqual(pd._basis_input_files(self.root, self.capture), [])
+        # the input files come from the manifest settings_xml.capture verified (review 4586113191: bound once), so
+        # a missing or malformed dependency list is refused by that binding
+        self.assertEqual(pd._basis_input_files(pd.sx.capture(self.root, self.capture)), [])
         design = self.complete()
         manifest = self.root / self.capture / "capture.json"
         data = json.loads(manifest.read_text())
         for broken in ({k: v for k, v in data.items() if k != "dependencies"}, {**data, "dependencies": [1]}):
             with self.subTest(broken=sorted(broken)):
                 manifest.write_text(json.dumps(broken))
-                with self.assertRaisesRegex(ValueError, "dependencies"):
-                    pd._basis_input_files(self.root, self.capture)
-                self.assertRefused(design, "basis: ")  # settings_xml.capture refuses it first
+                with self.assertRaisesRegex(ValueError, "dependenc"):
+                    pd.sx.capture(self.root, self.capture)
+                self.assertRefused(design, "basis: ")
 
     def test_load_and_check_returns_hash_of_bytes_read(self):
         path = self.write(self.complete())

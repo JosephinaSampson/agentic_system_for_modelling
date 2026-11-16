@@ -114,7 +114,11 @@ def orchestrator_json(root: Path, rel, what: str = "design") -> Path:
 def _basis_facts(root: Path, capture_rel: str) -> dict:
     """{session, cell_definitions: {name: cycle model}, substrates: {name: units|None}, values: {name:
     settings_xml.substrate_facts}} of a verified capture."""
-    bound, tree = sx.capture_tree(root, capture_rel)  # the tree of exactly the verified bytes
+    return _facts(*sx.capture_tree(root, capture_rel))  # the tree of exactly the verified bytes
+
+
+def _facts(bound: dict, tree) -> dict:
+    """_basis_facts of a capture bound once (settings_xml.capture_tree: the binding and its verified tree)."""
     cells = {name: sx.cycle_model(tree, name) for name in sx.cell_definitions(tree)}
     values = sx.substrate_facts(tree)
     subs = {name: facts["units"] for name, facts in values.items()}
@@ -137,16 +141,10 @@ def _basis_substrate(name: str, facts: dict) -> dict:
                           "value": _basis_value(dirichlet)}}
 
 
-def _basis_input_files(root: Path, capture_rel: str) -> list:
-    """The dependency paths (package/config/...) of a capture already verified by settings_xml.capture.
-
-    settings_xml.capture refuses a capture.json whose `dependencies` is not a list of {path, sha256, ...}; the file
-    is read again here, so a missing or malformed list is refused again as a ValueError (the basis error path)."""
-    manifest = strict_json((Path(root) / capture_rel / "capture.json").read_bytes())
-    deps = manifest.get("dependencies") if isinstance(manifest, dict) else None
-    if not isinstance(deps, list) or not all(isinstance(d, dict) and isinstance(d.get("path"), str) for d in deps):
-        raise ValueError("capture manifest dependencies must be a list of {path, ...}")
-    return [dep["path"] for dep in deps]
+def _basis_input_files(bound: dict) -> list:
+    """The dependency paths (package/config/...) of a capture bound by settings_xml.capture, from the manifest it
+    verified (it refuses a `dependencies` that is not a list of {path, sha256, ...}); nothing is read again."""
+    return [dep["path"] for dep in bound["manifest"]["dependencies"]]
 
 
 def write_new(root: Path, path: Path, text: str) -> None:
@@ -289,14 +287,15 @@ class _Checker(Citations):
             else:
                 self.has_basis = True
                 try:
-                    if sx.capture(self.root, basis["capture"])["rules_path"] is not None:
+                    bound, tree = sx.capture_tree(self.root, basis["capture"])  # bound once per check
+                    if bound["rules_path"] is not None:
                         self.error(f"basis: capture {basis['capture']} has an enabled rules ruleset; {sx.RULES_RELOAD}")
                     else:
-                        files = _basis_input_files(self.root, basis["capture"])
+                        files = _basis_input_files(bound)
                         if files:
                             self.error(f"basis: capture {basis['capture']} has input files ({', '.join(files)}); "
                                        f"{sx.INPUT_FILES_RELOAD}")
-                    self.basis = _basis_facts(self.root, basis["capture"])
+                    self.basis = _facts(bound, tree)
                 except (ValueError, OSError) as exc:
                     self.error(f"basis: {exc}")
         if not isinstance(session, str) or not state.ID.fullmatch(session):
