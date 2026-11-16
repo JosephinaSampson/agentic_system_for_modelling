@@ -245,14 +245,16 @@ python3 scripts/jobs/score_holdout.py <job-id> --approval <ode_calibration recor
 anything leaves the machine, and only the bundle is sent. The `ode_mapping` and `ode_calibration` stages are
 governance stages of `state.py record`. The ode-modeler hook (`stage_gate_guard.py`) accepts
 a `DATA_INPUT {"calibration": ..., "sha256": ..., "approval": ..., "record_session_id": ..., "accept": [...]}` on
-line 1 only: approval stage `ode_calibration` bound to that path and sha256 and passing `validate_record`,
-`outputs` a nonempty subset of the proposal's parameter names, approval `session_id` = the proposal's ODE
-session = `record_session_id`, and `accept` exactly the approval's `outputs` (all in
-`approvals.require_calibration_approval`, shared with `score_holdout.py`). Any other calibration proposal or
-`ode_mapping.json` named in the brief, or a payload-like `DATA_INPUT` elsewhere, is refused; errors deny.
-It also requires the proposal's `mapping` to be an approved `ode_mapping` and the `job.json` beside it to
-match its `job_sha256`, `job_id` (= the folder name) and `mapping` (`approvals.require_proposal_job`, run by
-the same helper, so `score_holdout.py` refuses an unbound proposal too). For every gated specialist the hook refuses any path under `runs/orchestrator/<p>/jobs/`
+line 1 only. Shared with `score_holdout.py` (`approvals.require_calibration_approval`): approval stage
+`ode_calibration` bound to that path and sha256 and passing `validate_record`, `outputs` a nonempty subset of
+the proposal's parameter names, approval `session_id` = the proposal's ODE session, and the proposal bound to
+its job (the proposal's `mapping` an approved `ode_mapping`, the `job.json` beside it matching its
+`job_sha256`, `job_id` (= the folder name) and `mapping`; `approvals.require_proposal_job`). Gate-only
+(`gate._check_ode_calibration_input`; `score_holdout.py` takes no such payload): `record_session_id` = the
+proposal's ODE session and `accept` exactly the approval's `outputs`, and the brief may name no existing
+BioMASS session (a directory under `runs/ode-modeler/`) other than `record_session_id`. Any other calibration
+proposal or `ode_mapping.json` named in the brief, or a payload-like `DATA_INPUT` elsewhere, is refused; errors
+deny. Other prose is not parsed for values: the modeler takes the session and names only from the line. For every gated specialist the hook refuses any path under `runs/orchestrator/<p>/jobs/`
 or `inputs/calibration-results/` except the ode-modeler's `DATA_INPUT` proposal and its own job folder.
 `import_results.py` computes `start` (nominal values) locally in the same `validate --nominal` run that
 reproduces the best score (needs internet; builds `~/.cache/agentic-jobs/<job-id>/`); the archive's selftest

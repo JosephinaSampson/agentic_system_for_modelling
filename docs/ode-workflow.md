@@ -198,7 +198,8 @@ Calibration is a portable job the researcher approves step by step; no specialis
 7. **Apply.** Dispatch ode-modeler with line 1
    `DATA_INPUT {"calibration": "runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<ODE session>", "accept": ["<name>", ...]}`
    (`record_session_id` = the proposal's ODE session, `accept` = exactly the approval's `outputs`; no other
-   proposal or ode_mapping file named). The hook checks the approval (researcher-authorized), hash, session,
+   proposal or ode_mapping file named, and no existing ODE session other than `record_session_id` named
+   anywhere in the brief). The hook checks the approval (researcher-authorized), hash, session,
    `record_session_id` and `accept`; the specialist takes the session and the names only from that line and
    applies exactly the `accept` parameters at their `best` values (only when the session's current revision equals
    `proposal.model.revision`; otherwise it returns `blocked`) and re-applies every other configured value unchanged

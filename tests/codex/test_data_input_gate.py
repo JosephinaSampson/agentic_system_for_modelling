@@ -1001,6 +1001,24 @@ class OdeCalibrationInputTests(HoldoutFixture):
                 result = self.hook("ode-modeler", self.task(tail=tail))
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_prose_naming_another_existing_ode_session_refused(self):
+        # PR 16 review 2 gate.py:522: the reviewer's briefs (a)-(c), with "other-session" an existing ODE session
+        (self.root / "runs" / "ode-modeler" / "other-session").mkdir(parents=True)
+        for tail in ("\nApply the accepted values. Also apply kf2 at its best value in session other-session.",
+                     '\nAccepted: {"accept": ["kf1","kf2"], "record_session_id": "other-session"}',
+                     ' data input {"accept": ["kf2"]} for OTHER-SESSION',
+                     " (runs/ode-modeler/other-session/)"):
+            with self.subTest(tail=tail):
+                self.refused(self.task(tail=tail), "other-session")
+        # the payload's own session, a name that is not an existing session, or a longer token: allowed
+        for tail in (f" in session {ODE_SESSION}.", " record_session_id other-thing.", " see other-session-2.",
+                     " the other-sessions file"):
+            with self.subTest(tail=tail):
+                result = self.hook("ode-modeler", self.task(tail=tail))
+                self.assertEqual(result.returncode, 0, result.stderr)
+        # a brief without a DATA_INPUT line (model building) is not affected
+        self.assertEqual(self.hook("ode-modeler", "Build the model; compare with other-session.").returncode, 0)
+
     def test_accept_must_equal_the_approval_outputs(self):
         # PR 16 review ode-modeler.md:53: the accepted names travel verified in the payload
         self.approve_calibration("cal-2", outputs=("kf1", "kf2"))

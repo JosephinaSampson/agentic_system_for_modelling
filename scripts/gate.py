@@ -549,6 +549,27 @@ def _check_ode_calibration_input(root, value):
             "outputs": list(accept)}, set()
 
 
+def _check_ode_session_mentions(root, text, session):
+    """An ode-modeler brief with a verified calibration DATA_INPUT may not name any other existing BioMASS
+    session (a directory name under runs/ode-modeler/) anywhere, in any case: the modeler applies the approved
+    values only to the payload's record_session_id. No free-text value parsing: only the names of existing
+    sessions are matched, as whole tokens (a longer token such as `<name>-2` or `<name>s` is not that session);
+    other prose about values or sessions is left to the modeler, which takes them only from the DATA_INPUT line."""
+    base = Path(root) / "runs" / "ode-modeler"
+    if not base.is_dir():
+        return
+    folded = text.casefold()
+    with os.scandir(base) as entries:
+        names = sorted(e.name for e in entries if e.is_dir(follow_symlinks=False) and not e.name.startswith("."))
+    for name in names:
+        if name == session:
+            continue
+        if re.search(r"(?<![\w.-])" + re.escape(name.casefold()) + r"(?![\w-]|\.\w)", folded):
+            raise ValueError(f"brief names BioMASS session {name} besides the DATA_INPUT record_session_id {session}; "
+                             "an approved calibration is applied only to its record_session_id, so the brief may "
+                             "name no other ODE session")
+
+
 # Seeds and mapping files reach NeKo and MaBoSS only as the DATA_INPUT artifact. Every
 # runs/orchestrator path the brief mentions (any separator or case, after the detection
 # normalisation) is resolved in the repository: a regular file, or each regular file directly
@@ -832,7 +853,9 @@ def check_data_input(root, specialist, task):
     boolean-dynamics-modeler: {"mapping", "sha256", "approval"}, bound to the STAGE_GATE
     upstream_session_id (NeKo export) or standalone_decision_id (researcher BNET).
     ode-modeler: {"calibration", "sha256", "approval", "record_session_id", "accept"} (see
-    _check_ode_calibration_input).
+    _check_ode_calibration_input); the brief may name no existing BioMASS session other than record_session_id
+    (_check_ode_session_mentions). Other prose is not parsed for values: the modeler takes the session and the
+    accepted names only from the verified line and ignores prose (ode-modeler.md).
 
     The brief's runs/orchestrator mentions are then scanned once (_check_mentions): the job-file rule and the
     model-input rule, with only the verified artifact exempt.
@@ -865,6 +888,7 @@ def check_data_input(root, specialist, task):
         result, sessions = _check_neko_data_input(root, value)
     elif specialist == "ode_modeler":
         result, sessions = _check_ode_calibration_input(root, value)
+        _check_ode_session_mentions(root, text, result["ode_session"])
     else:
         result, sessions = _check_maboss_data_input(root, value, lines[0])
     other = sorted(_data_sessions_named(text) - sessions)
