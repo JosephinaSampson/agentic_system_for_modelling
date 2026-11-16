@@ -294,6 +294,46 @@ class ManifestTests(unittest.TestCase):
         errs = self.set_proposal("perturbations", "maboss", self.PERT + row)
         self.assertTrue(any("scenario_id" in e for e in errs), errs)
 
+    ODE = ("measurement_id,readout,condition,time,time_unit,dose,dose_unit,value,value_unit,error,error_kind,n,use,"
+           "source,locator\n"
+           "M1,pR,ligand,30,min,,,1.0,a.u.,,,,fit,proposal,Fig. 1\n"
+           "M2,pR,ligand,30,min,1,uM,0.5,fraction,0.1,sd,3,holdout,proposal,Fig. 2\n")
+
+    def test_ode_measurements_schema(self):
+        self.assertEqual(self.set_proposal("ode_measurements", "biomass", self.ODE), [])
+        errs = self.set_proposal("ode_measurements", "maboss", self.ODE)
+        self.assertTrue(any("target_layer" in e for e in errs), errs)
+        errs = self.set_proposal("ode_measurements", "biomass", self.ODE.replace(",fit,", ",train,"))
+        self.assertTrue(any("use" in e for e in errs), errs)
+        errs = self.set_proposal("ode_measurements", "biomass", self.ODE.replace(",sd,", ",var,"))
+        self.assertTrue(any("error_kind" in e for e in errs), errs)
+        errs = self.set_proposal("ode_measurements", "biomass", self.ODE.replace("M2", "M1"))
+        self.assertTrue(any("measurement_id" in e for e in errs), errs)
+        errs = self.set_proposal("ode_measurements", "biomass", self.ODE.replace("a.u.", ""))
+        self.assertTrue(any("value_unit" in e for e in errs), errs)
+        errs = self.set_proposal("ode_measurements", "biomass", self.ODE.replace("measurement_id,", "id,", 1))
+        self.assertTrue(any("measurement_id" in e for e in errs), errs)
+
+    def test_ode_measurements_must_be_csv(self):
+        # the ODE pipeline reads comma-separated .csv only: a .tsv proposal is refused at the first check
+        (self.dir / "proposals" / "P1_seed_genes.csv").unlink(missing_ok=True)
+        (self.dir / "proposals" / "P1_ode.tsv").write_text(self.ODE.replace(",", "\t"), encoding="utf-8")
+        self.write_json("proposals/index.json", [{
+            "id": "P1", "target_layer": "biomass", "kind": "ode_measurements",
+            "path": "proposals/P1_ode.tsv", "method": "m", "thresholds": {}}])
+        self.build()
+        errs = self.errors()
+        self.assertTrue(any("ode_measurements" in e and ".csv" in e for e in errs), errs)
+        # fix round 1 #5: case-sensitive, like ode_mapping (an upper-case .CSV is refused at the first check)
+        (self.dir / "proposals" / "P1_ode.tsv").unlink()
+        (self.dir / "proposals" / "P1_ode.CSV").write_text(self.ODE, encoding="utf-8")
+        self.write_json("proposals/index.json", [{
+            "id": "P1", "target_layer": "biomass", "kind": "ode_measurements",
+            "path": "proposals/P1_ode.CSV", "method": "m", "thresholds": {}}])
+        self.build()
+        errs = self.errors()
+        self.assertTrue(any("ode_measurements" in e and ".csv" in e for e in errs), errs)
+
     def test_wrong_layer_rejected(self):
         errs = self.set_proposal("seed_genes", "maboss", self.SEED)
         self.assertTrue(any("target_layer" in e for e in errs), errs)
@@ -494,6 +534,26 @@ class LedgerReadTests(unittest.TestCase):
             (Path(tmp) / "sources.jsonl").write_text(
                 "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries), encoding="utf-8")
             self.assertEqual(manifest._read_ledger(Path(tmp)), entries)
+
+
+
+class ProposalKindDocsTests(unittest.TestCase):
+    """The data-workflow skill and docs list every proposal kind and the ode_measurements columns."""
+
+    def test_skill_and_docs_match_the_manifest_schemas(self):
+        from scripts import state
+        from scripts.ode import measurements
+        skill = (state.ROOT / ".claude" / "skills" / "data-workflow" / "SKILL.md").read_text(encoding="utf-8")
+        docs = (state.ROOT / "docs" / "data-workflow.md").read_text(encoding="utf-8")
+        for kind in manifest.KINDS:
+            self.assertIn(f"`{kind}`", skill, kind)
+        for column in measurements.COLUMNS:
+            self.assertIn(f"| `{column}` |", skill, column)
+            self.assertIn(f"`{column}`", docs, column)
+        for text in (skill, docs):
+            self.assertIn("literal `proposal`", text)
+            for value in (*measurements.USES, *measurements.ERROR_KINDS):
+                self.assertIn(f"`{value}`", text)
 
 
 if __name__ == "__main__":

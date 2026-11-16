@@ -274,7 +274,8 @@ QUOTE_CHARS = 60
 DATA_REFUSAL = "brief references data-analyst artifacts without a DATA_INPUT line; see CLAUDE.md"
 # Specialist -> (0-based line index of its DATA_INPUT line, human label).
 DATA_INPUT_LINE = {"network_curator": (0, "network-curator DATA_INPUT must be line 1 of the prompt"),
-                   "boolean_dynamics_modeler": (1, "boolean-dynamics-modeler DATA_INPUT must be line 2, after STAGE_GATE")}
+                   "boolean_dynamics_modeler": (1, "boolean-dynamics-modeler DATA_INPUT must be line 2, after STAGE_GATE"),
+                   "ode_modeler": (0, "ode-modeler DATA_INPUT must be line 1 of the prompt")}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -504,6 +505,71 @@ def _check_maboss_data_input(root, value, first_line):
     return {"mapping": rel, "sha256": digest, "approval_id": approval_id, anchor_key: anchor}, sessions
 
 
+CALIBRATION_REL = re.compile(r"runs/orchestrator/[\w.-]+/jobs/[\w.-]+/calibration_proposal\.json")
+ODE_CALIBRATION_KEYS = {"calibration", "sha256", "approval", "record_session_id", "accept"}
+
+
+def _check_ode_calibration_input(root, value):
+    """The ode-modeler form: an approved calibration_proposal.json applied to its own ODE session.
+
+    {"calibration", "sha256", "approval", "record_session_id", "accept"}: record_session_id must be the
+    proposal's ODE session (= the approval's session_id) and `accept` (unique, nonempty) exactly the
+    approval's outputs, so the modeler takes the session and the parameter names only from this verified line.
+    The proposal must come from its job: the job.json beside it has the proposal's job_sha256, job id
+    (= the folder name) and mapping, an approved ode_mapping of the same ODE session
+    (approvals.require_proposal_job, run by require_calibration_approval for the gate and score_holdout alike).
+    """
+    if set(value) != ODE_CALIBRATION_KEYS:
+        raise ValueError("ode-modeler DATA_INPUT requires exactly calibration, sha256, approval, record_session_id "
+                         f"and accept; got {sorted(value)}")
+    rel, digest, approval_id = value["calibration"], value["sha256"], value["approval"]
+    session, accept = value["record_session_id"], value["accept"]
+    if not all(isinstance(v, str) and v for v in (rel, digest, approval_id)):
+        raise ValueError("DATA_INPUT calibration, sha256 and approval must be nonempty strings")
+    if not isinstance(session, str) or not session:
+        raise ValueError("DATA_INPUT record_session_id must be a nonempty string (the proposal's ODE session)")
+    if (not isinstance(accept, list) or not accept or not all(isinstance(a, str) and a for a in accept)
+            or len(accept) != len(set(accept))):
+        raise ValueError("DATA_INPUT accept must be a nonempty list of unique parameter names (the approval's "
+                         f"outputs); got {accept!r}")
+    if not SHA256.fullmatch(digest):
+        raise ValueError("DATA_INPUT calibration needs a lowercase hex sha256")
+    if not CALIBRATION_REL.fullmatch(rel):
+        raise ValueError("DATA_INPUT calibration must be runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json")
+    # Every approval and proposal <-> job check (shared with score_holdout): approvals.require_calibration_approval.
+    record, proposal = approvals.require_calibration_approval(root, approval_id, rel, digest)
+    ode_session = proposal["model"]["ode_session"]
+    if session != ode_session:
+        raise ValueError(f"DATA_INPUT record_session_id {session!r} must be the proposal's ODE session "
+                         f"{ode_session} (the session of approval {approval_id})")
+    if set(accept) != set(record["outputs"]):
+        raise ValueError(f"DATA_INPUT accept {sorted(accept)} must equal the outputs of approval {approval_id} "
+                         f"{sorted(record['outputs'])}")
+    return {"calibration": rel, "sha256": digest, "approval_id": approval_id, "ode_session": ode_session,
+            "outputs": list(accept)}, set()
+
+
+def _check_ode_session_mentions(root, text, session):
+    """An ode-modeler brief with a verified calibration DATA_INPUT may not name any other existing BioMASS
+    session (a directory name under runs/ode-modeler/) anywhere, in any case: the modeler applies the approved
+    values only to the payload's record_session_id. No free-text value parsing: only the names of existing
+    sessions are matched, as whole tokens (a longer token such as `<name>-2` or `<name>s` is not that session);
+    other prose about values or sessions is left to the modeler, which takes them only from the DATA_INPUT line."""
+    base = Path(root) / "runs" / "ode-modeler"
+    if not base.is_dir():
+        return
+    folded = text.casefold()
+    with os.scandir(base) as entries:
+        names = sorted(e.name for e in entries if e.is_dir(follow_symlinks=False) and not e.name.startswith("."))
+    for name in names:
+        if name == session:
+            continue
+        if re.search(r"(?<![\w.-])" + re.escape(name.casefold()) + r"(?![\w-]|\.\w)", folded):
+            raise ValueError(f"brief names BioMASS session {name} besides the DATA_INPUT record_session_id {session}; "
+                             "an approved calibration is applied only to its record_session_id, so the brief may "
+                             "name no other ODE session")
+
+
 # Seeds and mapping files reach NeKo and MaBoSS only as the DATA_INPUT artifact. Every
 # runs/orchestrator path the brief mentions (any separator or case, after the detection
 # normalisation) is resolved in the repository: a regular file, or each regular file directly
@@ -553,14 +619,15 @@ def _resolve_mention(root, mention):
     return found
 
 
-def _orchestrator_mentions(root, text):
+def _orchestrator_mentions(root, text, cache=None):
     """(mention, existing paths) for each `runs/orchestrator` mention in the text.
 
     The mention is the unbroken token (trailing punctuation stripped; a glob cut back to its
     directory). Unless the token names a file, at most SPACED_CANDIDATES line prefixes ending
     in .json are tried too, stopping at the first that names something (names with spaces).
+    ``cache`` ({mention: paths}) is shared with the caller's other resolutions of the same brief.
     """
-    cache = {}
+    cache = {} if cache is None else cache
 
     def resolve(mention):
         if mention not in cache:
@@ -625,7 +692,7 @@ def _is_seeds(data):
 
 
 def _model_input_kind(path):
-    """"seeds" or "mapping" when the file's content has that schema's shape, else None.
+    """"seeds", "mapping", "ode_mapping" or "calibration_proposal" when the file's content has that schema's shape, else None.
 
     Unreadable or non-JSON files are neither; any other failure propagates (fail closed).
     """
@@ -636,6 +703,8 @@ def _model_input_kind(path):
         return None
     if not isinstance(data, dict):
         return None
+    if data.get("kind") in ("ode_mapping", "calibration_proposal"):
+        return data["kind"]
     if _is_seeds(data):
         return "seeds"
     if len(set(data) & (set(mapping.KEYS) - {"schema_version"})) >= 2:
@@ -643,15 +712,14 @@ def _model_input_kind(path):
     return None
 
 
-def _check_orchestrator_mentions(root, text, allowed_rel):
-    """Refuse a seeds or mapping file mentioned in the brief unless it is the DATA_INPUT artifact."""
-    root = Path(root).resolve()
+def _check_orchestrator_mentions(root, mentions, allowed_rel):
+    """Refuse a seeds or mapping file among the resolved mentions unless it is the DATA_INPUT artifact."""
     allowed = None
     if allowed_rel:
         info = os.stat(root / allowed_rel)
         allowed = (info.st_dev, info.st_ino)
     checked = set()
-    for mention, paths in _orchestrator_mentions(root, text):
+    for mention, paths in mentions:
         for path in (f for p in paths for f in _candidate_files(root, p)):
             info = path.stat()
             key = (info.st_dev, info.st_ino)
@@ -663,6 +731,74 @@ def _check_orchestrator_mentions(root, text, allowed_rel):
                 where = "is not the artifact of its DATA_INPUT line" if allowed_rel else "has no DATA_INPUT line"
                 raise ValueError(f"brief mentions {kind} file {path.relative_to(root).as_posix()} (as {mention!r}) "
                                  f"but {where}; {MENTION_RULE}")
+
+
+# Calibration job folders (runs/orchestrator/<p>/jobs/<job-id>/: report.md, holdout_score.json, figures,
+# bundle, ...) and returned results (inputs/calibration-results/) never reach a specialist: values reach the
+# ode-modeler only as the approved proposal on its DATA_INPUT line. Any spelling of such a path (case,
+# separators, globs) is refused, whether or not it exists, and so is any runs/orchestrator mention that
+# resolves into one; the exception is the DATA_INPUT calibration proposal itself and its own job folder.
+JOB_MENTION = re.compile(r"runs[\\/]+orchestrator[\\/]+[^\s\\/`'\"<>|]+[\\/]+jobs(?![\w.-])", re.I)
+RESULTS_MENTION = re.compile(r"inputs[\\/]+(?:\.[\\/]+)*calibration[\s_-]*results", re.I)
+JOB_RULE = ("calibration job folders (runs/orchestrator/<p>/jobs/) and returned results (inputs/calibration-results/) "
+            "reach a specialist only as the approved calibration proposal on the ode-modeler DATA_INPUT line; "
+            "see CLAUDE.md")
+
+
+def _job_area(root, path):
+    """True for a path inside runs/orchestrator/<p>/jobs or inputs/calibration-results (after resolving)."""
+    try:
+        parts = [p.casefold() for p in path.relative_to(root).parts]
+    except ValueError:
+        return False
+    return (parts[:2] == ["runs", "orchestrator"] and len(parts) >= 4 and parts[3] == "jobs") \
+        or parts[:2] == ["inputs", "calibration-results"]
+
+
+def _check_mentions(root, text, artifact_rel, model_inputs=True):
+    """One scan of the (normalised) brief: every runs/orchestrator mention is resolved once (shared cache).
+
+    Job rule (every gated specialist): no calibration job file or returned result, except the ode-modeler's
+    verified DATA_INPUT proposal (`artifact_rel` when it is a calibration_proposal.json) and its own job folder.
+    Model-input rule (`model_inputs`, the DATA_INPUT roles): no seeds, mapping, ode_mapping or calibration
+    proposal file other than `artifact_rel` (see _check_orchestrator_mentions).
+    """
+    root = Path(root).resolve()
+    allowed = set()
+    if isinstance(artifact_rel, str) and CALIBRATION_REL.fullmatch(artifact_rel) and (root / artifact_rel).is_file():
+        proposal = (root / artifact_rel).resolve()
+        allowed = {proposal, proposal.parent}
+    found = RESULTS_MENTION.search(text)
+    if found:
+        token = PATH_TOKEN.match(text, found.start()).group().rstrip(TRAILING)
+        raise ValueError(f"brief mentions calibration job results {token!r}; {JOB_RULE}")
+    cache = {}
+    for found in JOB_MENTION.finditer(text):
+        token = PATH_TOKEN.match(text, found.start()).group().rstrip(TRAILING)
+        if token not in cache:
+            cache[token] = _resolve_mention(root, token)
+        if not cache[token] or not set(cache[token]) <= allowed:
+            raise ValueError(f"brief mentions calibration job path {token!r}; {JOB_RULE}")
+    mentions = list(_orchestrator_mentions(root, text, cache))
+    for mention, paths in mentions:
+        for path in paths:
+            if path not in allowed and _job_area(root, path):
+                raise ValueError(f"brief mentions {mention!r}, which is inside a calibration job folder or the "
+                                 f"returned results ({path.relative_to(root).as_posix()}); {JOB_RULE}")
+    if model_inputs:
+        _check_orchestrator_mentions(root, mentions, artifact_rel)
+
+
+def check_job_mentions(root, specialist, task):
+    """The job-file rule for a gated specialist without a DATA_INPUT line (the dispatch hook runs it for those;
+    check_data_input runs the same rule, once, for the DATA_INPUT roles after verifying their line)."""
+    if specialist in DATA_INPUT_LINE:
+        raise ValueError(f"{specialist} takes DATA_INPUT: its job-file rule runs inside check_data_input")
+    if task is None:
+        task = ""
+    if not isinstance(task, str):
+        raise ValueError("dispatch prompt must be a string")
+    _check_mentions(root, _detection_text(task), None, model_inputs=False)
 
 
 def _quote(line, match):
@@ -716,6 +852,13 @@ def check_data_input(root, specialist, task):
     {"seeds", "sha256", "approval"} (an approved data_seeds seeds.json from user sources).
     boolean-dynamics-modeler: {"mapping", "sha256", "approval"}, bound to the STAGE_GATE
     upstream_session_id (NeKo export) or standalone_decision_id (researcher BNET).
+    ode-modeler: {"calibration", "sha256", "approval", "record_session_id", "accept"} (see
+    _check_ode_calibration_input); the brief may name no existing BioMASS session other than record_session_id
+    (_check_ode_session_mentions). Other prose is not parsed for values: the modeler takes the session and the
+    accepted names only from the verified line and ignores prose (ode-modeler.md).
+
+    The brief's runs/orchestrator mentions are then scanned once (_check_mentions): the job-file rule and the
+    model-input rule, with only the verified artifact exempt.
     """
     if specialist not in DATA_INPUT_LINE:
         return None
@@ -738,17 +881,20 @@ def check_data_input(root, specialist, task):
     if canonical is None:
         if DATA_PATH.search(text) or DATA_SESSION_ID.search(text):
             raise ValueError(DATA_REFUSAL)
-        _check_orchestrator_mentions(root, text, None)
+        _check_mentions(root, text, None)
         return None
     value = _strict_object(lines[expected][len("DATA_INPUT "):], "DATA_INPUT")
     if specialist == "network_curator":
         result, sessions = _check_neko_data_input(root, value)
+    elif specialist == "ode_modeler":
+        result, sessions = _check_ode_calibration_input(root, value)
+        _check_ode_session_mentions(root, text, result["ode_session"])
     else:
         result, sessions = _check_maboss_data_input(root, value, lines[0])
     other = sorted(_data_sessions_named(text) - sessions)
     if other:
         raise ValueError(f"brief names data-analyst session(s) {', '.join(other)} outside its DATA_INPUT")
-    _check_orchestrator_mentions(root, text, result.get("seeds") or result.get("mapping"))
+    _check_mentions(root, text, result.get("seeds") or result.get("mapping") or result.get("calibration"))
     return result
 
 

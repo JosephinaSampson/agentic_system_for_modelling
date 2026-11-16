@@ -192,6 +192,9 @@ class DataAnalystAccessTests(unittest.TestCase):
             )
 
 
+REVISION_RULE = "return `blocked` unless the session's current revision equals `proposal.model.revision`"
+
+
 class DataHandoffInstructionTests(unittest.TestCase):
     def test_specialists_and_reviewers_carry_data_handoff_rules(self):
         expected = {
@@ -203,6 +206,18 @@ class DataHandoffInstructionTests(unittest.TestCase):
             "CLAUDE.md": ("DATA_INPUT", "data_mapping", "never paste data values", "seeds.json", "sha256 + locator", "--standalone-network", "draft --from"),
             ".claude/skills/neko-workflow/SKILL.md": ("seeds.json", "hgnc_symbol"),
             ".claude/skills/maboss-workflow/SKILL.md": ("standalone approval",),
+            ".claude/agents/ode-modeler.md": ("Applying an approved calibration", "record_session_id", "data-calibrated",
+                                              "re-apply every other configured value unchanged", "new revision",
+                                              REVISION_RULE),
+            ".claude/skills/biomass-workflow/SKILL.md": ("Apply an approved calibration", "calibration_proposal.json",
+                                                         "re-applied unchanged", "record_session_id", "data-calibrated", "inspect_model",
+                                                         "no dispatcher check", "never infer units", REVISION_RULE),
+            "docs/ode-workflow.md": ("Calibrating parameters to measurements", "ode_calibration", "score_holdout.py",
+                                     "popsize", "heuristic", "Only the bundle"),
+            "docs/data-workflow.md": ("Data to ODE: calibration", "data-calibrated", "popsize"),
+            "docs/agentic-operations.md": ("score_holdout.py", "dispatch.jsonl", "hosts.json", "import_results.py"),
+            ".claude/agents/scientific-reviewer.md": ("ODE calibration checklist", "poorly_constrained", "hold-out"),
+            ".claude/agents/reproducibility-auditor.md": ("ODE calibration checklist", "holdout_score.json", "results_sha256"),
         }
         for path, phrases in expected.items():
             text = (ROOT / path).read_text(encoding="utf-8")

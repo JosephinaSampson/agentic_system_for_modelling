@@ -24,9 +24,11 @@ from scripts.data.environment import lock_sha256  # noqa: E402
 from scripts.data.seeds import symbol_problem  # noqa: E402
 from scripts.data.ledger import validate_entry  # noqa: E402
 from scripts.data.vendor_lock import VENDORED_SKILLS  # noqa: E402
+from scripts.ode import measurements as ode_measurements  # noqa: E402
 
 LAYERS = ("spec", "neko", "maboss", "biomass", "physicell")
-KINDS = ("seed_genes", "initial_states", "perturbations", "validation_targets", "parameters", "time_course")
+KINDS = ("seed_genes", "initial_states", "perturbations", "validation_targets", "parameters", "time_course",
+         "ode_measurements")
 KIND_SCHEMAS = {
     "seed_genes": {
         "layer": "neko",
@@ -54,6 +56,17 @@ KIND_SCHEMAS = {
                   "evidence_strength": ("strong", "moderate", "weak", "exploratory")},
         "unique": "target_id",
         "list_columns": (),
+    },
+    "ode_measurements": {
+        "layer": "biomass",
+        "required": ode_measurements.COLUMNS,
+        # Columns that must exist but may be empty (dose only for dose-response, error and n optional).
+        "optional": ode_measurements.OPTIONAL_COLUMNS,
+        "enums": {"use": ode_measurements.USES, "error_kind": ode_measurements.ERROR_KINDS},
+        "unique": "measurement_id",
+        "list_columns": (),
+        # scripts/ode/measurements.py reads comma-separated .csv only: refuse .tsv at the first check
+        "suffixes": (".csv",),
     },
 }
 PROPOSAL_ID_RE = re.compile(r"\AP\d+\Z")
@@ -291,6 +304,11 @@ def _check_proposal_table(session: Path, pid, entry: dict, schema: dict, errors:
     if delimiter is None:
         errors.append(f"{label}: must be a .csv or .tsv table")
         return
+    suffixes = schema.get("suffixes")
+    if suffixes and Path(rel).suffix not in suffixes:  # case-sensitive, like ode_mapping
+        errors.append(f"{label}: must be a {' or '.join(suffixes)} table (the {entry.get('kind')} reader is "
+                      "comma-separated .csv only)")
+        return
     path = session / rel
     if not path.is_file() or path.is_symlink():
         return  # reported by the listing check
@@ -314,6 +332,8 @@ def _check_proposal_table(session: Path, pid, entry: dict, schema: dict, errors:
     symbols: set[str] = set()
     for n, row in enumerate(rows, start=2):
         for col in schema["required"]:
+            if col in schema.get("optional", ()):
+                continue
             if not _nonempty(row.get(col)):
                 errors.append(f"{label} line {n}: required column {col!r} is empty")
         for col, allowed in schema["enums"].items():

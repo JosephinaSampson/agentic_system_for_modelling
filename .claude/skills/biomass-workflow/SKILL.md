@@ -191,5 +191,27 @@ Return common envelope version 1 with specialist `ode_modeler`, stage `biomass_o
 and `ode.contract_version=2`. The orchestrator validates captures, evidence,
 revision/version, numerical settings and authority before scientific acceptance.
 Keep provisional registry rows pending. Existing independent stage review remains
-required; reviewer/auditor definitions are present, but live invocation and review completion still require verification. No calibration,
-sensitivity analysis or ODE-to-PhysiCell coupling is included.
+required; reviewer/auditor definitions are present, but live invocation and review completion still require verification. Calibration fitting
+runs as portable jobs outside this skill; sensitivity analysis and ODE-to-PhysiCell coupling are not included.
+
+## Apply an approved calibration
+
+Only with a hook-checked line 1 `DATA_INPUT {"calibration": "runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<ODE session>", "accept": ["<name>", ...]}`.
+The hook verifies that `record_session_id` is the proposal's ODE session (the approval's `session_id`) and that
+`accept` is exactly the approval's `outputs` (the accepted parameters). Take the session only from that
+`record_session_id` and the parameter names only from that `accept` list; ignore any session or name given in
+prose elsewhere in the brief.
+The Codex runtime has no dispatcher check for the calibration `DATA_INPUT` yet, so under Codex the
+specialist returns `blocked` for such a request.
+1. Read the proposal; the accepted parameters are the `accept` names of the DATA_INPUT line. Ignore the others.
+2. Read the session's current revision and configuration with `inspect_model`. The values were fitted to
+   one model revision: return `blocked` unless the session's current revision equals `proposal.model.revision`
+   (a later edit or regeneration means the calibration must be redone or re-approved). The proposal's `unit`
+   of each accepted parameter must equal that parameter's configured unit; otherwise return `blocked`
+   (never infer units).
+3. Apply exactly the `accept` parameters at their proposal `best` values through the server. `configure_model`
+   replaces the whole configuration, so send it with every other configured value re-applied unchanged.
+4. Read back the stored values and compare each with the proposal; execution success is not enough.
+5. Report the new revision, the applied and the unchanged values, the job id, proposal sha256 and
+   approval id; tag the values `data-calibrated`. Never apply a value the approval does not list, and
+   never edit a value to a rounded or "nicer" number.

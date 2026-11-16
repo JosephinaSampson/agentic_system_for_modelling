@@ -24,7 +24,7 @@ criteria; per-kind proposal schemas; the mapping file and its checker; `DATA_INP
 dispatch checks; lineage; review checklists; the `scenario_contrast` validator.
 
 **Not covered here:**
-- BioMASS and PhysiCell data inputs;
+- BioMASS data inputs (see [data to ODE calibration](data-to-ode-calibration-architecture.md)) and PhysiCell data inputs;
 - Codex parity (pending);
 - MCP server changes, and automatic mapping (the researcher decides every row).
 
@@ -58,8 +58,8 @@ dispatch checks; lineage; review checklists; the `scenario_contrast` validator.
 | `scripts/data/mapping.py` | `draft` (also `--source`, `--standalone-network`, `--from`), `check` (also `--stage-gate`), `criteria` (and a merge into `VALIDATION_CRITERIA.yaml`). Imports the BNET node list and each method's option checker. |
 | `scripts/data/sources.py` | Shared source rules for mappings and seeds: file under `inputs/`, no symlinks, sha256, locator characters. Never opens a source for content. |
 | `scripts/data/seeds.py` | `check` for `seeds.json`: symbols, sources, citations. |
-| `scripts/gate.py` (`check_data_input`) | Parses and verifies the `DATA_INPUT` line for network-curator and boolean-dynamics-modeler. |
-| `.claude/scripts/stage_gate_guard.py` | Dispatch hook: runs `check_task` then `check_data_input`; deny with stderr and exit 2. |
+| `scripts/gate.py` (`check_data_input`, `check_job_mentions`) | `check_data_input` parses and verifies the `DATA_INPUT` line for the three `DATA_INPUT` roles (network-curator, boolean-dynamics-modeler, ode-modeler) and then scans the brief once for job-folder and model-input mentions; `check_job_mentions` applies the job-folder rule to the other gated roles. |
+| `.claude/scripts/stage_gate_guard.py` | Dispatch hook: runs `check_data_input` for network-curator, boolean-dynamics-modeler and ode-modeler, `check_job_mentions` for the other gated role (multicellular-configurator), then `check_task` for boolean-dynamics-modeler and multicellular-configurator; any error denies with stderr and exit 2 (fail-closed). |
 | `scripts/state.py` | Accepts `data_mapping` as a governance stage for `stage_approval` and `stage_review`; `data_seeds` likewise. |
 | `scripts/validate/scenario_contrast.py`, `evaluate.py` | Contrast validator and its registration. |
 | Agent and skill instructions | `network-curator`, `boolean-dynamics-modeler`, `neko-workflow`, `maboss-workflow`, `validate-stage`, `scientific-reviewer`, `reproducibility-auditor`, and the `CLAUDE.md` rules. |
@@ -183,5 +183,7 @@ The step-by-step procedure is in [data workflow](data-workflow.md). In outline:
 ## 8. Roadmap
 
 1. **Implemented:** the typed handoffs above.
-2. **Later:** BioMASS and PhysiCell data inputs; Codex parity (pending, low priority);
+2. **Implemented (sub-project 3):** BioMASS data inputs and portable calibration jobs; see
+   [data to ODE calibration architecture](data-to-ode-calibration-architecture.md).
+3. **Later:** PhysiCell data inputs; Codex parity (pending, low priority);
    path-level scoping of data mentions; an explicit revocation record.

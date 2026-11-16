@@ -223,6 +223,46 @@ context and perturbation fix the same node, the perturbation overrides the conte
 `scenario_contrast` is documented in
 `scripts/validate/README.md`.
 
+### ODE calibration jobs and applying their result
+
+```
+python3 scripts/ode/ode_mapping.py draft --purpose P --ode-session S --bundle ZIP --measurements CSV [--revision R] [--source ID:PATH ...]   # revision derived from the bundle
+python3 scripts/ode/ode_mapping.py check runs/orchestrator/P/ode_mapping.json
+python3 scripts/jobs/build.py --mapping runs/orchestrator/P/ode_mapping.json --approval <ode_mapping record id> --settings SETTINGS.json
+python3 scripts/jobs/launch.py local start|status|fetch <job-id>
+python3 scripts/jobs/launch.py local validate <job-id> [--params FILE [--partial]] [--nominal] [--use fit|holdout|all] [--out FILE]   # holdout|all: after the ode_calibration approval only
+python3 scripts/jobs/launch.py print <job-id> --host NAME                 # the scp/ssh commands, runs nothing
+python3 scripts/jobs/launch.py ssh submit <job-id> --host NAME --authorization "<researcher quote>"
+python3 scripts/jobs/launch.py ssh status|fetch|cancel <job-id> --host NAME
+python3 scripts/jobs/launch.py slurm submit <job-id> [--resubmit [--force]]   # --force: sacct cannot tell; check squeue first
+python3 scripts/jobs/import_results.py <job-id>
+python3 scripts/jobs/score_holdout.py <job-id> --approval <ode_calibration record id>
+```
+
+`hosts.json` (`~/.config/agentic-modelling/hosts.json`) maps names to
+`{"ssh": alias, "remote_dir": str, "max_cores": int}`; ssh always runs with `BatchMode=yes`. `ssh submit` appends
+`{"time", "host", "ssh_alias", "bundle_sha256", "authorization"}` to the job folder's `dispatch.jsonl` before
+anything leaves the machine, and only the bundle is sent. The `ode_mapping` and `ode_calibration` stages are
+governance stages of `state.py record`. The ode-modeler hook (`stage_gate_guard.py`) accepts
+a `DATA_INPUT {"calibration": ..., "sha256": ..., "approval": ..., "record_session_id": ..., "accept": [...]}` on
+line 1 only. Shared with `score_holdout.py` (`approvals.require_calibration_approval`): approval stage
+`ode_calibration` bound to that path and sha256 and passing `validate_record`, `outputs` a nonempty subset of
+the proposal's parameter names, approval `session_id` = the proposal's ODE session, and the proposal bound to
+its job (the proposal's `mapping` an approved `ode_mapping`, the `job.json` beside it matching its
+`job_sha256`, `job_id` (= the folder name) and `mapping`; `approvals.require_proposal_job`). Gate-only
+(`gate._check_ode_calibration_input`; `score_holdout.py` takes no such payload): `record_session_id` = the
+proposal's ODE session and `accept` exactly the approval's `outputs`, and the brief may name no existing
+BioMASS session (a directory under `runs/ode-modeler/`) other than `record_session_id`. Any other calibration
+proposal or `ode_mapping.json` named in the brief, or a payload-like `DATA_INPUT` elsewhere, is refused; errors
+deny. Other prose is not parsed for values: the modeler takes the session and names only from the line. For every gated specialist the hook refuses any path under `runs/orchestrator/<p>/jobs/`
+or `inputs/calibration-results/` except the ode-modeler's `DATA_INPUT` proposal and its own job folder.
+`import_results.py` computes `start` (nominal values) locally in the same `validate --nominal` run that
+reproduces the best score (needs internet; builds `~/.cache/agentic-jobs/<job-id>/`); the archive's selftest
+values are ignored. `score_holdout.py` writes `holdout_score.json` once, complete or not at all (temp file, fsync,
+`os.link`), with `n_rows` (only the accepted
+parameters are passed, at best; the others keep the model defaults); it writes nothing when no hold-out row
+was predicted, any hold-out prediction failed or the score is the penalty.
+
 ## Evidence and provenance
 
 Edge reports end in exactly one fenced `yaml` block using JSON syntax. Ordinary

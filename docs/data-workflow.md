@@ -74,9 +74,24 @@ It ends with `DATA SMOKE PASSED`.
 ## Proposal schemas
 
 Proposals of kind `seed_genes` (layer `neko`), `perturbations` and `validation_targets`
-(layer `maboss`) must be CSV/TSV tables with fixed required columns, enum values and unique
-ids, checked by `manifest.py verify` (`KIND_SCHEMAS`). Extra columns are allowed. The old
-kind `mutations` is now `perturbations`. The column tables are in the `data-workflow` skill, section 7.
+(layer `maboss`) and `ode_measurements` (layer `biomass`) must be CSV/TSV tables with fixed
+required columns, enum values and unique ids, checked by `manifest.py verify` (`KIND_SCHEMAS`).
+Extra columns are allowed. The old kind `mutations` is now `perturbations`. The column tables
+are in the `data-workflow` skill, section 7.
+
+`ode_measurements` (layer `biomass`, `.csv`, unique `measurement_id`) has exactly the columns of
+`scripts/ode/measurements.py` `COLUMNS`: `measurement_id`, `readout`, `condition`, `time`,
+`time_unit`, `dose`, `dose_unit`, `value`, `value_unit`, `error`, `error_kind`, `n`, `use`,
+`source`, `locator`. `dose`, `dose_unit`, `error`, `error_kind` and `n` may be empty (a dose
+needs its `dose_unit`, an error its `error_kind`); every other column is required on every row.
+Enums: `use` is `fit` or `holdout`; `error_kind` is `sd`, `sem` or empty (empty exactly when
+`error` is empty). On this route `source` is the literal `proposal` on every row and `locator`
+says where in the analyst's outputs or sources the value comes from (non-empty, no `|`, control
+or line-break character); `ode_mapping.py check` refuses any other `source`, a missing unit, or a
+bad locator. Values are raw, with their `value_unit`: the mapping normalises them like the predictions
+(rows normalised together, e.g. a time course and its t0 row, must share one `value_unit`) and converts
+absolute values and viability only with the explicit factors of its `values` block. The table reaches a mapping as `inputs.measurements = {session, proposal, approval}`
+(see "Data to ODE: calibration").
 
 ## Handoff, report and receive procedure
 
@@ -328,6 +343,24 @@ MaBoSS session `Derived from` the standalone decision id; a
 MaBoSS row with the mapping path and short hash), and mapped states, perturbations and
 readouts get the `data-derived` tag, citing (data session, proposal id, sha256) or
 (source path, short sha256, locator).
+
+## Data to ODE: calibration
+
+An `ode_measurements` table, once approved, can calibrate a BioMASS model through the job route (details
+in docs/ode-workflow.md): `ode_mapping.py` -> researcher approval (`ode_mapping`) -> `build.py` ->
+`launch.py` (local/ssh/slurm; only the bundle leaves the machine) -> `fetch` -> `import_results.py` ->
+`calibration_proposal.json` -> researcher approval of the accepted parameters (`ode_calibration`) ->
+ode-modeler `DATA_INPUT {"calibration": ..., "sha256": ..., "approval": ..., "record_session_id": ..., "accept": [...]}`
+on line 1 -> `score_holdout.py`. Calibrated values carry the `data-calibrated` tag (job id,
+proposal sha256, approval id). Caveats for the researcher: BioMASS differential-evolution defaults stop
+early with few fitted parameters (raise `popsize`/`maxiter`); restart agreement and the
+`poorly_constrained` flag are heuristics; the hold-out is scored once. A calibration proposal or an
+`ode_mapping.json` may be named only on the `DATA_INPUT` line of its dispatch. The dispatch hook also refuses an ODE brief that names a data-analyst path or session id, or an orchestrator seeds/mapping/ode_mapping/calibration file other than the `DATA_INPUT` artifact, without a `DATA_INPUT` line.
+For every gated specialist it refuses any path under a calibration job folder (`runs/orchestrator/<p>/jobs/`:
+`report.md`, `holdout_score.json`, ...) or under `inputs/calibration-results/`, except the ode-modeler's
+`DATA_INPUT` proposal and its own job folder.
+Hold-out scoring uses the bundled model with the accepted values, so it does not depend on when the
+ode-modeler applies them: run it once, after the calibration approval.
 
 ## Provenance checks
 

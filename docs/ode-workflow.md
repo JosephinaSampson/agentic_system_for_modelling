@@ -80,8 +80,160 @@ the ODE handoff. Topology choices still retain their existing approval gates.
    identified as historical. Optional graph rendering may be skipped if unavailable.
 8. Present the complete model and results for review. Conclusive bundle export and
    stage acceptance require the exact session/revision approval in the artifact
-   contract. ODE-to-PhysiCell coupling, calibration and sensitivity analysis remain
-   outside this integrated workflow.
+   contract. ODE-to-PhysiCell coupling and sensitivity analysis remain outside this
+   integrated workflow; calibration is the separate route below.
+
+## Calibrating parameters to measurements
+
+Calibration is a portable job the researcher approves step by step; no specialist fits anything. Design rationale: [data to ODE calibration architecture](data-to-ode-calibration-architecture.md). Steps:
+
+1. **Measurement table to mapping.** A measurement table (from an approved `ode_measurements` data
+   proposal, or a CSV under `runs/orchestrator/`) is mapped onto a captured, accepted model revision
+   (`ode_mapping.py draft`, fill, `check`). The bundle is the BioMASS export zip as the server writes it
+   (2.5.x `export_bundle`): `model/` holds the exported revision folder (`integrity.json`,
+   `model_summary.json`, ...) with the Text2Model package in `model/generated_model/` (the single folder
+   under `model/` holding `ode.py` and `name2idx/`; zero or several are refused), plus `simulate_*/`,
+   `requirements.txt` and `run_simulation.py`. `draft` derives `inputs.model.revision` from it: the
+   captured revision folder (`rev_<32 hex>` directly in `runs/ode-modeler/<session>/captures/<capture>/`,
+   where `record_ode_artifacts.py` puts it; folders elsewhere are ignored) whose `integrity.json` is
+   byte-identical to the zip's `model/integrity.json` in every captured copy of that revision that has one
+   (copies that disagree are refused; a partial copy without `integrity.json` is ignored), and the zip's `model/` files must be exactly the
+   ones that inventory seals; `check` refuses any other revision, so the revision the ode-modeler later
+   compares is the one that was fitted. The calibration bundle carries only the package's `.py` files, at
+   their export path, and the runner imports the package by its own name. The mapping fixes
+   observables, condition overrides, comparison rules, fitted parameters with bounds and justification,
+   hold-out rows (`use=holdout`) and the reasons for any unmapped row. `check` requires at least one
+   `use=fit` row scored by a rule with information (a contrast reference row is not scored, and rows whose
+   normalised target is 1 by construction do not count: `fold_change_vs_t0` rows at time 0,
+   `relative_to_condition` rows of the reference condition, the fit rows of a `max_normalized` readout with a
+   single fit (condition, time) point; scored hold-out rows, which are optional, must not all be 1 by
+   construction, or the one-time hold-out score would be 0 for every parameter set),
+   a fitted dose-response `K` with a positive model default (read from `ode.py` `param_values()`, never
+   imported: hold-out scoring keeps the default of a non-accepted `K`), every endpoint-contrast row and
+   every dose row measured at the rule's time once converted (`time.factors`; compared with relative
+   tolerance 1e-9: a rule `"time": 24` meant as hours against a minute model is refused, not silently read
+   as 24 min), and the rows of a dose-response rule to have a readout mapped to `viability.observable`.
+   **Values and units.** The table holds raw values with their `value_unit`; each rule normalises the data
+   exactly as it normalises the predictions. A fit row is divided only by fit rows, so hold-out rows never
+   change a fit target or a fit prediction; a hold-out row is divided by hold-out divisor rows when there
+   are some, else by the fit rows (a t0 value or a reference is only a normaliser), so a later time point
+   can be held out with a single t0 replicate. `fold_change_vs_t0` divides each row by the time-0 row(s) of
+   the same readout and condition (required, non-zero; t0 rows stay, target 1); `relative_to_condition`
+   divides by the reference-condition rows of the same readout at the same converted time (required, in
+   the rule, non-zero); `max_normalized` divides every row, hold-out rows included, by the max of the
+   rule's FIT rows of the same readout (positive), and the prediction by the simulated max at those fit
+   rows, so a hold-out row is scored on the fit's scale (hold-out rows without fit rows of their readout are
+   refused); `endpoint_contrast` compares
+   the test row with the mean of the reference rows of the same readout and `use` (only the test and
+   reference conditions are allowed; a ratio needs a non-zero reference mean and is unitless; a
+   `difference` keeps the data unit, so its target is converted with the `values.readouts` factor, like an
+   `absolute` value). Within one normalisation
+   group every row must have the same `value_unit` (it cancels). Absolute values need explicit factors in
+   the `values` block (never inferred): `values.readouts[readout] = {"model_unit": <the observable's unit
+   in the model>, "factors": {value_unit: factor}}` converts an `absolute` row to value x factor, and
+   `values.viability.factors` converts dose-response rows to a fraction (e.g. `{"%": 0.01, "fraction": 1}`).
+   `draft` lists every readout's value units and the viability units as TODO; fill them, or delete the
+   `values.readouts` entries no `absolute` rule needs. A fitted parameter or initial that a condition also
+   overrides (or an `inhibitor_species` dose sets) is refused: the override would mask it there.
+2. **Approval.** The researcher approves the mapping: `ode_mapping` `stage_approval` (`session_id` = the
+   ODE session, `outputs` = measurement ids used plus fitted names, `artifact` = path and sha256).
+   Keep the `ode_mapping` unchanged until its approved proposal has been applied; for a changed mapping use a new purpose (the earlier proposal stays scoreable but cannot be applied).
+3. **Build.** `build.py --mapping ... --approval ... --settings ...` writes the deterministic bundle and
+   `job.json` under `runs/orchestrator/<p>/jobs/<job-id>/`. Settings come from
+   `templates/calibration-settings.{first-pass,final}.json`; the BioMASS differential-evolution defaults
+   stop early when few parameters are fitted, so raise `popsize` and `maxiter` in the settings.
+4. **Launch.** `launch.py local start|status|fetch`, or `ssh submit` (a host from `hosts.json`, the
+   researcher's authorization quote, logged to `dispatch.jsonl` before anything runs), or `slurm submit`
+   on a login node. Only the bundle (model, the measurement rows the rules use, parameter bounds) leaves
+   the machine. `fetch` places `results.tar.gz` under `inputs/calibration-results/<job-id>/`.
+   Restarts run K at a time (`run.effective_parallel`, used by every launcher and by `local.sh` through
+   `run.py parallel`): `workers: -1` (every core) gives K = 1; otherwise K = min(`parallel`,
+   cores // `workers`), with cores = a configured host's `max_cores`, or `os.cpu_count()` in local mode;
+   `print` for an unconfigured host (cores unknown) uses `parallel` with `workers: 1` and K = 1 otherwise.
+   Under SLURM `workers: -1` means the task's allocation (`slurm.cpus_per_task`); a `workers` count >= 1
+   must not exceed `slurm.cpus_per_task` (settings check), and every settings number must be finite; the
+   selftest always uses 1 worker.
+   Ctrl-C (or `remote.sh cancel`) leaves no `failed` result: interrupted restarts are rerun from their seed
+   by the next `local.sh`/`start`, and a restart folder whose owner is still alive (same host, or a SLURM
+   task sacct reports active) is never deleted or started twice. On the same host a dead pid, a reused pid
+   (its process start identity differs from `owner.json`'s `process_start` of the same scheme; identities of
+   different schemes are not compared; without one, it started after `started_at`) and, for a claimant, its
+   own pid are stale. On another host the folder is this task's own SLURM requeue only
+   when job and array task (non-array: `SLURM_PROCID`) match and `SLURM_RESTART_COUNT` >= 1 exceeds the
+   owner's; otherwise sacct decides. Every claimant (with or without an existing folder) holds the per-restart
+   claim `out/.claim-restart-N/` (a directory renamed into place with its `owner.json`; atomic, also on NFS)
+   from judging the folder to placing its own, so a stale folder is replaced by exactly one process (moved to a
+   trash name and deleted, the new folder renamed in); a claim left by a dead claimant is broken under the same
+   identity rules by the one process holding its break token; a claimant that cannot take the claim backs off
+   with exit 3). When the owner cannot be checked (another host without SLURM ids, or sacct cannot tell) the refusal
+   names its host and pid; once that process is confirmed gone, run `run.py calibrate --restart N
+   --takeover` in the job folder (or remove `out/restart-N` by hand) and rerun. A restart folder appears
+   with its `owner.json` already inside.
+   Each simulation integrates only up to the times of the rows being scored, so a hold-out time never
+   extends or fails a fit simulation. `slurm submit --resubmit` is refused while
+   an earlier recorded array is active per sacct; when sacct cannot tell (no accounting) it is refused
+   unless `--force` is added after checking `squeue` (an array sacct reports active is never forced).
+   `launch.py local validate --use holdout|all` is refused until an `ode_calibration` approval of the
+   job's proposal exists (the hold-out stays unseen before approval; `score_holdout.py` scores it once).
+   **SLURM return path, end to end:** on the login node, `launch.py slurm submit <job-id>` (or the printed
+   `sbatch` and `echo <id> > state/slurm_job` lines) from the unpacked job folder; follow it with
+   `bash launch/remote.sh status` there; when status shows every restart done (or failed), run
+   `bash launch/remote.sh collect` there, which writes `<job folder>/results.tar.gz`; bring that file back
+   to this repository with `mkdir -p inputs/calibration-results/<job-id> && scp <cluster>:<job folder>/results.tar.gz inputs/calibration-results/<job-id>/`
+   (or `launch.py ssh fetch <job-id> --host NAME` when the cluster is a configured host whose
+   `remote_dir` holds the job), then import.
+   **Partial fetch or import:** do not fetch before `status` shows the run done: `fetch` never overwrites,
+   so an early (partial) archive stays the job's archive. A failed import writes nothing and can be rerun
+   after the cause is fixed. To run again (more restarts, other seeds or settings), change the settings and
+   rebuild: that is a new job id with its own folders; a job's fetched archive and proposal are never
+   replaced.
+5. **Import.** `import_results.py <job-id>` verifies the archive (hashes, environment pins, seeds, bounds)
+   and reproduces the best score locally, then writes `calibration_proposal.json`, `report.md` and figures.
+   The reproduce step needs internet: it builds the job's own environment under
+   `~/.cache/agentic-jobs/<job-id>/` (uv, Python 3.12, the pinned packages; minutes the first time) even
+   for ssh and slurm jobs, and also computes the nominal values (`start`) locally from that verified copy
+   of the bundle; the remote `selftest/validate.json` is never used for them.
+   `predictions.json`, `simulations.json` and the data-vs-fit figure carry `use=fit` rows (and the
+   simulations they need) only: hold-out rows stay unseen until `score_holdout.py`.
+   Nothing reaches the model. Partial results (failed or missing restarts) are flagged `partial`;
+   parameters whose good restarts span more than a decade are flagged `poorly_constrained`; restart
+   agreement is a heuristic, not an identifiability proof.
+6. **Calibration approval.** The researcher reviews the report and approves a subset of parameters:
+   `ode_calibration` `stage_approval` with `session_id` = the proposal's ODE session, `outputs` = the
+   accepted parameter names and `artifact` = the proposal path and sha256.
+7. **Apply.** Dispatch ode-modeler with line 1
+   `DATA_INPUT {"calibration": "runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<ODE session>", "accept": ["<name>", ...]}`
+   (`record_session_id` = the proposal's ODE session, `accept` = exactly the approval's `outputs`; no other
+   proposal or ode_mapping file named, and no existing ODE session other than `record_session_id` named
+   anywhere in the brief). The hook checks the approval (researcher-authorized), hash, session,
+   `record_session_id` and `accept`; the specialist takes the session and the names only from that line and
+   applies exactly the `accept` parameters at their `best` values (only when the session's current revision equals
+   `proposal.model.revision`; otherwise it returns `blocked`) and re-applies every other configured value unchanged
+   (`configure_model` replaces the configuration), then reports the new revision. Tag the values
+   `data-calibrated`; register the new revision with Derived from = the calibrated session, the job id,
+   proposal short hash and approval id. The new revision needs the usual review and approval.
+8. **Hold-out.** `score_holdout.py <job-id> --approval <id>` (the same approval and job-binding checks as the
+   hook) scores the held-out rows once, passing only the
+   accepted parameters at their best values (every other parameter keeps the bundled model's default,
+   recorded as `effective_parameters`), and writes `holdout_score.json` with `n_rows`, the hold-out rows that
+   received a prediction. It never overwrites, and the file appears only complete (temp file, fsync, then a
+   hard link that fails if it exists; the job folder's filesystem must support hard links, or nothing is
+   written), so a failed write leaves the hold-out unscored. `n_rows` counts only hold-out rows that are not 1
+   by construction. A job whose `job.json` has no `runtime_version` or an older one than the framework's
+   (`run.RUNTIME_VERSION`, stamped by `build.py`) is refused with "rebuild this job" by
+   `score_holdout.py` and `import_results.py`. It writes nothing (so the hold-out stays unscored) when no
+   hold-out row received a prediction (an objective over no rows is 0, not a score), when any hold-out
+   prediction failed (solver failure, non-finite value; listed by row) or when the score is the penalty. It runs
+   the bundled model with the accepted values, so it is independent of when the ode-modeler applies them:
+   run it once, after the calibration approval.
+
+The dispatch hook also refuses an ODE brief that names a data-analyst path or session id, or an orchestrator seeds/mapping/ode_mapping/calibration file other than the `DATA_INPUT` artifact, without a `DATA_INPUT` line.
+For every gated specialist it refuses any path under a calibration job folder (`runs/orchestrator/<p>/jobs/`,
+e.g. `report.md`, `holdout_score.json`, figures, the bundle) or under `inputs/calibration-results/`; the only
+exception is the ode-modeler's `DATA_INPUT` proposal itself and its own job folder. With the calibration
+`DATA_INPUT` it also checks that the proposal's `mapping` is an approved `ode_mapping` (researcher-authorized
+record) and that the `job.json` beside the proposal has its `job_sha256`, its `job_id` (= the folder name)
+and the same `mapping` (path, sha256, approval).
 
 ## Dispatch and isolation
 
@@ -220,6 +372,29 @@ empty integrity inventories and exported bundles without model artifacts. 2.5.1
 fixes this. A revision generated by 2.5.0 under the default root has an empty
 inventory and now fails verification; regenerate it with 2.5.1 rather than
 capturing it.
+
+### Smoke test
+
+`tests/integration/ode_calibration_smoke.py` drives the whole data-to-ODE calibration chain with a
+tiny real BioMASS model (about 40 s):
+
+```sh
+python3 tests/integration/ode_calibration_smoke.py
+```
+
+In a temporary repository copy under `~/.cache` (job cache, uv downloads and configuration are
+pointed there) it generates the model with Text2Model (`biomass==0.14.0`), writes synthetic
+measurements from a known `kf2` (including a 7.5 min point and one hold-out row), drafts, checks
+and approves the `ode_mapping`, builds the 2-restart bundle, runs it locally (real bootstrap,
+selftest, collect), imports the results with the real reproduce (best score below the nominal
+score), records the `ode_calibration` approval, passes the ode-modeler `DATA_INPUT` gate through
+the real hook (a wrong sha is refused), scores the hold-out once and prints the `launch.py print`
+commands. It also asserts that nothing is added to `~/.local/bin`. The scratch folder is removed
+on success and kept (path printed) on failure.
+
+It prints `SKIP: <reason>` and exits 0 when `uv` is missing or the network is unreachable (it
+needs GitHub for uv and PyPI for biomass); any other failure exits 1. Like the backend smoke test
+it is a software check on synthetic data, not scientific evidence.
 
 ### Real-backend smoke test
 

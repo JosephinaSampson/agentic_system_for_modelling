@@ -274,13 +274,15 @@ A figure entry (path under `outputs/figures/`, suffix `.png`, `.svg` or `.pdf`) 
 
 `target_layer` is one of `spec`, `neko`, `maboss`, `biomass`, `physicell`; `kind` is one
 of `seed_genes`, `initial_states`, `perturbations`, `validation_targets`, `parameters`,
-`time_course`. Use exactly one value each. Proposal ids are `P1`, `P2`, ... (`^P\d+$`;
+`time_course`, `ode_measurements`. Use exactly one value each (`ode_measurements` always with
+`target_layer` `biomass`). Proposal ids are `P1`, `P2`, ... (`^P\d+$`;
 `P2b` is rejected), and each proposal file is named after its id (`P3_<what>.csv`).
 
 ### Proposal schemas
 
-`seed_genes`, `perturbations` and `validation_targets` proposals must be CSV/TSV tables.
-`manifest.py verify` requires every column below, non-empty on every row. Extra columns
+`seed_genes`, `perturbations`, `validation_targets` and `ode_measurements` proposals must be
+CSV/TSV tables (`ode_measurements`: `.csv` only). `manifest.py verify` requires every column
+below, non-empty on every row unless the table says it may be empty. Extra columns
 (your statistics) are allowed. Column names must be unique, the table needs at least one
 data row, and enum values are exact, lowercase, as listed (no case folding). `mutations` is no longer a kind; use `perturbations`.
 
@@ -316,6 +318,28 @@ data row, and enum values are exact, lowercase, as listed (no case folding). `mu
 | `expected` | `greater_drop`, `smaller_drop`, `decrease`, `increase` or `no_change` |
 | `evidence_strength` | `strong`, `moderate`, `weak` or `exploratory` |
 | `evidence` | source or statistic |
+
+`ode_measurements` (`target_layer` `biomass`): one measured value per row, for calibrating a
+BioMASS ODE model through the orchestrator's `ode_mapping` (approved tables only; you never
+calibrate). Units are never inferred: a missing unit is an error.
+
+| Column | Values |
+|---|---|
+| `measurement_id` | unique safe identifier (letters, digits, `_`, `-`, `.`) |
+| `readout` | the measured quantity (mapped to a model observable by the orchestrator) |
+| `condition` | the experimental condition (mapped to model overrides by the orchestrator) |
+| `time` | number >= 0 |
+| `time_unit` | the unit of `time`, e.g. `min`, `h` |
+| `dose` | number >= 0; may be empty (only dose-response rows have a dose) |
+| `dose_unit` | the unit of `dose`; empty exactly when `dose` is empty |
+| `value` | finite number |
+| `value_unit` | the unit of `value` (e.g. `a.u.`, `nM`, `%`, `fraction`); give raw values in their unit, never pre-normalised without saying so; rows that belong together (a time course and its t0 row, a test and its control) use one unit |
+| `error` | number >= 0; may be empty |
+| `error_kind` | `sd` or `sem` when `error` is set; empty when `error` is empty |
+| `n` | integer >= 1; may be empty |
+| `use` | `fit` or `holdout` (hold-out rows are scored once, after the calibration approval) |
+| `source` | the literal `proposal` on every row (this route cites the proposal itself) |
+| `locator` | where the value comes from (e.g. `outputs/tables/t1.csv row 3`, `Fig. 2B`): non-empty, no `|`, control or line-break character |
 
 Report headings (final message, saved by the recorder as `report.md`). Write the headings
 exactly `## Figures` and `## Abbreviations` (a leading section number such as `## 5. Figures`
