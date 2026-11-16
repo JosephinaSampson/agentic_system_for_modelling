@@ -30,16 +30,19 @@ def main():
         prompt = "" if prompt is None else prompt
         if not isinstance(prompt, str):
             raise ValueError("dispatch prompt must be a string")
-        # Data enter NeKo, MaBoSS and the ODE (approved calibration values) only through an approved, hash-checked
-        # DATA_INPUT line. check_data_input also runs, once and after verifying that line, the rule that no
-        # specialist is pointed at a calibration job folder or returned results (only the ode-modeler's approved
-        # proposal is exempt); the other gated roles get that rule from check_job_mentions.
+        # Data enter NeKo, MaBoSS, the ODE (approved calibration values) and PhysiCell (an approved stage-A
+        # design or stage-B projection) only through an approved, hash-checked DATA_INPUT line. check_data_input
+        # also runs, once and after verifying that line, the rule that no specialist is pointed at a calibration
+        # job folder or returned results (only the ode-modeler's approved proposal is exempt); a gated role
+        # without a DATA_INPUT form would get that rule from check_job_mentions.
         if role in DATA_INPUT_LINE:
             check_data_input(ROOT, role, prompt)
         else:
             check_job_mentions(ROOT, role, prompt)
         # ODE authoring has its own source/readiness/whole-model approval contract;
-        # this hook enforces the two sequential Boolean downstream boundaries.
+        # this hook enforces the two sequential Boolean downstream boundaries. The
+        # multicellular-configurator's line-1 STAGE_GATE is checked here, unchanged, with or without
+        # a line-2 DATA_INPUT.
         if role in {"boolean_dynamics_modeler", "multicellular_configurator"}:
             check_task(ROOT, role, prompt)
         return 0

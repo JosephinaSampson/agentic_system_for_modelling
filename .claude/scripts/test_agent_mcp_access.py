@@ -200,6 +200,19 @@ class DataHandoffInstructionTests(unittest.TestCase):
         expected = {
             ".claude/agents/network-curator.md": ("DATA_INPUT", "hgnc_symbol", "manifest.json", "absent from the database", "seeds.json"),
             ".claude/agents/boolean-dynamics-modeler.md": ("DATA_INPUT", "(context, perturbation)", "the context without the", "standalone approval"),
+            ".claude/agents/multicellular-configurator.md": (
+                "Applying an approved design or projection", 'DATA_INPUT {"design"', 'DATA_INPUT {"projection"',
+                "record_session_id", "Apply exactly the approved design", "import_maboss_handoff",
+                "list_all_available_signals()", "list_all_available_behaviors(cell_type=...)",
+                "so the invocation record holds them", "Apply exactly the entries with the matching tools",
+                "relative tolerance 1e-9", "Return `blocked` on any difference", "Never infer units",
+                "take names and values only from the verified files named on the `DATA_INPUT` line",
+                "no dispatcher check for this DATA_INPUT"),
+            ".claude/skills/physicell-workflow/SKILL.md": (
+                "`DATA_INPUT` on line 2", "apply exactly the approved design", "import each handoff onto its cell definition",
+                "so the\n  invocation record holds them", "apply exactly the entries with the matching tools", "rel 1e-9",
+                "return `blocked` on any\n  difference", "Never\ninfer units",
+                "take names and values only from the verified files named on the\n`DATA_INPUT` line"),
             ".claude/agents/scientific-reviewer.md": ("Data-stage and mapping checklist", "unmapped", "locator"),
             ".claude/agents/reproducibility-auditor.md": ("Data-stage and mapping checklist", "data-derived", "locator", "seeds"),
             ".claude/skills/validate-stage/SKILL.md": ("data_mapping", "mapping.py check", "data_seeds", "--stage-gate"),

@@ -54,6 +54,27 @@ configurations active.
 4. Apply targeted changes using the same configuration tools.
 5. Recheck `get_simulation_summary()`, export to a new session artifact.
 
+**Approved design or projection (`DATA_INPUT` on line 2):** the brief's line 2,
+after `STAGE_GATE`, names an approved `physicell_design.json` (stage A) or
+`physicell_projection.json` (stage B), its sha256, approval and
+`record_session_id`, all verified by the dispatch hook. Work only in that session
+and read only that file (and, for a design, the handoff manifests it lists). Never
+infer units; take names and values only from the verified files named on the
+`DATA_INPUT` line.
+- Design: apply exactly the approved design. Keep a basis configuration's
+  `from: "basis"` entries unchanged, create the declared substrates and cell
+  definitions, and import each handoff onto its cell definition
+  (`import_maboss_handoff()`); add no rule, link or value. Then, after the last
+  structural call, call `list_all_available_signals()` and
+  `list_all_available_behaviors(cell_type=...)` for every cell definition, so the
+  invocation record holds them (the orchestrator captures the dictionary from it).
+  Then export.
+- Projection: apply exactly the entries with the matching tools
+  (`add_physiboss_input_link()`, `add_physiboss_output_link()`,
+  `add_single_cell_rule()`, and a setting's `tool_hint`) at each quantity's model
+  value. Compare each returned stored value (rel 1e-9) and return `blocked` on any
+  difference. Then export.
+
 ## Repeatable operations and patch semantics
 
 - `add_single_substrate()` — once per substrate

@@ -60,6 +60,38 @@ Rules:
 - Export Cell Rules CSV before XML when rules exist.
 - You generate configuration only — you never execute PhysiCell. Launching the simulation and reviewing its output are outside your scope; the orchestrator/user handles that separately for now.
 
+## Applying an approved design or projection
+
+Only when line 2 of the brief, after `STAGE_GATE`, is
+`DATA_INPUT {"design": ..., "sha256": ..., "approval": ..., "record_session_id": ...}` (an approved stage-A
+`physicell_design.json`) or
+`DATA_INPUT {"projection": ..., "sha256": ..., "approval": ..., "record_session_id": ...}` (an approved stage-B
+`physicell_projection.json`). The dispatch hook has verified that line: the approval, the file re-checked on
+exactly those bytes, and `record_session_id` = the approval's PhysiCell session. Work only in the session
+`record_session_id`. Read only the file that line names (for a design, also the MaBoSS handoff manifests it
+lists). Never infer units; take names and values only from the verified files named on the `DATA_INPUT` line,
+never from prose elsewhere in the brief.
+
+- **Design.** Apply exactly the approved design. With a `basis`, start from that captured configuration and keep
+  its `from: "basis"` entries unchanged. Create the declared substrates (with their declared units) and cell
+  definitions (with their declared cycle models); a `variant_of` cell definition is created like any other. Import
+  each `intracellular` handoff onto its cell definition with `import_maboss_handoff`. Add no rule, link, parameter
+  or other value. Then, after the last structural call, call the discovery tools for the signal list
+  (`list_all_available_signals()`) and for every cell definition's behavior list
+  (`list_all_available_behaviors(cell_type=...)`), so the invocation record holds them: the orchestrator records
+  the dictionary from that record, not from your report. Then export.
+- **Projection.** Apply exactly the entries with the matching tools: `physiboss_input` with
+  `add_physiboss_input_link`, `physiboss_output` with `add_physiboss_output_link`, `rule` with
+  `add_single_cell_rule`, and `setting` with the tool its `tool_hint` names. Use each quantity's model value:
+  identity and unit_factor `value*factor`, reciprocal `factor/value`, ln2_over `factor*ln(2)/value`. Compare each
+  returned stored value with that model value (relative tolerance 1e-9). Return `blocked` on any difference, or if
+  an entry has no matching tool. Apply nothing else. Then export (Cell Rules CSV before XML when rules exist).
+
+Report every applied entry id with its requested and stored values, and label the values `data-derived` (projection
+path and sha256, approval id). The Codex runtime has no dispatcher check for this DATA_INPUT yet: return `blocked`
+there. Return `blocked` when the DATA_INPUT line, the session, a declared name or an entry does not match the
+configuration.
+
 Return the session ID, imported MaBoSS handoff and model revision, domain, substrates with units and origin, cell populations, rules and mappings, PhysiBoSS settings, user parameters and CSV setup, unresolved assumptions, warnings, and artifact paths (including any configuration bundle and its manifest).
 
 Return your full report as your final message; the recorder saves it as `runs/multicellular-configurator/{physicell_session_id}/report.md`. Do not Write report files (Claude Code blocks subagent Writes to report-style .md names). Return the structured result and exact server artifact paths for capture. Keep orchestrator interpretations under `runs/orchestrator/`; configuration generation does not verify a simulation.

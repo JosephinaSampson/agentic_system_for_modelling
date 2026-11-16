@@ -12,6 +12,8 @@ from unittest import mock
 from scripts import gate, state
 from scripts.data import mapping
 from tests.data.test_jobs_holdout import HoldoutFixture
+from tests.data.test_physicell_design import MABOSS as MC_MABOSS, REL as DESIGN_REL, SESSION as MC_SESSION
+from tests.data.test_physicell_projection import DICT as MC_DICT, PROJ as MC_PROJ, ProjectionBase
 from tests.data.test_ode_mapping import SESSION as ODE_SESSION
 from tests.data.test_mapping import (BNET, BNET_TEXT, NEKO, SOURCE, STANDALONE_BNET, STANDALONE_OUTPUTS,
                                      MappingFixture, run_cli, sha)
@@ -347,8 +349,7 @@ class ScopeTests(DataInputFixture):
 
     def test_other_specialists_unaffected(self):
         task = f"Review the evidence; see {self.seeds}.\nDATA_INPUT not-json"
-        for specialist in ("literature_reviewer", "multicellular_configurator", "data_analyst",
-                           "scientific_reviewer", "reproducibility_auditor"):
+        for specialist in ("literature_reviewer", "data_analyst", "scientific_reviewer", "reproducibility_auditor"):
             self.assertIsNone(gate.check_data_input(self.root, specialist, task))
         result = self.hook("literature-reviewer", task)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -769,7 +770,7 @@ class ReadoutOutputsTests(DataInputFixture):
         self.assertError(mapping.check(self.root, rel, stage_gate=SA_GATE), "MAPK1", "STAGE_GATE outputs")
 
 
-MENTION = "seeds and mapping files may be named only on the DATA_INPUT line"
+MENTION = "may be named only on the DATA_INPUT line"
 
 
 class OrchestratorMentionTests(DataInputFixture):
@@ -1194,6 +1195,209 @@ class OdeCalibrationInputTests(HoldoutFixture):
                 self.proposal_path.write_text(json.dumps(broken, indent=2) + "\n", encoding="utf-8")
                 self.approve_calibration(f"cal-h{n}")
                 self.refused(self.task(line=self.line(approval=f"cal-h{n}")), pattern)
+
+
+MC_OUTPUTS = ["A", "B"]
+MC_GATE = "STAGE_GATE " + json.dumps({"upstream_session_id": MC_MABOSS, "outputs": MC_OUTPUTS})
+MC_NAMES = ["default", "tumor", "tumor_hypoxic", "oxygen", "drug"]
+DESIGN_B = "runs/orchestrator/p2/physicell_design.json"
+
+
+class PhysiCellDataInputTests(ProjectionBase):
+    """The multicellular-configurator DATA_INPUT (line 2, after STAGE_GATE): an approved stage-A design or an
+    approved stage-B projection, each re-checked at dispatch and bound to its PhysiCell session."""
+
+    def setUp(self):
+        super().setUp()
+        path = self.write_projection(self.projection())
+        state.update(self.root, "record", {
+            "id": "proj-1", "kind": "stage_approval", "session_id": MC_SESSION, "stage": "physicell_projection",
+            "outputs": ["in1", "out1", "rule1", "set1"], "approved_by": "researcher", "authorization": "approved",
+            "artifact": {"path": MC_PROJ, "sha256": sha(path)}})
+
+    hook = DataInputFixture.hook
+
+    def design_line(self, rel=DESIGN_REL, digest=None, approval="design-1", session=MC_SESSION, **extra):
+        payload = {"design": rel, "sha256": digest or sha(self.root / rel), "approval": approval,
+                   "record_session_id": session, **extra}
+        return "DATA_INPUT " + json.dumps(payload)
+
+    def projection_line(self, rel=MC_PROJ, digest=None, approval="proj-1", session=MC_SESSION, **extra):
+        payload = {"projection": rel, "sha256": digest or sha(self.root / rel), "approval": approval,
+                   "record_session_id": session, **extra}
+        return "DATA_INPUT " + json.dumps(payload)
+
+    def task(self, line, gate_line=MC_GATE, tail=""):
+        return f"{gate_line}\n{line}\nApply exactly the approved file named on the DATA_INPUT line.{tail}"
+
+    def accepted(self, prompt):
+        result = self.hook("multicellular-configurator", prompt)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def refused(self, prompt, pattern):
+        result = self.hook("multicellular-configurator", prompt)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertRegex(result.stderr, pattern)
+
+    def approve_design(self, record_id, rel, data, session=MC_SESSION, stage="physicell_design"):
+        path = self.write(data, rel)
+        state.update(self.root, "record", {
+            "id": record_id, "kind": "stage_approval", "session_id": session, "stage": stage,
+            "outputs": MC_NAMES, "approved_by": "researcher", "authorization": "approved",
+            "artifact": {"path": rel, "sha256": sha(path)}})
+
+    def without_maboss(self):
+        data = json.loads(json.dumps(self.design))
+        data["intracellular"] = []
+        for item in data["coupling_plan"]:
+            item["route"] = "rules"
+        return data
+
+    def standalone_gate(self):
+        state.update(self.root, "record", {
+            "id": "sa-mc", "kind": "standalone_approval", "stage": "multicellular", "outputs": ["tissue"],
+            "artifact": {"path": "inputs/paper.txt", "sha256": sha(self.root / "inputs/paper.txt")},
+            "approved_by": "researcher", "authorization": "researcher: build my tissue model"})
+        return "STAGE_GATE " + json.dumps({"standalone_decision_id": "sa-mc", "outputs": ["tissue"]})
+
+    def test_both_forms_accepted(self):
+        self.accepted(self.task(self.design_line()))
+        self.accepted(self.task(self.projection_line()))
+        self.assertEqual(self.hook("plugin:multicellular-configurator",
+                                   self.task(self.design_line())).returncode, 0)
+        found = gate.check_data_input(self.root, "multicellular_configurator", self.task(self.design_line()))
+        self.assertEqual((found["design"], found["approval_id"], found["physicell_session"]),
+                         (DESIGN_REL, "design-1", MC_SESSION))
+        found = gate.check_data_input(self.root, "multicellular_configurator", self.task(self.projection_line()))
+        self.assertEqual((found["projection"], found["approval_id"], found["physicell_session"]),
+                         (MC_PROJ, "proj-1", MC_SESSION))
+
+    def test_stage_gate_only_briefs_unchanged(self):
+        self.accepted(f"{MC_GATE}\nImport the approved MaBoSS handoff onto tumor and export.")
+        self.assertIsNone(gate.check_data_input(self.root, "multicellular_configurator", f"{MC_GATE}\nConfigure."))
+        self.refused("Configure the tissue.", "STAGE_GATE")
+        self.refused(f"{self.design_line()}\nConfigure.", "STAGE_GATE|line 2")
+        bad_gate = "STAGE_GATE " + json.dumps({"upstream_session_id": MC_MABOSS, "outputs": ["A"]})
+        self.refused(self.task(self.design_line(), gate_line=bad_gate), "approval")
+        self.refused(self.task(self.projection_line(), gate_line=bad_gate), "approval")
+
+    def test_wrong_sha_refused(self):
+        self.refused(self.task(self.design_line(digest="0" * 64)), "sha256")
+        self.refused(self.task(self.projection_line(digest="0" * 64)), "sha256")
+        self.refused(self.task(self.design_line(digest="ABC")), "sha256")
+        (self.root / MC_PROJ).write_text((self.root / MC_PROJ).read_text() + "\n")
+        self.refused(self.task(self.projection_line()), "sha256")
+
+    def test_wrong_stage_approval_refused(self):
+        self.refused(self.task(self.design_line(approval="proj-1")), "physicell_design")
+        self.refused(self.task(self.projection_line(approval="design-1")), "physicell_projection")
+        self.refused(self.task(self.design_line(approval="missing")), "decision_id")
+        self.approve_design("design-x", DESIGN_B, self.design, stage="physicell_projection")
+        self.refused(self.task(self.design_line(rel=DESIGN_B, approval="design-x")), "physicell_design")
+
+    def test_record_session_id_mismatch_refused(self):
+        self.refused(self.task(self.design_line(session="other-session")), "record_session_id")
+        self.refused(self.task(self.projection_line(session="other-session")), "record_session_id")
+        for session in ("", 1, None):
+            with self.subTest(session=session):
+                self.refused(self.task(self.design_line(session=session)), "record_session_id")
+                self.refused(self.task(self.projection_line(session=session)), "record_session_id")
+
+    def test_design_handoff_must_be_the_stage_gate_upstream(self):
+        # Review Focus 5: an approved, exported MaBoSS session that is not the design's handoff
+        self.make_handoff("maboss-other")
+        other_gate = "STAGE_GATE " + json.dumps({"upstream_session_id": "maboss-other", "outputs": MC_OUTPUTS})
+        self.accepted(f"{other_gate}\nImport the approved handoff.")  # the STAGE_GATE itself passes
+        self.refused(self.task(self.design_line(), gate_line=other_gate), f"{MC_MABOSS}.*maboss-other")
+        # handoffs from two MaBoSS sessions: refused, naming both
+        hypoxic = self.make_handoff("maboss-hyp", cell_type="tumor_hypoxic")
+        data = json.loads(json.dumps(self.design))
+        data["intracellular"].append({"cell_definition": "tumor_hypoxic",
+                                      "maboss": {"handoff": hypoxic["path"], "sha256": hypoxic["sha256"]}})
+        self.write(data, DESIGN_B)
+        self.assertEqual(self.errors_at(DESIGN_B), [])
+        self.approve_design("design-2", DESIGN_B, data)
+        self.refused(self.task(self.design_line(rel=DESIGN_B, approval="design-2")), "maboss-hyp.*maboss-session")
+        # a design without MaBoSS handoffs under an upstream STAGE_GATE, or with them under a standalone one
+        self.approve_design("design-3", "runs/orchestrator/p3/physicell_design.json", self.without_maboss())
+        line = self.design_line(rel="runs/orchestrator/p3/physicell_design.json", approval="design-3")
+        self.refused(self.task(line), "no MaBoSS handoff")
+        sa_gate = self.standalone_gate()
+        self.accepted(self.task(line, gate_line=sa_gate))
+        self.refused(self.task(self.design_line(), gate_line=sa_gate), "standalone.*MaBoSS")
+
+    def errors_at(self, rel):
+        from scripts.physicell import physicell_design
+        return physicell_design.check(self.root, rel)
+
+    def test_design_failing_check_refused(self):
+        data = json.loads(json.dumps(self.design))
+        data["unmapped"] = [{"item": "x", "reason": "TODO"}]
+        self.approve_design("design-bad", DESIGN_B, data)
+        self.refused(self.task(self.design_line(rel=DESIGN_B, approval="design-bad")), "check failed.*TODO")
+        # Review Focus 5: the approved design's MaBoSS handoff was superseded after approval
+        self.accepted(self.task(self.design_line()))
+        state.update(self.root, "registry-supersede", {"session_id": MC_MABOSS})
+        self.refused(self.task(self.design_line()), "design check failed.*maboss-session.*active")
+        self.refused(self.task(self.projection_line()), "projection check failed.*no longer passes")
+
+    def test_projection_rechecked_and_design_approval_enforced(self):
+        # a projection whose design approval is missing, though the projection itself is approved
+        data = self.projection()
+        data["design"]["approval"] = "nope"
+        path = self.root / "runs/orchestrator/p4/physicell_projection.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(data, indent=2))
+        rel = path.relative_to(self.root).as_posix()
+        state.update(self.root, "record", {
+            "id": "proj-2", "kind": "stage_approval", "session_id": MC_SESSION, "stage": "physicell_projection",
+            "outputs": ["in1", "out1", "rule1", "set1"], "approved_by": "researcher", "authorization": "approved",
+            "artifact": {"path": rel, "sha256": sha(path)}})
+        self.refused(self.task(self.projection_line(rel=rel, approval="proj-2")), "design approval nope")
+        # the dictionary binding is re-checked too
+        dictionary = self.root / MC_DICT
+        dictionary.write_text(dictionary.read_text() + "\n")
+        self.refused(self.task(self.projection_line()), "dictionary")
+
+    def test_extra_missing_or_mixed_keys_refused(self):
+        design = json.loads(self.design_line()[len("DATA_INPUT "):])
+        projection = json.loads(self.projection_line()[len("DATA_INPUT "):])
+        cases = {"extra": {**design, "accept": ["x"]}, "extra-projection": {**projection, "values": {}},
+                 "mixed": {**design, "projection": MC_PROJ}, "both": {**design, **projection}}
+        for drop in ("sha256", "approval", "record_session_id", "design"):
+            cases[f"no-{drop}"] = {k: v for k, v in design.items() if k != drop}
+        cases["no-projection-session"] = {k: v for k, v in projection.items() if k != "record_session_id"}
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                self.refused(self.task("DATA_INPUT " + json.dumps(payload)), "exactly")
+        for line in ("DATA_INPUT not-json", "DATA_INPUT []", 'DATA_INPUT {"design": 1}'):
+            with self.subTest(line=line):
+                self.refused(self.task(line), "blocked")
+
+    def test_payload_like_mentions_refused(self):
+        self.refused(self.task(self.design_line(), tail=f"\n{self.projection_line()}"), "line 4")
+        self.refused(self.task(self.design_line(), tail='\nDATA_INPUT {"design": "x"}'), "DATA_INPUT payload")
+        self.refused(f"{MC_GATE}\nConfigure.\n{self.design_line()}", "line 2")
+        self.accepted(self.task(self.design_line(), tail=" Use the design as defined in the DATA_INPUT line."))
+
+    def test_other_physicell_files_named_in_prose_refused(self):
+        self.write(self.design, DESIGN_B)
+        # the DATA_INPUT artifact itself may be named again
+        self.accepted(self.task(self.design_line(), tail=f" See {DESIGN_REL}."))
+        self.accepted(self.task(self.projection_line(), tail=f" See {MC_PROJ}."))
+        for line, tail, kind in ((self.design_line(), f" Compare {DESIGN_B}.", "physicell_design"),
+                                 (self.design_line(), f" Then apply {MC_PROJ}.", "physicell_projection"),
+                                 (self.design_line(), f" Names: {MC_DICT}.", "physicell_dictionary"),
+                                 (self.projection_line(), f" Design: {DESIGN_REL}.", "physicell_design"),
+                                 (self.projection_line(), f" Names: {MC_DICT}.", "physicell_dictionary"),
+                                 (self.projection_line(), " Folder: runs/orchestrator/p1/", "physicell_")):
+            with self.subTest(tail=tail):
+                self.refused(self.task(line, tail=tail), f"{kind}.*{MENTION}")
+        # without a DATA_INPUT line, no such file may be named either
+        self.refused(f"{MC_GATE}\nBuild the design {DESIGN_REL}.", "physicell_design.*no DATA_INPUT line")
+        # nor a data-analyst path or session
+        self.refused(f"{MC_GATE}\nUse runs/data-analyst/x.", "data-analyst")
+        self.refused(self.task(self.design_line(), tail=" data-20990101T000000Z-deadbeef"), "data-analyst")
 
 
 if __name__ == "__main__":

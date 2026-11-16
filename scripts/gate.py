@@ -7,7 +7,7 @@ import json
 import os
 import posixpath
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sys
 import unicodedata
 
@@ -275,6 +275,7 @@ DATA_REFUSAL = "brief references data-analyst artifacts without a DATA_INPUT lin
 # Specialist -> (0-based line index of its DATA_INPUT line, human label).
 DATA_INPUT_LINE = {"network_curator": (0, "network-curator DATA_INPUT must be line 1 of the prompt"),
                    "boolean_dynamics_modeler": (1, "boolean-dynamics-modeler DATA_INPUT must be line 2, after STAGE_GATE"),
+                   "multicellular_configurator": (1, "multicellular-configurator DATA_INPUT must be line 2, after STAGE_GATE"),
                    "ode_modeler": (0, "ode-modeler DATA_INPUT must be line 1 of the prompt")}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -549,6 +550,94 @@ def _check_ode_calibration_input(root, value):
             "outputs": list(accept)}, set()
 
 
+PHYSICELL_FORMS = {"design": {"design", "sha256", "approval", "record_session_id"},
+                   "projection": {"projection", "sha256", "approval", "record_session_id"}}
+
+
+def _maboss_sessions(design):
+    """The MaBoSS sessions (runs/boolean-dynamics-modeler/<session>/...) of a checked design's handoffs."""
+    return sorted({PurePosixPath(item["maboss"]["handoff"]).parts[2] for item in design["intracellular"]})
+
+
+def _check_design_upstream(root, design, first_line):
+    """Bind a checked design's MaBoSS handoffs to the line-1 STAGE_GATE of the configurator brief.
+
+    upstream_session_id: the design imports at least one handoff and every handoff lives under
+    runs/boolean-dynamics-modeler/<that session>/ (the design check already proved each one an exported,
+    reviewed and approved maboss-to-physicell handoff of its session, with gate.check). A design mixing several
+    MaBoSS sessions is refused, naming them. standalone_decision_id: the design imports no MaBoSS handoff.
+    check_task resolves the STAGE_GATE (it runs again, unchanged, in the dispatch hook).
+    """
+    gate_result = check_task(root, "multicellular_configurator", first_line)
+    sessions = _maboss_sessions(design)
+    if "standalone_decision_id" in gate_result:
+        if sessions:
+            raise ValueError(f"STAGE_GATE names standalone_decision_id {gate_result['standalone_decision_id']}, so the "
+                             f"design may import no MaBoSS handoff, but it imports handoffs of MaBoSS session(s) "
+                             f"{', '.join(sessions)}; dispatch it with that MaBoSS session's upstream_session_id STAGE_GATE")
+        return
+    anchor = gate_result["upstream_session_id"]
+    if not sessions:
+        raise ValueError(f"STAGE_GATE names MaBoSS upstream_session_id {anchor}, but the design imports no MaBoSS "
+                         "handoff; a design without MaBoSS models is dispatched with a standalone_decision_id STAGE_GATE")
+    if sessions != [anchor]:
+        raise ValueError(f"design MaBoSS handoffs come from session(s) {', '.join(sessions)}, but STAGE_GATE names "
+                         f"upstream_session_id {anchor}; every design handoff must be under "
+                         f"runs/boolean-dynamics-modeler/{anchor}/")
+
+
+def _check_physicell_input(root, value, first_line):
+    """The multicellular-configurator forms: an approved stage-A design or an approved stage-B projection.
+
+    {"design", "sha256", "approval", "record_session_id"}: the physicell_design.json is re-checked
+    (physicell_design.load_and_check, no problem allowed) on exactly the approved bytes, its physicell_design
+    approval binds path and sha256, record_session_id is the approval's session_id, and its MaBoSS handoffs are
+    the STAGE_GATE upstream's (_check_design_upstream).
+    {"projection", "sha256", "approval", "record_session_id"}: the physicell_projection.json is re-checked
+    (physicell_projection.load_and_check: capture, dictionary, the design and its approval), its
+    physicell_projection approval binds path and sha256, and record_session_id is the approval's session_id and
+    the projection's capture session. The STAGE_GATE stays the plain multicellular check (check_task).
+    The check runs before the approval is trusted: the approval's session derivation assumes a checked file.
+    """
+    form = next((name for name, keys in PHYSICELL_FORMS.items() if set(value) == keys), None)
+    if form is None:
+        raise ValueError("multicellular-configurator DATA_INPUT requires exactly design, sha256, approval and "
+                         "record_session_id, or exactly projection, sha256, approval and record_session_id; "
+                         f"got {sorted(value)}")
+    rel, digest, approval_id, session = value[form], value["sha256"], value["approval"], value["record_session_id"]
+    if not all(isinstance(v, str) and v for v in (rel, digest, approval_id)):
+        raise ValueError(f"DATA_INPUT {form}, sha256 and approval must be nonempty strings")
+    if not isinstance(session, str) or not session:
+        raise ValueError("DATA_INPUT record_session_id must be a nonempty string (the PhysiCell session)")
+    if not SHA256.fullmatch(digest):
+        raise ValueError(f"DATA_INPUT {form} needs a lowercase hex sha256")
+    if form == "design":
+        from scripts.physicell import physicell_design as module
+        require = approvals.require_physicell_design_approval
+    else:
+        from scripts.physicell import physicell_projection as module
+        require = approvals.require_physicell_projection_approval
+    # Check exactly the approved bytes: one read gives both the parsed file and its hash.
+    data, actual, errors = module.load_and_check(root, rel)
+    if actual != digest:
+        raise ValueError(f"{rel} has sha256 {actual[:12]}, not the DATA_INPUT sha256 {digest[:12]} "
+                         f"(changed since approval {approval_id}?)")
+    if errors:
+        raise ValueError(f"{form} check failed for {rel}: " + "; ".join(errors))
+    record = require(root, approval_id, rel, digest)  # runs validate_record
+    if session != record.get("session_id"):
+        raise ValueError(f"DATA_INPUT record_session_id {session!r} must be the PhysiCell session "
+                         f"{record.get('session_id')} of approval {approval_id}")
+    if form == "design":
+        _check_design_upstream(root, data, first_line)
+    else:
+        capture = PurePosixPath(data["capture"]["path"]).parts[2]
+        if session != capture:
+            raise ValueError(f"DATA_INPUT record_session_id {session!r} must be the session {capture} of the "
+                             f"projection's capture {data['capture']['path']}")
+    return {form: rel, "sha256": digest, "approval_id": approval_id, "physicell_session": session}, set()
+
+
 def _check_ode_session_mentions(root, text, session):
     """An ode-modeler brief with a verified calibration DATA_INPUT may not name any other existing BioMASS
     session (a directory name under runs/ode-modeler/) anywhere, in any case: the modeler applies the approved
@@ -570,12 +659,12 @@ def _check_ode_session_mentions(root, text, session):
                              "name no other ODE session")
 
 
-# Seeds and mapping files reach NeKo and MaBoSS only as the DATA_INPUT artifact. Every
-# runs/orchestrator path the brief mentions (any separator or case, after the detection
-# normalisation) is resolved in the repository: a regular file, or each regular file directly
-# inside a mentioned directory under runs/orchestrator (a glob names its directory; never
-# recursive), whose content is a seeds or mapping file, whatever its name, must be exactly
-# the artifact the DATA_INPUT line names.
+# Model input files (seeds, mapping, ode_mapping, calibration proposal, PhysiCell design, projection
+# and dictionary) reach a specialist only as the DATA_INPUT artifact. Every runs/orchestrator path
+# the brief mentions (any separator or case, after the detection normalisation) is resolved in the
+# repository: a regular file, or each regular file directly inside a mentioned directory under
+# runs/orchestrator (a glob names its directory; never recursive), whose content is a model input
+# file (_model_input_kind), whatever its name, must be exactly the artifact the DATA_INPUT line names.
 ORCHESTRATOR_START = re.compile(r"runs[\\/]+orchestrator(?![\w-])", re.I)
 PATH_TOKEN = re.compile(r"[^\s`'\"<>|]+")
 GLOB = re.compile(r"[*?\[]")
@@ -583,7 +672,8 @@ JSON_END = re.compile(r"\.json", re.I)
 LINE_BREAK = re.compile(r"[\n\r\x0b\x0c\x1c-\x1e\x85  ]")
 TRAILING = ".,;:!?)]}>'\"`"
 SPACED_CANDIDATES = 5  # line prefixes ending in .json tried per mention (names with spaces)
-MENTION_RULE = "seeds and mapping files may be named only on the DATA_INPUT line; see CLAUDE.md"
+MENTION_RULE = ("model input files (seeds, mapping, ode_mapping, calibration proposal, PhysiCell design, projection "
+                "and dictionary) may be named only on the DATA_INPUT line; see CLAUDE.md")
 
 
 def _resolve_mention(root, mention):
@@ -691,8 +781,12 @@ def _is_seeds(data):
         isinstance(x, str) or (isinstance(x, dict) and "hgnc_symbol" in x) for x in seeds)
 
 
+MODEL_INPUT_KINDS = ("ode_mapping", "calibration_proposal", "physicell_design", "physicell_projection",
+                     "physicell_dictionary")
+
+
 def _model_input_kind(path):
-    """"seeds", "mapping", "ode_mapping" or "calibration_proposal" when the file's content has that schema's shape, else None.
+    """"seeds", "mapping" or one of MODEL_INPUT_KINDS when the file's content has that schema's shape, else None.
 
     Unreadable or non-JSON files are neither; any other failure propagates (fail closed).
     """
@@ -703,7 +797,7 @@ def _model_input_kind(path):
         return None
     if not isinstance(data, dict):
         return None
-    if data.get("kind") in ("ode_mapping", "calibration_proposal"):
+    if data.get("kind") in MODEL_INPUT_KINDS:
         return data["kind"]
     if _is_seeds(data):
         return "seeds"
@@ -760,8 +854,9 @@ def _check_mentions(root, text, artifact_rel, model_inputs=True):
 
     Job rule (every gated specialist): no calibration job file or returned result, except the ode-modeler's
     verified DATA_INPUT proposal (`artifact_rel` when it is a calibration_proposal.json) and its own job folder.
-    Model-input rule (`model_inputs`, the DATA_INPUT roles): no seeds, mapping, ode_mapping or calibration
-    proposal file other than `artifact_rel` (see _check_orchestrator_mentions).
+    Model-input rule (`model_inputs`, the DATA_INPUT roles): no seeds, mapping, ode_mapping, calibration
+    proposal or PhysiCell design, projection or dictionary file other than `artifact_rel`
+    (see _check_orchestrator_mentions).
     """
     root = Path(root).resolve()
     allowed = set()
@@ -836,11 +931,12 @@ def _payload_mentions(lines, canonical):
 
 
 def check_data_input(root, specialist, task):
-    """Check the DATA_INPUT line by which network-curator and boolean-dynamics-modeler take data.
+    """Check the DATA_INPUT line by which the network-curator, boolean-dynamics-modeler, ode-modeler and
+    multicellular-configurator take data.
 
     Data reach these specialists only as approved, hash-checked artifacts named on a
-    literal DATA_INPUT line (line 1 for network-curator, line 2 after STAGE_GATE for
-    boolean-dynamics-modeler); data are never pasted or pointed at in prose. Only that
+    literal DATA_INPUT line (line 1 for network-curator and ode-modeler, line 2 after STAGE_GATE for
+    boolean-dynamics-modeler and multicellular-configurator); data are never pasted or pointed at in prose. Only that
     line may carry a DATA_INPUT payload: a payload-like mention elsewhere (one starting
     its line, or with `{` within 16 characters or on the next non-blank line) is refused
     with its line number and a quote, while a
@@ -856,6 +952,9 @@ def check_data_input(root, specialist, task):
     _check_ode_calibration_input); the brief may name no existing BioMASS session other than record_session_id
     (_check_ode_session_mentions). Other prose is not parsed for values: the modeler takes the session and the
     accepted names only from the verified line and ignores prose (ode-modeler.md).
+    multicellular-configurator: {"design", "sha256", "approval", "record_session_id"} (an approved stage-A
+    physicell_design.json) or {"projection", "sha256", "approval", "record_session_id"} (an approved stage-B
+    physicell_projection.json); see _check_physicell_input.
 
     The brief's runs/orchestrator mentions are then scanned once (_check_mentions): the job-file rule and the
     model-input rule, with only the verified artifact exempt.
@@ -889,12 +988,17 @@ def check_data_input(root, specialist, task):
     elif specialist == "ode_modeler":
         result, sessions = _check_ode_calibration_input(root, value)
         _check_ode_session_mentions(root, text, result["ode_session"])
+    elif specialist == "multicellular_configurator":
+        result, sessions = _check_physicell_input(root, value, lines[0])
     else:
         result, sessions = _check_maboss_data_input(root, value, lines[0])
     other = sorted(_data_sessions_named(text) - sessions)
     if other:
         raise ValueError(f"brief names data-analyst session(s) {', '.join(other)} outside its DATA_INPUT")
-    _check_mentions(root, text, result.get("seeds") or result.get("mapping") or result.get("calibration"))
+    # The verified artifact (none for the NeKo proposals form, whose files live under runs/data-analyst).
+    artifact = next((result[key] for key in ("seeds", "mapping", "calibration", "design", "projection")
+                     if key in result), None)
+    _check_mentions(root, text, artifact)
     return result
 
 
