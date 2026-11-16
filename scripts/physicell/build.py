@@ -4,11 +4,12 @@
   build.py --template template|template_BM [--version 1.14.2] [--dest DIR] [--verification FILE] [--jobs N]
 
 Steps, in order (the toolchain and the verification are checked before anything is downloaded):
-  toolchain  make, tar, curl (or git), python3 (template_BM only) and a compiler that builds a tiny OpenMP
+  toolchain  make, curl (or git), python3 (template_BM only) and a compiler that builds a tiny OpenMP
              program: $PHYSICELL_CPP, then g++, then g++-NN. Apple clang alone is refused with the Homebrew fix.
-  download   https://github.com/MathCancer/PhysiCell/archive/refs/tags/<version>.tar.gz extracted to
-             <dest>/PhysiCell-<version>-<template>/ (default dest ~/PhysiCell); an existing folder is refused,
-             nothing is overwritten. The archive sha256 is recorded (trust on first use).
+  download   https://github.com/MathCancer/PhysiCell/archive/refs/tags/<version>.tar.gz extracted with Python
+             tarfile to <dest>/PhysiCell-<version>-<template>/ (default dest ~/PhysiCell). A member pre-scan refuses
+             absolute or `..` names, links leaving the folder and special files; then filter="data". An existing
+             folder is refused, nothing is overwritten. The archive sha256 is recorded (trust on first use).
   template   `make <template>` in the extracted folder (template_BM fetches MaBoSS: needs internet).
   settings   optional, --verification runs/orchestrator/<p>/physicell_verification.*.json: it must be a
              physicell_verification, schema_version 1, passed true, and its `after` capture must re-bind byte for
@@ -31,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -117,9 +119,9 @@ def _compiler(env: dict) -> tuple[str, str]:
 
 
 def toolchain(env: dict, template: str = "template") -> dict:
-    """{compiler, compiler_version, openmp, make, fetch, python3, tar}; ValueError with a one-line remedy."""
+    """{compiler, compiler_version, openmp, make, fetch, python3}; ValueError with a one-line remedy."""
     found = {}
-    for tool in ("make", "tar"):
+    for tool in ("make",):
         found[tool] = _which(tool, env)
         if found[tool] is None:
             raise ValueError(f"{tool} not found on PATH: install it (macOS: xcode-select --install; "
@@ -132,7 +134,7 @@ def toolchain(env: dict, template: str = "template") -> dict:
         raise ValueError("python3 not found on PATH: template_BM needs it to fetch MaBoSS")
     compiler, version = _compiler(env)
     return {"compiler": compiler, "compiler_version": version, "openmp": True, "make": found["make"],
-            "tar": found["tar"], "fetch": "curl" if curl else "git", "python3": python3}
+            "fetch": "curl" if curl else "git", "python3": python3}
 
 
 # ---------------------------------------------------------------- verified settings
@@ -177,9 +179,18 @@ def _package_files(root: Path, after: dict) -> dict[str, bytes]:
     parents = PurePosixPath(after["xml_path"]).parents  # <capture>/package/config, <capture>/package, <capture>
     folder = root / parents[0]
     manifest = strict_json((root / parents[2] / "capture.json").read_bytes())
-    wanted = {sx.XML_NAME: after["xml_sha256"]}
-    for dep in manifest["dependencies"]:
-        wanted.setdefault(PurePosixPath(dep["path"]).name, dep["sha256"])
+    deps = manifest.get("dependencies") if isinstance(manifest, dict) else None
+    if not isinstance(deps, list):
+        raise ValueError("the capture manifest lists no dependencies array")
+    wanted, origin = {sx.XML_NAME: after["xml_sha256"]}, {sx.XML_NAME: f"package/config/{sx.XML_NAME}"}
+    for dep in deps:
+        if not isinstance(dep, dict) or not isinstance(dep.get("path"), str) or not isinstance(dep.get("sha256"), str):
+            raise ValueError("the capture manifest has a malformed dependency entry")
+        name = PurePosixPath(dep["path"]).name
+        if name in wanted:
+            raise ValueError(f"dependencies {origin[name]} and {dep['path']} share the file name {name}: "
+                             "they would overwrite each other in config/")
+        wanted[name], origin[name] = dep["sha256"], dep["path"]
     files = {}
     for name, digest in wanted.items():
         path = folder / name
@@ -216,12 +227,43 @@ def copy_settings(root: Path, project: Path, verification_rel: str, verification
 
 # ---------------------------------------------------------------- download and build
 
+def _scan_members(archive: tarfile.TarFile, stage: Path) -> None:
+    """ValueError for any member that could write outside `stage` or is not a plain file, directory or link."""
+    base = stage.resolve()
+    for member in archive.getmembers():
+        name = member.name
+        if name.startswith("/") or "\\" in name or ".." in PurePosixPath(name).parts:
+            raise ValueError(f"unsafe archive member name {name!r}")
+        if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+            raise ValueError(f"archive member {name!r} is a special file")
+        if member.issym() or member.islnk():
+            link = PurePosixPath(member.linkname)
+            if member.issym():
+                target = (base / PurePosixPath(name).parent / link).resolve()
+            else:  # a hardlink target is a path from the archive root
+                target = (base / link).resolve()
+            if link.is_absolute() or not target.is_relative_to(base):
+                raise ValueError(f"archive member {name!r} links to {member.linkname!r}, outside the extraction folder")
+
+
+def _extract(archive_path: Path, stage: Path) -> None:
+    with tarfile.open(archive_path, "r:gz") as archive:
+        _scan_members(archive, stage)
+        if hasattr(tarfile, "data_filter"):
+            archive.extractall(stage, filter="data")
+        else:
+            archive.extractall(stage)
+
+
 def download(tool: dict, env: dict, version: str, template: str, dest: Path) -> tuple[Path, str | None]:
     final = dest / f"PhysiCell-{version}-{template}"
     if final.exists() or final.is_symlink():
         raise ValueError(f"{final} already exists: it is never overwritten (choose another --dest)")
-    dest.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".physicell-download-", dir=dest))
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix=".physicell-download-", dir=dest))
+    except OSError as exc:
+        raise StepFailed("download", f"cannot create {dest}: {exc}") from exc
     try:
         digest = None
         archive = stage / "PhysiCell.tar.gz"
@@ -231,9 +273,10 @@ def download(tool: dict, env: dict, version: str, template: str, dest: Path) -> 
             if done.returncode != 0 or not archive.is_file():
                 raise StepFailed("download", f"curl failed ({done.returncode})", _tail(_output(done)))
             digest = sha256_file(archive)
-            done = _run(["tar", "-xzf", str(archive), "-C", str(stage)], env)
-            if done.returncode != 0:
-                raise StepFailed("download", f"tar failed ({done.returncode})", _tail(_output(done)))
+            try:
+                _extract(archive, stage)
+            except (ValueError, tarfile.TarError, OSError) as exc:
+                raise StepFailed("download", f"archive refused: {exc}") from exc
         else:
             argv = ["git", "clone", "--depth", "1", "--branch", version,
                     "https://github.com/MathCancer/PhysiCell.git", str(stage / f"PhysiCell-{version}")]
@@ -245,13 +288,18 @@ def download(tool: dict, env: dict, version: str, template: str, dest: Path) -> 
             raise StepFailed("download", f"the archive has no top folder PhysiCell-{version}/")
         top.rename(final)
         return final, digest
+    except OSError as exc:
+        raise StepFailed("download", f"{type(exc).__name__}: {exc}") from exc
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
 
 def _make(step: str, argv: list[str], project: Path, env: dict, steps: list) -> str:
     began = time.monotonic()
-    done = _run(argv, env, cwd=project)
+    try:
+        done = _run(argv, env, cwd=project)
+    except OSError as exc:
+        raise StepFailed(step, f"`{' '.join(argv)}` could not run: {exc}") from exc
     out = _output(done)
     steps.append({"step": step, "argv": argv, "returncode": done.returncode,
                   "seconds": round(time.monotonic() - began, 1), "tail": _tail(out)})
@@ -285,9 +333,17 @@ def _markdown(report: dict) -> str:
 def _write_report(root: Path, report: dict, stamp: str) -> Path:
     parent = root / "runs" / "orchestrator" / "physicell-build"
     reject_symlinks(parent, root)
-    folder = parent / f"{stamp}-{report['template']}"
-    reject_symlinks(folder, root)
-    folder.mkdir(parents=True, exist_ok=False)
+    parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(1, 100):  # two builds in the same second get -2, -3, ...
+        folder = parent / (f"{stamp}-{report['template']}" + (f"-{attempt}" if attempt > 1 else ""))
+        reject_symlinks(folder, root)
+        try:
+            folder.mkdir()
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise ValueError("cannot allocate a report folder")
     (folder / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     (folder / "report.md").write_text(_markdown(report), encoding="utf-8")
     return folder

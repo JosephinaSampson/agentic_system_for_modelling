@@ -26,7 +26,7 @@ From the repository root:
 
 `python3 scripts/physicell/build.py --template template|template_BM [--version 1.14.2] [--dest DIR] [--jobs N]`
 
-- It checks the toolchain before downloading anything: `make`, `tar`, `curl` (or `git`),
+- It checks the toolchain before downloading anything: `make`, `curl` (or `git`),
   and a compiler that builds an OpenMP program (`$PHYSICELL_CPP`, `g++`, then `g++-NN`).
   On macOS with only Apple clang it stops and prints the fix (`brew install gcc`,
   `export PHYSICELL_CPP=g++-NN`). Relay that line to the researcher.

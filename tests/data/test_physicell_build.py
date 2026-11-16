@@ -9,6 +9,7 @@ import io
 import json
 import os
 import stat
+import tarfile
 import subprocess
 import sys
 import tempfile
@@ -41,12 +42,8 @@ args = sys.argv[1:]
 if os.environ.get("FAKE_CURL_FAIL"):
     print("curl: (6) could not resolve host"); sys.exit(6)
 pathlib.Path(os.environ["FAKE_LOG"]).open("a").write("curl " + args[-1] + "\\n")
-pathlib.Path(args[args.index("-o") + 1]).write_bytes(b"fake archive")
-""",
-    # the "archive" extracts to PhysiCell-<version>/ with a Makefile-less tree
-    "tar": """
-dest = pathlib.Path(sys.argv[sys.argv.index("-C") + 1])
-(dest / os.environ.get("FAKE_TOP", "PhysiCell-1.14.2")).mkdir()
+import shutil
+shutil.copy(os.environ["FAKE_ARCHIVE"], args[args.index("-o") + 1])
 """,
     "make": """
 args = sys.argv[1:]
@@ -91,9 +88,21 @@ class Base(unittest.TestCase):
         self.bin.mkdir()
         self.log = self.tmp / "log.txt"
         self.log.write_text("")
-        for name in ("curl", "tar", "make", "python3", "g++"):
+        for name in ("curl", "make", "python3", "g++"):
             self.fake(name)
-        self.env = {"PATH": str(self.bin), "FAKE_LOG": str(self.log)}
+        self.archive_path = self.tmp / "archive.tar.gz"
+        self.env = {"PATH": str(self.bin), "FAKE_LOG": str(self.log), "FAKE_ARCHIVE": str(self.archive_path)}
+        self.archive()
+
+    def archive(self, top="PhysiCell-1.14.2", extra=()):
+        """Write the fake release archive: <top>/README plus `extra` TarInfo members (info, data)."""
+        with tarfile.open(self.archive_path, "w:gz") as tf:
+            info = tarfile.TarInfo(f"{top}/README")
+            data = b"physicell"
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+            for member, payload in extra:
+                tf.addfile(member, io.BytesIO(payload) if payload is not None else None)
 
     def fake(self, name, body=None):
         path = self.bin / name
@@ -169,7 +178,7 @@ class BuildTests(Base):
         self.assertTrue((project / "project").is_file())
         self.assertEqual(report["status"], "ok")
         self.assertEqual(report["project_sha256"], sha(b"binary"))
-        self.assertEqual(report["archive_sha256"], sha(b"fake archive"))
+        self.assertEqual(report["archive_sha256"], sha(self.archive_path.read_bytes()))
         self.assertEqual(report["run_command"], "./project config/PhysiCell_settings.xml")
         self.assertEqual(report["url"], "https://github.com/MathCancer/PhysiCell/archive/refs/tags/1.14.2.tar.gz")
         self.assertEqual(self.report(folder), report)
@@ -182,7 +191,7 @@ class BuildTests(Base):
         self.assertEqual([p.name for p in self.dest.iterdir()], ["PhysiCell-1.14.2-template"])
 
     def test_template_bm_and_version(self):
-        self.env["FAKE_TOP"] = "PhysiCell-1.15.0"
+        self.archive("PhysiCell-1.15.0")
         folder, report = self.build("template_BM", version="1.15.0")
         self.assertTrue((self.dest / "PhysiCell-1.15.0-template_BM/project").is_file())
         self.assertIn("make template_BM", self.log.read_text())
@@ -233,6 +242,43 @@ class BuildTests(Base):
                 self.assertEqual(build.main(argv), 1)  # destination now exists
             self.assertIn("already exists", err.getvalue())
 
+    def test_extracted_tree_is_the_release(self):
+        self.build()
+        self.assertEqual((self.dest / "PhysiCell-1.14.2-template/README").read_text(), "physicell")
+
+    def test_os_error_while_running_make_is_a_failed_report(self):
+        real = subprocess.run
+
+        def boom(argv, *args, **kwargs):
+            if argv[0] == "make":
+                raise PermissionError("denied")
+            return real(argv, *args, **kwargs)
+
+        with mock.patch.object(build.subprocess, "run", side_effect=boom):
+            _, report = self.build()
+        self.assertEqual((report["status"], report["failed_step"]), ("failed", "make template"))
+        self.assertIn("denied", report["error"])
+
+    def test_os_error_while_downloading_is_a_failed_report(self):
+        real = subprocess.run
+
+        def boom(argv, *args, **kwargs):
+            if argv[0] == "curl":
+                raise FileNotFoundError("curl vanished")
+            return real(argv, *args, **kwargs)
+
+        with mock.patch.object(build.subprocess, "run", side_effect=boom):
+            _, report = self.build()
+        self.assertEqual((report["status"], report["failed_step"]), ("failed", "download"))
+        self.assertEqual([p.name for p in self.dest.iterdir()], [])
+
+    def test_unwritable_destination_is_a_failed_report(self):
+        blocker = self.tmp / "blocker"
+        blocker.write_text("a file, not a folder")
+        self.dest = blocker / "sub"
+        _, report = self.build()
+        self.assertEqual((report["status"], report["failed_step"]), ("failed", "download"))
+
     def test_run_command_is_never_executed(self):
         real, calls = subprocess.run, []
 
@@ -246,6 +292,48 @@ class BuildTests(Base):
         for argv in calls:
             self.assertNotIn(os.path.basename(argv[0]), ("project", "./project"))
             self.assertNotIn(argv[0], ("./project", "project"))
+
+
+class UnsafeArchiveTests(Base):
+    def member(self, kind, name, linkname=""):
+        info = tarfile.TarInfo(name)
+        info.type = kind
+        info.linkname = linkname
+        return info
+
+    def refuses(self, *members):
+        self.archive(extra=[(m, None) for m in members])
+        outside = self.tmp / "evil"
+        _, report = self.build()
+        self.assertEqual((report["status"], report["failed_step"]), ("failed", "download"))
+        self.assertIn("archive refused", report["error"])
+        self.assertFalse(outside.exists())
+        self.assertEqual(list(self.dest.iterdir()), [])  # no folder, staging cleaned up
+        self.assertEqual(self.log.read_text().count("make"), 0)
+
+    def test_symlink_to_etc_is_refused(self):
+        self.refuses(self.member(tarfile.SYMTYPE, "PhysiCell-1.14.2/link", "/etc"))
+
+    def test_relative_symlink_escaping_is_refused(self):
+        self.refuses(self.member(tarfile.SYMTYPE, "PhysiCell-1.14.2/link", "../../evil"))
+
+    def test_hardlink_outside_is_refused(self):
+        self.refuses(self.member(tarfile.LNKTYPE, "PhysiCell-1.14.2/hard", "../../etc/passwd"))
+
+    def test_dotdot_member_is_refused(self):
+        self.refuses(self.member(tarfile.REGTYPE, "../evil"))
+
+    def test_absolute_member_is_refused(self):
+        self.refuses(self.member(tarfile.REGTYPE, str(self.tmp / "evil")))
+
+    def test_special_members_are_refused(self):
+        self.refuses(self.member(tarfile.FIFOTYPE, "PhysiCell-1.14.2/fifo"))
+        self.refuses(self.member(tarfile.CHRTYPE, "PhysiCell-1.14.2/dev"))
+
+    def test_safe_internal_symlink_is_accepted(self):
+        self.archive(extra=[(self.member(tarfile.SYMTYPE, "PhysiCell-1.14.2/alias", "README"), None)])
+        _, report = self.build()
+        self.assertEqual(report["status"], "ok")
 
 
 class SettingsCopyTests(Base):
@@ -299,6 +387,33 @@ class SettingsCopyTests(Base):
             self.build(verification=VERIFICATION)
         self.assertFalse(self.dest.exists())  # nothing was downloaded
         self.assertEqual(self.log.read_text(), "")
+
+    def rewrite_manifest(self, edit):
+        path = self.folder / "capture.json"
+        manifest = json.loads(path.read_text())
+        edit(manifest)
+        path.write_text(json.dumps(manifest))
+
+    def test_manifest_without_dependencies_is_a_failed_settings_report(self):
+        self.rewrite_manifest(lambda m: m.pop("dependencies"))
+        # the verification binds the old manifest, so a capture() re-bind would refuse first; call the copy directly
+        with self.assertRaisesRegex(ValueError, "no dependencies"):
+            build._package_files(self.root, self.after)
+        with mock.patch.object(build, "_verification", return_value=(VERIFICATION, {"after": self.after}, b"{}")):
+            _, report = self.build(verification=VERIFICATION)
+        self.assertEqual((report["status"], report["failed_step"]), ("failed", "settings"))
+        self.assertIn("no dependencies", report["error"])
+
+    def test_dependency_basename_collision_is_refused_naming_both_paths(self):
+        self.rewrite_manifest(lambda m: m["dependencies"].append(
+            {"path": "package/config/sub/rules.csv", "sha256": sha(RULES)}))
+        with mock.patch.object(build, "_verification", return_value=(VERIFICATION, {"after": self.after}, b"{}")):
+            _, report = self.build(verification=VERIFICATION)
+        self.assertEqual(report["failed_step"], "settings")
+        self.assertIn("package/config/rules.csv", report["error"])
+        self.assertIn("package/config/sub/rules.csv", report["error"])
+        config = self.dest / "PhysiCell-1.14.2-template/config"
+        self.assertFalse((config / "rules.csv").exists())
 
     def test_missing_verification_is_refused(self):
         self.verification_path.unlink()
