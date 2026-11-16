@@ -142,7 +142,8 @@ outline:
   `runs/boolean-dynamics-modeler/<that session>/` (at least one); with `standalone_decision_id`,
   none. Projection form: `record_session_id` = the capture session; its design and approval are
   re-checked, and the design's handoffs are bound to the `STAGE_GATE` exactly as in the design form
-  (stage B replays the design). The line-1 `STAGE_GATE` check is unchanged.
+  (stage B replays the design). The line-1 `STAGE_GATE` check is unchanged and runs once per dispatch:
+  the hook reuses the `check_task` result these bindings produced (`gate.check_data_input_and_stage_gate`).
 - **Build:** `--verification` must be a passed `physicell_verification` whose after capture re-binds
   byte for byte and whose recomputed `entries`, `unexpected_changes`, `before`, `after` and
   `projection` equal the file's. The packaged XML and dependencies are copied into `config/`

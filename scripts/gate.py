@@ -413,8 +413,13 @@ def check_mapping_network(root, network, first_line):
     NeKo upstream: network.neko_session equals upstream_session_id and network.sha256 is the
     BNET of the NeKo handoff that STAGE_GATE approves. Standalone: network.standalone_decision_id
     equals the STAGE_GATE's and network.sha256 is that standalone_approval's artifact sha256.
-    check_task re-resolves the STAGE_GATE (not weakened by this). Returns (key, anchor).
+    The STAGE_GATE is resolved here with check_task (not weakened by this). Returns (key, anchor).
     """
+    return _check_mapping_network(root, network, first_line)[:2]
+
+
+def _check_mapping_network(root, network, first_line):
+    """check_mapping_network, plus the check_task result of the STAGE_GATE: (key, anchor, gate result)."""
     key, anchor = _gate_anchor(first_line)
     if not isinstance(network, dict):
         raise ValueError("mapping inputs.network is missing")
@@ -441,7 +446,7 @@ def check_mapping_network(root, network, first_line):
     if network.get("sha256") != approved:
         raise ValueError(f"mapping network {network.get('bnet')} (sha256 {str(network.get('sha256'))[:12]}) is not "
                          f"{what} (sha256 {str(approved)[:12]}); {REDRAFT_HINT}")
-    return key, anchor
+    return key, anchor, gate_result
 
 
 def check_mapping_outputs(data, first_line):
@@ -508,7 +513,7 @@ def _check_maboss_data_input(root, value, first_line):
         raise ValueError(f"mapping check failed for {rel}: " + "; ".join(errors))
     # The mapping's network must be the BNET the STAGE_GATE approved: the NeKo handoff's, or the
     # standalone approval's artifact.
-    check_mapping_network(root, data["inputs"]["network"], first_line)
+    gate_result = _check_mapping_network(root, data["inputs"]["network"], first_line)[2]
     check_mapping_outputs(data, first_line)
     if record.get("session_id") != anchor:
         raise ValueError(f"mapping approval {approval_id} has session_id {record.get('session_id')!r}; a data_mapping "
@@ -521,7 +526,7 @@ def _check_maboss_data_input(root, value, first_line):
                          f"mapping's perturbation and criterion ids {sorted(ids, key=str)}")
     sessions = {item["session"] for item in data["inputs"]["data"]}
     anchor_key = "neko_session" if key == "upstream_session_id" else "standalone_decision_id"
-    return {"mapping": rel, "sha256": digest, "approval_id": approval_id, anchor_key: anchor}, sessions
+    return {"mapping": rel, "sha256": digest, "approval_id": approval_id, anchor_key: anchor}, sessions, gate_result
 
 
 CALIBRATION_REL = re.compile(r"runs/orchestrator/[\w.-]+/jobs/[\w.-]+/calibration_proposal\.json")
@@ -584,7 +589,7 @@ def _check_design_upstream(root, design, first_line):
     runs/boolean-dynamics-modeler/<that session>/ (the design check already proved each one an exported,
     reviewed and approved maboss-to-physicell handoff of its session, with gate.check). A design mixing several
     MaBoSS sessions is refused, naming them. standalone_decision_id: the design imports no MaBoSS handoff.
-    check_task resolves the STAGE_GATE (it runs again, unchanged, in the dispatch hook).
+    check_task resolves the STAGE_GATE; its result is returned (the dispatch hook reuses it).
     """
     gate_result = check_task(root, "multicellular_configurator", first_line)
     sessions = _maboss_sessions(design)
@@ -593,7 +598,7 @@ def _check_design_upstream(root, design, first_line):
             raise ValueError(f"STAGE_GATE names standalone_decision_id {gate_result['standalone_decision_id']}, so the "
                              f"design may import no MaBoSS handoff, but it imports handoffs of MaBoSS session(s) "
                              f"{', '.join(sessions)}; dispatch it with that MaBoSS session's upstream_session_id STAGE_GATE")
-        return
+        return gate_result
     anchor = gate_result["upstream_session_id"]
     if not sessions:
         raise ValueError(f"STAGE_GATE names MaBoSS upstream_session_id {anchor}, but the design imports no MaBoSS "
@@ -602,6 +607,7 @@ def _check_design_upstream(root, design, first_line):
         raise ValueError(f"design MaBoSS handoffs come from session(s) {', '.join(sessions)}, but STAGE_GATE names "
                          f"upstream_session_id {anchor}; every design handoff must be under "
                          f"runs/boolean-dynamics-modeler/{anchor}/")
+    return gate_result
 
 
 def _check_physicell_input(root, value, first_line):
@@ -653,7 +659,7 @@ def _check_physicell_input(root, value, first_line):
         raise ValueError(f"DATA_INPUT record_session_id {session!r} must be the session_id "
                          f"{record.get('session_id')} of approval {approval_id}")
     if form == "design":
-        _check_design_upstream(root, data, first_line)
+        gate_result = _check_design_upstream(root, data, first_line)
     else:
         capture = PurePosixPath(data["capture"]["path"]).parts[2]
         if session != capture:
@@ -666,8 +672,8 @@ def _check_physicell_input(root, value, first_line):
         design, design_sha = physicell_design._load(root, data["design"]["path"])
         if design_sha != data["design"]["sha256"]:
             raise ValueError(f"design {data['design']['path']} changed since the projection check")
-        _check_design_upstream(root, design, first_line)
-    return {form: rel, "sha256": digest, "approval_id": approval_id, "physicell_session": session}, set()
+        gate_result = _check_design_upstream(root, design, first_line)
+    return {form: rel, "sha256": digest, "approval_id": approval_id, "physicell_session": session}, set(), gate_result
 
 
 def _check_ode_session_mentions(root, text, session):
@@ -963,7 +969,17 @@ def _payload_mentions(lines, canonical):
 
 
 def check_data_input(root, specialist, task):
-    """Check the DATA_INPUT line by which the network-curator, boolean-dynamics-modeler, ode-modeler and
+    """The verified DATA_INPUT of a brief, or None (see check_data_input_and_stage_gate)."""
+    return check_data_input_and_stage_gate(root, specialist, task)[0]
+
+
+def check_data_input_and_stage_gate(root, specialist, task):
+    """(check_data_input result, the check_task result of the line-1 STAGE_GATE when this check resolved it, else
+    None). The MaBoSS mapping form and both multicellular-configurator forms resolve the STAGE_GATE (check_task on
+    the brief's line 1) while binding their artifact to it; the dispatch hook reuses that result instead of running
+    check_task again on the same line, and runs check_task itself whenever None is returned.
+
+    Check the DATA_INPUT line by which the network-curator, boolean-dynamics-modeler, ode-modeler and
     multicellular-configurator take data.
 
     Data reach these specialists only as approved, hash-checked artifacts named on a
@@ -993,7 +1009,7 @@ def check_data_input(root, specialist, task):
     model-input rule, with only the verified artifact exempt.
     """
     if specialist not in DATA_INPUT_LINE:
-        return None
+        return None, None
     if task is None:
         task = ""
     if not isinstance(task, str):
@@ -1014,17 +1030,18 @@ def check_data_input(root, specialist, task):
         if DATA_PATH.search(text) or DATA_SESSION_ID.search(text):
             raise ValueError(DATA_REFUSAL)
         _check_mentions(root, text, None)
-        return None
+        return None, None
     value = _strict_object(lines[expected][len("DATA_INPUT "):], "DATA_INPUT")
+    gate_result = None
     if specialist == "network_curator":
         result, sessions = _check_neko_data_input(root, value)
     elif specialist == "ode_modeler":
         result, sessions = _check_ode_calibration_input(root, value)
         _check_ode_session_mentions(root, text, result["ode_session"])
     elif specialist == "multicellular_configurator":
-        result, sessions = _check_physicell_input(root, value, lines[0])
+        result, sessions, gate_result = _check_physicell_input(root, value, lines[0])
     else:
-        result, sessions = _check_maboss_data_input(root, value, lines[0])
+        result, sessions, gate_result = _check_maboss_data_input(root, value, lines[0])
     other = sorted(_data_sessions_named(text) - sessions)
     if other:
         raise ValueError(f"brief names data-analyst session(s) {', '.join(other)} outside its DATA_INPUT")
@@ -1032,7 +1049,7 @@ def check_data_input(root, specialist, task):
     artifact = next((result[key] for key in ("seeds", "mapping", "calibration", "design", "projection")
                      if key in result), None)
     _check_mentions(root, text, artifact)
-    return result
+    return result, gate_result
 
 
 def resolve_condition(root, decision_id):

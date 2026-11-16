@@ -37,12 +37,13 @@ def main():
         # has a DATA_INPUT form; a gated role without one is blocked (it would skip those rules).
         if role not in gate.DATA_INPUT_LINE:
             raise ValueError(f"gated role {role} has no DATA_INPUT form in scripts/gate.py DATA_INPUT_LINE")
-        gate.check_data_input(ROOT, role, prompt)
+        _, stage_gate = gate.check_data_input_and_stage_gate(ROOT, role, prompt)
         # ODE authoring has its own source/readiness/whole-model approval contract;
-        # this hook enforces the two sequential Boolean downstream boundaries. The
-        # multicellular-configurator's line-1 STAGE_GATE is checked here, unchanged, with or without
-        # a line-2 DATA_INPUT.
-        if role in {"boolean_dynamics_modeler", "multicellular_configurator"}:
+        # this hook enforces the two sequential Boolean downstream boundaries. The line-1 STAGE_GATE of a
+        # boolean-dynamics-modeler or multicellular-configurator brief is resolved once per dispatch: a
+        # line-2 DATA_INPUT check that binds its artifact to it has already run check_task on this very line
+        # (stage_gate is its result); otherwise it runs here.
+        if role in {"boolean_dynamics_modeler", "multicellular_configurator"} and stage_gate is None:
             gate.check_task(ROOT, role, prompt)
         return 0
     except Exception as exc:  # noqa: BLE001 - see fail-closed note above

@@ -306,6 +306,16 @@ class MabossDataInputTests(DataInputFixture):
             gate.check_data_input(self.root, "boolean_dynamics_modeler", self.maboss_task(approval="dec-map-bad"))
 
 
+class MabossGateOnceTests(DataInputFixture):
+    def test_stage_gate_checked_once_per_dispatch(self):
+        # PR #17 review 4586113358: check_mapping_network's STAGE_GATE result is reused by the hook
+        self.stage_gate_ready()
+        for name, prompt in (("mapping", self.maboss_task()), ("STAGE_GATE only", f"{STAGE_GATE}\nSimulate.")):
+            with self.subTest(form=name):
+                status, err, tasks, checks = gate_calls(self.root, "boolean-dynamics-modeler", prompt)
+                self.assertEqual((status, tasks, checks), (0, 1, 1), err)
+
+
 class ScopeTests(DataInputFixture):
     def test_data_path_without_data_input_refused(self):
         prose = f"see {self.seeds} for the seeds"
@@ -1338,6 +1348,21 @@ class PhysiCellDataInputTests(ProjectionBase):
         self.accepted(self.task(line, gate_line=sa_gate))
         self.refused(self.task(self.design_line(), gate_line=sa_gate), "standalone.*MaBoSS")
 
+    def test_stage_gate_checked_once_per_dispatch(self):
+        # PR #17 review 4586113358: the hook reuses check_data_input's STAGE_GATE result; gate.check runs once for
+        # the STAGE_GATE plus once per design handoff (the design check's own binding of each handoff)
+        for name, prompt, checks in (("design", self.task(self.design_line()), 2),
+                                     ("projection", self.task(self.projection_line()), 2),
+                                     ("STAGE_GATE only", f"{MC_GATE}\nImport the approved handoff.", 1)):
+            with self.subTest(form=name):
+                status, err, tasks, gate_checks = gate_calls(self.root, "multicellular-configurator", prompt)
+                self.assertEqual((status, tasks, gate_checks), (0, 1, checks), err)
+        # still refused when the STAGE_GATE fails, with or without DATA_INPUT
+        bad = "STAGE_GATE " + json.dumps({"upstream_session_id": MC_MABOSS, "outputs": ["A"]})
+        for prompt in (self.task(self.design_line(), gate_line=bad), f"{bad}\nImport."):
+            status, err, tasks, _ = gate_calls(self.root, "multicellular-configurator", prompt)
+            self.assertEqual((status, tasks), (2, 1), err)
+
     def test_projection_design_handoff_must_be_the_stage_gate_upstream(self):
         # PR #17 review 4586110268: the projection form binds its design's MaBoSS handoffs to the line-1 STAGE_GATE
         self.make_handoff("maboss-other")
@@ -1440,6 +1465,15 @@ def run_hook(module, root, subagent_type, prompt):
             contextlib.redirect_stderr(err):
         status = module.main()
     return status, err.getvalue()
+
+
+def gate_calls(root, subagent_type, prompt):
+    """(hook exit status, stderr, check_task calls, gate.check calls) of one in-process dispatch."""
+    hook = load_hook()
+    with mock.patch.object(gate, "check_task", wraps=gate.check_task) as task, \
+            mock.patch.object(gate, "check", wraps=gate.check) as check:
+        status, err = run_hook(hook, root, subagent_type, prompt)
+    return status, err, task.call_count, check.call_count
 
 
 class HookRoleTests(unittest.TestCase):
