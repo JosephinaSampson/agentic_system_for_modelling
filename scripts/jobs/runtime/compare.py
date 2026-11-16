@@ -8,11 +8,14 @@ and returns a JSON-serialisable `spec` (string keys only; times and doses are fl
   conditions       {name: {parameters: {name: value*factor}, initials: {species: value*factor}}}
   dose_conditions  {name: {base, dose, scale_parameter, K: number | {fit: name}}
                          | {base, dose, inhibitor_species}}     one per (rule, condition, dose)
-  times_model      {condition or dose condition: sorted [float, ...] in the model time unit, incl. 0.0}
+  times_model      {condition or dose condition: sorted [float, ...] in the model time unit, incl. 0.0}; only
+                   the simulations some row needs (needed(spec, "all")): an unused condition is never simulated
   rules            the mapping's rules
   fit              [{name, kind, lower, upper, log10_lower, log10_upper}]
-  measurements     {id: {rule_id, type, observable, condition, time, dose, dose_condition, use, value,
-                         target, role}}   time/dose in model units; role is "fit_target" or "reference"
+  measurements     {id: {rule_id, type, readout, observable, condition, time, dose, dose_condition, use, value,
+                         value_unit, target, role}}   time/dose in model units; value is the raw table value,
+                   target the value normalised (or converted) exactly like the prediction; role is
+                   "fit_target" or "reference"
   time_model_unit  the model time unit
   dose_model_unit  the model dose unit (mapping["dose"]["model_unit"]; the dose axis of the figures)
 
@@ -23,24 +26,32 @@ Runner contract:
     `initials` are absolute values to set; `scales` multiplies the model's current value of that
     parameter (it only arises from target_activity_scaling when the base condition does not itself
     override that parameter; otherwise the product is already in `parameters`);
-  * simulate that condition and record every time in spec["times_model"][name];
+  * simulate that condition and record every time in spec["times_model"][name] (the runner may simulate only
+    needed(spec, use), the conditions and times the rows of that use need);
   * call `predict(spec, sims)` with sims[name][observable] = {time: value}. Times are looked up as
     the exact floats stored in spec (after a JSON round trip), so the runner must key by those floats.
   * `objective(spec, predictions, use)`.
 
-Rules (per measurement; a missing sim, solver failure or zero denominator gives nan, never raises):
-  fold_change_vs_t0       v(t) / v(0)
-  relative_to_condition   v_cond(t) / v_reference(t)
-  max_normalized          v(t) / max of v over the simulated points (condition, time) of the rule's own
-                          measurements for that observable (all conditions of the rule, one max per observable)
-  absolute                v(t)
-  endpoint_contrast       every row's converted time must equal the rule time T (math.isclose, rel_tol 1e-9;
+Rules (per measurement; a missing sim, solver failure or zero denominator gives nan, never raises). The data
+target is normalised the same way as the prediction (decision N); "group" = the rule's rows of the same readout
+and use, so hold-out rows never change a fit target or a fit prediction:
+  fold_change_vs_t0       v(t) / v(0); target = value / mean of the group's time-0 rows of the same condition
+  relative_to_condition   v_cond(t) / v_reference(t); target = value / mean of the group's reference-condition
+                          rows at the same converted time (math.isclose, rel_tol 1e-9)
+  max_normalized          v(t) / max of v over the simulated points (condition, time) of the group's rows;
+                          target = value / max of the group's values (nan unless that max is > 0)
+  absolute                v(t); target = value * mapping["values"]["readouts"][readout]["factors"][value_unit]
+                          (ValueError when that factor is missing or not positive)
+  endpoint_contrast       every row's condition must be the test or the reference (ValueError otherwise) and its
+                          converted time must equal the rule time T (math.isclose, rel_tol 1e-9;
                           ValueError otherwise); the rows of the test condition are predicted as ratio v_test(T)/v_ref(T) or
                           difference v_test(T)-v_ref(T); their target is the same contrast of the data
                           (test value vs the mean of the reference rows of the same readout AND the same
                           `use`, so fit targets never see hold-out references; none gives a nan target). Reference
                           rows are role "reference": no prediction, no term in the objective.
   dose_response           viability = obs(treated at dose D, T) / obs(untreated, T), T = viability.time;
+                          target = value * mapping["values"]["viability"]["factors"][value_unit] (a fraction;
+                          ValueError when the factor is missing);
                           D = dose * mapping["dose"]["factors"][dose_unit] (required; ValueError when a unit
                           has no positive factor); K is in the model dose unit mapping["dose"]["model_unit"].
                           A fitted K <= 0 gives a nan scale (hence nan predictions and PENALTY).
@@ -50,6 +61,8 @@ Rules (per measurement; a missing sim, solver failure or zero denominator gives 
                           dose share one dose condition.
                           target_activity_scaling multiplies the parameter by 1/(1 + D/K);
                           inhibitor_species sets the species' initial amount to D.
+
+A fitted name that a condition overrides (or an inhibitor_species dose sets) raises ValueError in resolve.
 
 objective = unweighted sum of squared differences prediction - target over rows with the requested
 `use` (default "fit"); `error` columns are not weights. Any nan/inf prediction or target, or a missing
@@ -68,10 +81,6 @@ def _overrides(items) -> dict:
     return {item["name"]: item["value"] * item["factor"] for item in items}
 
 
-def _times(spec_times: dict, condition: str, *times: float) -> None:
-    spec_times.setdefault(condition, {0.0}).update(float(t) for t in times)
-
-
 def _dose_factor(mapping: dict, unit) -> float:
     factors = mapping["dose"]["factors"]
     if unit not in factors or not factors[unit] > 0:
@@ -84,39 +93,97 @@ def _same_time(mid: str, converted: float, time: float, what: str) -> None:
         raise ValueError(f"measurement {mid}: time {converted!r} (model unit) is not {what} {time!r}")
 
 
+def _positive_factor(factors, unit, mid: str, where: str) -> float:
+    factor = factors.get(unit) if isinstance(factors, dict) else None
+    if isinstance(factor, bool) or not isinstance(factor, (int, float)) or not factor > 0:
+        raise ValueError(f"measurement {mid}: value_unit {unit!r} has no positive factor in {where} "
+                         "(units are never inferred)")
+    return float(factor)
+
+
+def _readout_factor(mapping: dict, row: dict) -> float:
+    entry = mapping["values"]["readouts"].get(row["readout"])
+    factors = entry.get("factors") if isinstance(entry, dict) else None
+    return _positive_factor(factors, row["value_unit"], row["measurement_id"],
+                            f"values.readouts[{row['readout']!r}].factors")
+
+
+def _viability_factor(mapping: dict, row: dict) -> float:
+    return _positive_factor(mapping["values"]["viability"]["factors"], row["value_unit"], row["measurement_id"],
+                            "values.viability.factors")
+
+
+def _mean(values: list) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _fit_overrides(mapping: dict) -> None:
+    """A fitted name that a condition (or an inhibitor dose) also sets would be ignored there: refuse it."""
+    fitted = {(f["kind"], f["name"]) for f in mapping["fit"]}
+    for c in mapping["conditions"]:
+        for kind, key in (("parameter", "parameters"), ("initial", "initials")):
+            for item in c[key]:
+                if (kind, item["name"]) in fitted:
+                    raise ValueError(f"fit {item['name']}: condition {c['condition']} overrides it ({key}); "
+                                     "the override would replace the fitted value there")
+    for rule in mapping["rules"]:
+        drug = rule.get("drug_entry") if rule["type"] == "dose_response" else None
+        if drug and drug["form"] == "inhibitor_species" and ("initial", drug["species"]) in fitted:
+            raise ValueError(f"fit {drug['species']}: rule {rule['rule_id']} sets it to the dose (inhibitor_species)")
+
+
+def _normalise_time_course(rule: dict, entries: list[dict]) -> None:
+    """The data side of a time_course rule, normalised exactly like the predictions (decision N)."""
+    method = rule["method"]
+    for e in entries:
+        group = [o for o in entries if o["readout"] == e["readout"] and o["use"] == e["use"]]
+        if method == "fold_change_vs_t0":
+            t0 = [o["value"] for o in group if o["condition"] == e["condition"] and o["time"] == 0.0]
+            e["target"] = _ratio(e["value"], _mean(t0) if t0 else math.nan)
+        elif method == "relative_to_condition":
+            refs = [o["value"] for o in group if o["condition"] == rule["reference"]
+                    and math.isclose(o["time"], e["time"], rel_tol=TIME_RTOL)]
+            e["target"] = _ratio(e["value"], _mean(refs) if refs else math.nan)
+        elif method == "max_normalized":
+            top = max(o["value"] for o in group)
+            e["target"] = e["value"] / top if top > 0 else math.nan
+
+
 def resolve(mapping: dict, rows: list[dict]) -> dict:
+    _fit_overrides(mapping)
     by_id = {r["measurement_id"]: r for r in rows}
     observable = {x["readout"]: x["observable"] for x in mapping["readouts"]}
     factors = mapping["time"]["factors"]
     conditions = {c["condition"]: {"parameters": _overrides(c["parameters"]), "initials": _overrides(c["initials"])}
                   for c in mapping["conditions"]}
-    times: dict = {name: {0.0} for name in conditions}
     dose_conditions: dict = {}
     meas: dict = {}
     for rule in mapping["rules"]:
         kind, rid = rule["type"], rule["rule_id"]
+        entries = []
         for mid in rule["measurements"]:
             row = by_id[mid]
-            entry = {"rule_id": rid, "type": kind, "observable": observable[row["readout"]],
+            entry = {"rule_id": rid, "type": kind, "readout": row["readout"], "observable": observable[row["readout"]],
                      "condition": row["condition"], "time": float(row["time"]) * float(factors[row["time_unit"]]),
                      "dose": None, "dose_condition": None, "use": row["use"], "value": row["value"],
-                     "target": row["value"], "role": "fit_target"}
+                     "value_unit": row["value_unit"], "target": row["value"], "role": "fit_target"}
             if kind == "time_course":
-                _times(times, row["condition"], entry["time"])
-                if rule["method"] == "relative_to_condition":
-                    _times(times, rule["reference"], entry["time"])
+                if rule["method"] == "absolute":
+                    entry["target"] = row["value"] * _readout_factor(mapping, row)
             elif kind == "endpoint_contrast":
+                if row["condition"] not in (rule["test"], rule["reference"]):
+                    raise ValueError(f"measurement {mid}: condition {row['condition']!r} is neither the test "
+                                     f"{rule['test']!r} nor the reference {rule['reference']!r} of rule {rid}")
                 _same_time(mid, entry["time"], float(rule["time"]), "the rule time")
                 entry["time"] = float(rule["time"])
-                for name in (rule["test"], rule["reference"]):
-                    _times(times, name, entry["time"])
-                if row["condition"] != rule["test"]:
+                if row["condition"] == rule["reference"]:
                     entry["role"] = "reference"
             else:
                 via, drug = rule["viability"], rule["drug_entry"]
                 entry["observable"] = via["observable"]  # the check requires the readout to map to it
                 _same_time(mid, entry["time"], float(via["time"]), "viability.time")
                 entry["time"] = float(via["time"])
+                entry["target"] = row["value"] * _viability_factor(mapping, row)
                 entry["dose"] = float(row["dose"]) * _dose_factor(mapping, row["dose_unit"])
                 name = f"{rid}|{row['condition']}|dose={entry['dose']!r}"
                 if drug["form"] == "target_activity_scaling":
@@ -126,24 +193,50 @@ def resolve(mapping: dict, rows: list[dict]) -> dict:
                     dose_conditions[name] = {"base": row["condition"], "dose": entry["dose"],
                                              "inhibitor_species": drug["species"]}
                 entry["dose_condition"] = name
-                _times(times, name, entry["time"])
-                _times(times, via["untreated"], entry["time"])
             meas[mid] = entry
-        if kind == "endpoint_contrast":
-            for mid in rule["measurements"]:
-                if meas[mid]["role"] == "fit_target":
-                    refs = [meas[r]["value"] for r in rule["measurements"] if meas[r]["role"] == "reference"
-                            and by_id[r]["readout"] == by_id[mid]["readout"]
-                            and by_id[r]["use"] == by_id[mid]["use"]]
-                    meas[mid]["target"] = _contrast(rule["method"], meas[mid]["value"],
-                                                    sum(refs) / len(refs) if refs else None)
+            entries.append(entry)
+        if kind == "time_course":
+            _normalise_time_course(rule, entries)
+        elif kind == "endpoint_contrast":
+            for e in entries:
+                if e["role"] == "fit_target":
+                    refs = [o["value"] for o in entries if o["role"] == "reference"
+                            and o["readout"] == e["readout"] and o["use"] == e["use"]]
+                    e["target"] = _contrast(rule["method"], e["value"], _mean(refs))
     fit = [{"name": f["name"], "kind": f["kind"], "lower": float(f["lower"]), "upper": float(f["upper"]),
             "log10_lower": math.log10(f["lower"]), "log10_upper": math.log10(f["upper"])} for f in mapping["fit"]]
-    return {"time_model_unit": mapping["time"]["model_unit"], "dose_model_unit": mapping["dose"]["model_unit"],
+    spec = {"time_model_unit": mapping["time"]["model_unit"], "dose_model_unit": mapping["dose"]["model_unit"],
             "conditions": conditions,
             "dose_conditions": dose_conditions,
-            "times_model": {name: sorted(values) for name, values in times.items()},
             "rules": mapping["rules"], "fit": fit, "measurements": meas}
+    spec["times_model"] = needed(spec, "all")
+    return spec
+
+
+def needed(spec: dict, use: str = "fit") -> dict:
+    """{simulation name: sorted model times incl. 0.0} that the predictions of the rows with this use need
+    ("all": every row). A condition no rule, reference or untreated entry needs is never simulated."""
+    rules = {r["rule_id"]: r for r in spec["rules"]}
+    out: dict = {}
+
+    def add(name: str, time: float) -> None:
+        out.setdefault(name, {0.0}).add(float(time))
+
+    for m in spec["measurements"].values():
+        if (use != "all" and m["use"] != use) or m["role"] == "reference":
+            continue
+        rule, t = rules[m["rule_id"]], m["time"]
+        if m["type"] == "time_course":
+            add(m["condition"], t)
+            if rule["method"] == "relative_to_condition":
+                add(rule["reference"], t)
+        elif m["type"] == "endpoint_contrast":
+            add(rule["test"], t)
+            add(rule["reference"], t)
+        else:
+            add(m["dose_condition"], t)
+            add(rule["viability"]["untreated"], t)
+    return {name: sorted(times) for name, times in out.items()}
 
 
 def condition_overrides(spec: dict, name: str, fitted: dict) -> dict:
@@ -192,10 +285,10 @@ def _ratio(num: float, den: float) -> float:
 def predict(spec: dict, sims: dict) -> dict:
     meas = spec["measurements"]
     rules = {r["rule_id"]: r for r in spec["rules"]}
-    maxima: dict = {}
+    maxima: dict = {}  # one normaliser per (rule, readout, use): hold-out rows never change fit predictions
     for mid, m in meas.items():
         if m["type"] == "time_course" and rules[m["rule_id"]]["method"] == "max_normalized":
-            key = (m["rule_id"], m["observable"])
+            key = (m["rule_id"], m["readout"], m["use"])
             maxima.setdefault(key, []).append(_get(sims, m["condition"], m["observable"], m["time"]))
     out = {}
     for mid, m in meas.items():
@@ -212,7 +305,7 @@ def predict(spec: dict, sims: dict) -> dict:
             elif method == "relative_to_condition":
                 out[mid] = _ratio(v, _get(sims, rule["reference"], obs, t))
             else:
-                points = maxima[(m["rule_id"], obs)]
+                points = maxima[(m["rule_id"], m["readout"], m["use"])]
                 out[mid] = _ratio(v, max(points)) if all(math.isfinite(p) for p in points) else math.nan
         elif m["type"] == "endpoint_contrast":
             test = _get(sims, rule["test"], obs, t)

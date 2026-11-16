@@ -22,6 +22,16 @@ class MeasurementTableTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return measurements.read(path)
 
+    def test_header_whitespace_is_stripped_for_lookup(self):
+        # review repro t1: "value_unit, error,..." passed the header check, then error and n were silently dropped
+        header = HEADER.replace(",error,", ", error,").replace(",n,", ", n ,").replace("measurement_id,", " measurement_id,")
+        rows = self.read(table(ROW, header=header))
+        self.assertEqual((rows[0]["measurement_id"], rows[0]["error"], rows[0]["error_kind"], rows[0]["n"]),
+                         ("M1", 0.1, "sd", 3))
+        self.assertEqual(measurements.check(rows, {"s1"}), [])
+        rows = self.read(table(ROW, header=HEADER.replace(",time,", ", time,")))
+        self.assertEqual(rows[0]["time"], 0.0)
+
     def test_columns_are_the_documented_ones(self):
         self.assertEqual(measurements.COLUMNS, (
             "measurement_id", "readout", "condition", "time", "time_unit", "dose", "dose_unit", "value",

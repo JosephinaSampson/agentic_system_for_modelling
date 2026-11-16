@@ -77,3 +77,16 @@ def introspect(zip_path: Path) -> dict:
             }
     except zipfile.BadZipFile as exc:
         raise ValueError(f"not a zip file: {exc}") from exc
+
+
+def integrity(zip_path: Path) -> bytes:
+    """The bytes of the export's model/integrity.json: the file inventory of the revision it was exported from.
+
+    A captured revision folder (runs/ode-modeler/<session>/.../rev_<32 hex>/integrity.json) with the same bytes
+    is that revision (the same binding scripts/codex/ode_artifacts.validate_bundle checks).
+    """
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            return _read(zf, "model/integrity.json").encode("utf-8")
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"not a zip file: {exc}") from exc

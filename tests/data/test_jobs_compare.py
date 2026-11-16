@@ -9,9 +9,9 @@ from scripts.jobs.runtime import compare
 SRC = Path(compare.__file__)
 
 
-def row(mid, cond, time, value, *, unit="min", readout="r", dose=None, dose_unit=None, use="fit"):
+def row(mid, cond, time, value, *, unit="min", readout="r", dose=None, dose_unit=None, use="fit", value_unit="au"):
     return {"measurement_id": mid, "readout": readout, "condition": cond, "time": time, "time_unit": unit,
-            "dose": dose, "dose_unit": dose_unit, "value": value, "value_unit": "au", "error": None,
+            "dose": dose, "dose_unit": dose_unit, "value": value, "value_unit": value_unit, "error": None,
             "error_kind": None, "n": None, "use": use, "source": "s", "locator": "l"}
 
 
@@ -24,6 +24,8 @@ def mapping(rules, conditions=None, **extra):
     m = {"kind": "ode_mapping", "schema_version": 1, "time": {"model_unit": "min", "factors": {"min": 1, "h": 60}},
          "readouts": [{"readout": "r", "observable": "obs"}], "conditions": conds, "rules": rules,
          "dose": {"model_unit": "nM", "factors": {"uM": 1000.0, "nM": 1.0}},
+         "values": {"readouts": {"r": {"model_unit": "molecule", "factors": {"au": 1.0, "kau": 1000.0}}},
+                    "viability": {"factors": {"au": 1.0, "fraction": 1.0, "%": 0.01}}},
          "fit": [{"name": "k1", "kind": "parameter", "lower": 0.01, "upper": 100.0, "unit": "1/min",
                   "justification": {"text": "t"}}], "unmapped": []}
     m.update(extra)
@@ -36,37 +38,104 @@ def tc(method, ids, **kw):
 
 class CompareTests(unittest.TestCase):
     def test_fold_change_vs_t0(self):
-        rows = [row("m1", "ctrl", 30.0, 9.0)]
-        spec = compare.resolve(mapping([tc("fold_change_vs_t0", ["m1"])]), rows)
+        # decision N: the data are divided by their own t0 row (same readout, condition, use), like the predictions
+        rows = [row("m0", "ctrl", 0.0, 2.0), row("m1", "ctrl", 30.0, 9.0)]
+        spec = compare.resolve(mapping([tc("fold_change_vs_t0", ["m0", "m1"])]), rows)
         self.assertEqual(spec["times_model"]["ctrl"], [0.0, 30.0])
+        self.assertEqual((spec["measurements"]["m0"]["target"], spec["measurements"]["m1"]["target"]), (1.0, 4.5))
         pred = compare.predict(spec, {"ctrl": {"obs": {0.0: 0.5, 30.0: 2.0}}})
-        self.assertEqual(pred["m1"], 4.0)
+        self.assertEqual((pred["m0"], pred["m1"]), (1.0, 4.0))
+
+    def test_fold_change_data_t0_is_per_condition_and_use(self):
+        rows = [row("a0", "ctrl", 0.0, 1000.0), row("a1", "ctrl", 30.0, 3000.0),
+                row("b0", "drug", 0.0, 10.0), row("b1", "drug", 30.0, 5.0),
+                row("h1", "ctrl", 30.0, 4000.0, use="holdout")]
+        ms = compare.resolve(mapping([tc("fold_change_vs_t0", ["a0", "a1", "b0", "b1", "h1"])]), rows)["measurements"]
+        self.assertEqual((ms["a1"]["target"], ms["b1"]["target"]), (3.0, 0.5))
+        self.assertTrue(math.isnan(ms["h1"]["target"]))  # no hold-out t0 row: nan (the mapping check refuses it)
 
     def test_absolute(self):
         spec = compare.resolve(mapping([tc("absolute", ["m1"])]), [row("m1", "ctrl", 5.0, 1.0)])
         self.assertEqual(compare.predict(spec, {"ctrl": {"obs": {0.0: 1.0, 5.0: 3.0}}})["m1"], 3.0)
 
+    def test_absolute_values_are_converted_into_the_model_unit(self):
+        # decision U: value x values.readouts[readout].factors[value_unit]; a missing factor is an error
+        rows = [row("m1", "ctrl", 5.0, 2.5, value_unit="kau")]
+        spec = compare.resolve(mapping([tc("absolute", ["m1"])]), rows)
+        self.assertEqual((spec["measurements"]["m1"]["value"], spec["measurements"]["m1"]["target"]), (2.5, 2500.0))
+        with self.assertRaisesRegex(ValueError, "m1.*nM.*values.readouts"):
+            compare.resolve(mapping([tc("absolute", ["m1"])]), [row("m1", "ctrl", 5.0, 2.5, value_unit="nM")])
+
     def test_relative_to_condition(self):
-        rows = [row("m1", "ctrl", 10.0, 1.0)]
-        spec = compare.resolve(mapping([tc("relative_to_condition", ["m1"], reference="ref")]), rows)
+        rows = [row("m1", "ctrl", 10.0, 3.0), row("r1", "ref", 10.0, 1.5)]
+        spec = compare.resolve(mapping([tc("relative_to_condition", ["m1", "r1"], reference="ref")]), rows)
         self.assertIn(10.0, spec["times_model"]["ref"])
+        self.assertEqual((spec["measurements"]["m1"]["target"], spec["measurements"]["r1"]["target"]), (2.0, 1.0))
         sims = {"ctrl": {"obs": {0.0: 1.0, 10.0: 3.0}}, "ref": {"obs": {0.0: 1.0, 10.0: 1.5}}}
         self.assertEqual(compare.predict(spec, sims)["m1"], 2.0)
 
     def test_max_normalized(self):
-        # max over the rule's own measurement points (condition, time) of that observable: 3 and 8 and 2, not t=0
-        rows = [row("m1", "ctrl", 10.0, 1.0), row("m2", "ctrl", 20.0, 1.0), row("m3", "drug", 10.0, 1.0)]
+        # max over the rule's own measurement points (condition, time) of that readout: 3 and 8 and 2, not t=0
+        rows = [row("m1", "ctrl", 10.0, 1.0), row("m2", "ctrl", 20.0, 4.0), row("m3", "drug", 10.0, 2.0)]
         spec = compare.resolve(mapping([tc("max_normalized", ["m1", "m2", "m3"])]), rows)
+        self.assertEqual([spec["measurements"][m]["target"] for m in ("m1", "m2", "m3")], [0.25, 1.0, 0.5])
         sims = {"ctrl": {"obs": {0.0: 100.0, 10.0: 3.0, 20.0: 8.0}}, "drug": {"obs": {0.0: 50.0, 10.0: 2.0}}}
         pred = compare.predict(spec, sims)
         self.assertEqual([pred["m1"], pred["m2"], pred["m3"]], [3 / 8, 1.0, 2 / 8])
         sims["ctrl"]["obs"][10.0] = sims["ctrl"]["obs"][20.0] = sims["drug"]["obs"][10.0] = 0.0
         self.assertTrue(math.isnan(compare.predict(spec, sims)["m1"]))
 
+    def test_max_normalized_hold_out_never_changes_fit_targets_or_predictions(self):
+        # review compare.py:197: the normaliser is computed per `use`, on both sides
+        fit = [row("m1", "ctrl", 10.0, 1.0), row("m2", "ctrl", 20.0, 4.0)]
+        held = [row("h1", "ctrl", 30.0, 40.0, use="holdout")]
+        sims = {"ctrl": {"obs": {0.0: 0.0, 10.0: 3.0, 20.0: 8.0, 30.0: 800.0}}}
+        alone = compare.resolve(mapping([tc("max_normalized", ["m1", "m2"])]), fit)
+        both = compare.resolve(mapping([tc("max_normalized", ["m1", "m2", "h1"])]), fit + held)
+        for mid in ("m1", "m2"):
+            self.assertEqual(both["measurements"][mid]["target"], alone["measurements"][mid]["target"])
+            self.assertEqual(compare.predict(both, sims)[mid], compare.predict(alone, sims)[mid])
+        self.assertEqual(both["measurements"]["h1"]["target"], 1.0)
+        self.assertEqual(compare.predict(both, sims)["h1"], 1.0)
+
     def test_zero_denominator_is_nan(self):
-        spec = compare.resolve(mapping([tc("fold_change_vs_t0", ["m1"])]), [row("m1", "ctrl", 30.0, 1.0)])
+        rows = [row("m0", "ctrl", 0.0, 1.0), row("m1", "ctrl", 30.0, 1.0)]
+        spec = compare.resolve(mapping([tc("fold_change_vs_t0", ["m0", "m1"])]), rows)
         pred = compare.predict(spec, {"ctrl": {"obs": {0.0: 0.0, 30.0: 2.0}}})
         self.assertTrue(math.isnan(pred["m1"]))
+        rows = [row("m0", "ctrl", 0.0, 0.0), row("m1", "ctrl", 30.0, 1.0)]
+        spec = compare.resolve(mapping([tc("fold_change_vs_t0", ["m0", "m1"])]), rows)
+        self.assertTrue(math.isnan(spec["measurements"]["m1"]["target"]))
+
+    def test_stray_contrast_condition_raises(self):
+        # review repro t2: a row of a third condition was averaged into the reference mean (target 0.078, not 2)
+        rule = {"rule_id": "ec", "type": "endpoint_contrast", "method": "ratio", "test": "drug",
+                "reference": "ref", "time": 60.0, "measurements": ["t1", "ref1", "o1"]}
+        rows = [row("t1", "drug", 60.0, 4.0), row("ref1", "ref", 60.0, 2.0), row("o1", "ctrl", 60.0, 100.0)]
+        with self.assertRaisesRegex(ValueError, "o1.*neither"):
+            compare.resolve(mapping([rule]), rows)
+        rule["measurements"] = ["t1", "ref1"]
+        self.assertEqual(compare.resolve(mapping([rule]), rows[:2])["measurements"]["t1"]["target"], 2.0)
+
+    def test_only_needed_conditions_are_simulated(self):
+        # review compare.py:93: a declared condition that no rule, reference or untreated entry needs is not simulated
+        spec = compare.resolve(mapping([tc("absolute", ["m1"])]), [row("m1", "ctrl", 5.0, 1.0)])
+        self.assertEqual(sorted(spec["times_model"]), ["ctrl"])
+        self.assertEqual(sorted(spec["conditions"]), ["ctrl", "drug", "ref"])
+
+    def test_needed_simulations_per_use(self):
+        rows = [row("m1", "ctrl", 10.0, 3.0), row("r1", "ref", 10.0, 1.5),
+                row("h1", "drug", 20.0, 3.0, use="holdout"), row("h2", "ref", 20.0, 1.0, use="holdout")]
+        spec = compare.resolve(mapping([tc("relative_to_condition", ["m1", "r1", "h1", "h2"], reference="ref")]),
+                               rows)
+        self.assertEqual(compare.needed(spec, "fit"), {"ctrl": [0.0, 10.0], "ref": [0.0, 10.0]})
+        self.assertEqual(compare.needed(spec, "holdout"), {"drug": [0.0, 20.0], "ref": [0.0, 20.0]})
+        self.assertEqual(set(compare.needed(spec, "all")), {"ctrl", "drug", "ref"})
+
+    def test_fitted_name_overridden_by_a_condition_raises(self):
+        conds = [{"condition": "ctrl", "parameters": [ov("k1", 2.0)], "initials": []}]
+        with self.assertRaisesRegex(ValueError, "k1.*ctrl"):
+            compare.resolve(mapping([tc("absolute", ["m1"])], conds), [row("m1", "ctrl", 1.0, 1.0)])
 
     def test_endpoint_ratio_and_difference(self):
         rows = [row("a", "drug", 60.0, 6.0), row("b", "ref", 60.0, 2.0)]
@@ -117,6 +186,15 @@ class CompareTests(unittest.TestCase):
         pred = compare.predict(spec, sims)
         self.assertEqual(pred["d1"], 0.5)
         self.assertEqual(pred["d2"], 1.0)
+
+    def test_viability_values_are_converted_to_a_fraction(self):
+        rows = [row("d1", "drug", 48.0, 50.0, dose=2.0, dose_unit="uM", value_unit="%")]
+        rule = self._dose_rule({"form": "inhibitor_species", "species": "I"})
+        rule["measurements"] = ["d1"]
+        self.assertEqual(compare.resolve(mapping([rule]), rows)["measurements"]["d1"]["target"], 0.5)
+        rows[0]["value_unit"] = "pct"
+        with self.assertRaisesRegex(ValueError, "d1.*pct.*viability"):
+            compare.resolve(mapping([rule]), rows)
 
     def test_dose_scaling_fitted_k_and_base_override(self):
         conds = [{"condition": c, "parameters": [ov("kp", 6.0)] if c == "drug" else [], "initials": []}

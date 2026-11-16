@@ -31,7 +31,9 @@ def read(path: Path) -> list[dict]:
     """
     with Path(path).open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
-        header = [c.strip() for c in reader.fieldnames or []]
+        # strip the header once, so the check and every row lookup use the same names
+        header = [(c or "").strip() for c in reader.fieldnames or []]
+        reader.fieldnames = header
         if len(set(header)) != len(header) or not set(COLUMNS) <= set(header):
             raise ValueError(f"measurement table needs the columns {', '.join(COLUMNS)} "
                              f"(missing: {', '.join(c for c in COLUMNS if c not in header) or 'none'}; "

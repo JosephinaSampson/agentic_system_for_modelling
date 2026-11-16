@@ -65,6 +65,8 @@ KIND_SCHEMAS = {
         "enums": {"use": ode_measurements.USES, "error_kind": ode_measurements.ERROR_KINDS},
         "unique": "measurement_id",
         "list_columns": (),
+        # scripts/ode/measurements.py reads comma-separated .csv only: refuse .tsv at the first check
+        "suffixes": (".csv",),
     },
 }
 PROPOSAL_ID_RE = re.compile(r"\AP\d+\Z")
@@ -301,6 +303,11 @@ def _check_proposal_table(session: Path, pid, entry: dict, schema: dict, errors:
     label = f"proposal {pid} ({entry.get('kind')})"
     if delimiter is None:
         errors.append(f"{label}: must be a .csv or .tsv table")
+        return
+    suffixes = schema.get("suffixes")
+    if suffixes and Path(rel).suffix.lower() not in suffixes:
+        errors.append(f"{label}: must be a {' or '.join(suffixes)} table (the {entry.get('kind')} reader is "
+                      "comma-separated .csv only)")
         return
     path = session / rel
     if not path.is_file() or path.is_symlink():

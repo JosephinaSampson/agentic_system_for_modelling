@@ -314,6 +314,17 @@ class ManifestTests(unittest.TestCase):
         errs = self.set_proposal("ode_measurements", "biomass", self.ODE.replace("measurement_id,", "id,", 1))
         self.assertTrue(any("measurement_id" in e for e in errs), errs)
 
+    def test_ode_measurements_must_be_csv(self):
+        # the ODE pipeline reads comma-separated .csv only: a .tsv proposal is refused at the first check
+        (self.dir / "proposals" / "P1_seed_genes.csv").unlink(missing_ok=True)
+        (self.dir / "proposals" / "P1_ode.tsv").write_text(self.ODE.replace(",", "\t"), encoding="utf-8")
+        self.write_json("proposals/index.json", [{
+            "id": "P1", "target_layer": "biomass", "kind": "ode_measurements",
+            "path": "proposals/P1_ode.tsv", "method": "m", "thresholds": {}}])
+        self.build()
+        errs = self.errors()
+        self.assertTrue(any("ode_measurements" in e and ".csv" in e for e in errs), errs)
+
     def test_wrong_layer_rejected(self):
         errs = self.set_proposal("seed_genes", "maboss", self.SEED)
         self.assertTrue(any("target_layer" in e for e in errs), errs)

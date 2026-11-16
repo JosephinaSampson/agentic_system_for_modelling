@@ -8,7 +8,10 @@ fitted within which bounds, and why any measurement is left out.
 
 Schema (schema_version 1; every key below is required unless marked optional):
   kind: "ode_mapping"
-  inputs.model: {ode_session, revision, bundle, sha256}  bundle = .zip under runs/ode-modeler/<ode_session>/
+  inputs.model: {ode_session, revision, bundle, sha256}  bundle = .zip under runs/ode-modeler/<ode_session>/;
+                                                         revision = the captured revision (rev_<32 hex>) whose
+                                                         integrity.json, under runs/ode-modeler/<ode_session>/, is
+                                                         byte-identical to the zip's model/integrity.json
   inputs.measurements: {path, sha256}                    a .csv under runs/orchestrator/ (orchestrator route; each
                                                          row's `source` is a declared source id)
                     or {session, proposal, approval}     an approved data-analyst `ode_measurements` proposal
@@ -19,29 +22,51 @@ Schema (schema_version 1; every key below is required unless marked optional):
   dose: {model_unit, factors: {unit: positive float}}    measurement dose_unit -> multiplier into the model dose
                                                          unit (K of a target_activity_scaling is in that unit);
                                                          factors may be empty when no row has a dose
+  values: {readouts: {readout: {model_unit, factors: {value_unit: positive float}}},
+           viability: {factors: {value_unit: positive float}}}
+                                                         measurement value_unit -> multiplier: an `absolute`
+                                                         time_course row becomes value x factor in the observable's
+                                                         model_unit; a dose_response row becomes value x factor as a
+                                                         fraction (e.g. "%": 0.01, "fraction": 1). Never inferred: a
+                                                         row without its factor fails the check. Normalised rules
+                                                         need no factor (units cancel), but every row of one
+                                                         normalisation group must share one value_unit.
   readouts: [{readout, observable}]
   conditions: [{condition, parameters: [override], initials: [override]}]
       override: {name, value, value_unit, model_unit, factor}  model value = value * factor
   rules: [{rule_id, type, measurements: [ids], ...}]
       time_course: method in fold_change_vs_t0|relative_to_condition|max_normalized|absolute
-                   (reference = a condition, for relative_to_condition only)
+                   (reference = a condition, for relative_to_condition only). Data and predictions are
+                   normalised the same way:
+                     fold_change_vs_t0      each row / the mean of the time-0 rows of the same readout, condition
+                                            and use (required, non-zero; t0 rows are kept, target 1)
+                     relative_to_condition  each row / the mean of the reference-condition rows of the same
+                                            readout and use at the same converted time (required, non-zero; the
+                                            reference rows belong to the rule)
+                     max_normalized         each row / the max of the rule's rows of the same readout and use
+                                            (positive); the prediction uses the same rows' simulated max, so
+                                            hold-out rows never change fit targets or fit predictions
+                     absolute               value x values.readouts factor (model unit)
       endpoint_contrast: method in ratio|difference, test, reference (conditions), time (model time unit)
       dose_response: drug_entry = {form: target_activity_scaling, parameter, K: number | {fit: name}}
                                 or {form: inhibitor_species, species}
                      viability = {observable, untreated (condition), time (model time unit)}
                      every dose row's time, converted, must equal viability.time (dose rows are evaluated there),
                      and every row's readout must map (readouts) to viability.observable
-      endpoint_contrast: every test row needs a reference row of the same readout and the same `use`; every
+      endpoint_contrast: every row's condition is the test or the reference; every test row needs a reference
+                     row of the same readout and the same `use`; a ratio needs a non-zero reference mean; every
                      row's time, converted, must equal the rule time
       (times are compared with math.isclose, rel_tol 1e-9: 0.03 h x 60 = 1.7999999999999998 is 1.8 min)
   fit: [{name, kind: parameter|initial, lower, upper, unit, justification: {source, locator} | {text}}]
   unmapped: [{measurement_id, reason}]
 
 Every measurement row is used by exactly one rule or listed in unmapped with a real reason, and at
-least one use=fit row is scored by a rule (a contrast reference row is not scored).
+least one use=fit row is scored by a rule (a contrast reference row is not scored). A fitted name that a
+condition overrides (or an inhibitor_species dose sets) is refused: the override would mask it there.
 
 CLI:
-  ode_mapping.py draft --purpose P --ode-session S --revision R --bundle ZIP --measurements CSV [--source ID:PATH ...]
+  ode_mapping.py draft --purpose P --ode-session S --bundle ZIP --measurements CSV [--revision R] [--source ID:PATH ...]
+                      (the revision is derived from the bundle; --revision, when given, must be that revision)
   ode_mapping.py check MAPPING        (exit 1, one problem per line on stderr)
 """
 
@@ -52,6 +77,8 @@ import csv
 import hashlib
 import json
 import math
+import os
+import re
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -64,7 +91,8 @@ from scripts.data import sources as user_sources  # noqa: E402
 from scripts.data.common import RUNS_ROOT, project_root, reject_symlinks, sha256_file, strict_json  # noqa: E402
 from scripts.ode import measurements as table, model_zip  # noqa: E402
 
-KEYS = ("kind", "schema_version", "inputs", "time", "dose", "readouts", "conditions", "rules", "fit", "unmapped")
+KEYS = ("kind", "schema_version", "inputs", "time", "dose", "values", "readouts", "conditions", "rules", "fit",
+        "unmapped")
 ORCHESTRATOR = ("runs", "orchestrator")
 ODE_RUNS = ("runs", "ode-modeler")
 MODEL_KEYS = {"ode_session", "revision", "bundle", "sha256"}
@@ -78,6 +106,7 @@ BASE_RULE_KEYS = {"rule_id", "type", "measurements"}
 OPTIONAL_RULE_KEYS = {"note"}
 SHA256 = user_sources.SHA256
 TIME_RTOL = 1e-9  # converted row times equal a rule time within this relative tolerance (float products)
+REVISION = re.compile(r"rev_[0-9a-f]{32}\Z")  # a generated BioMASS revision id (docs/ode-contract.md)
 
 
 def _parts(rel) -> tuple:
@@ -147,15 +176,51 @@ def measurement_table(root: Path, meas: dict) -> tuple[Path, str]:
     return _proposal_entry(root, meas)
 
 
+def captured_revisions(root: Path, session: str, integrity: bytes) -> set[str]:
+    """Names of the captured revision folders (rev_<32 hex>) under runs/ode-modeler/<session>/ whose
+    integrity.json is byte-identical to `integrity` (symlinks are never followed)."""
+    base = Path(root) / ODE_RUNS[0] / ODE_RUNS[1] / session
+    reject_symlinks(base, Path(root))
+    found = set()
+    for dirpath, _dirs, files in os.walk(base):
+        folder = Path(dirpath)
+        candidate = folder / "integrity.json"
+        if REVISION.fullmatch(folder.name) and "integrity.json" in files and not candidate.is_symlink() \
+                and candidate.read_bytes() == integrity:
+            found.add(folder.name)
+    return found
+
+
+def bundle_revision(root: Path, session: str, bundle: Path, revision=None) -> str:
+    """The captured revision the export zip was made from (its model/integrity.json); ValueError when there is
+    none, when `revision` is given and is not it, or when several captured revisions match and none is given."""
+    names = captured_revisions(root, session, model_zip.integrity(bundle))
+    shown = ", ".join(sorted(names)) or "none"
+    if revision is not None:
+        if revision not in names:
+            raise ValueError(f"revision {revision!r} is not the captured revision of the export zip (captured "
+                             f"revisions under runs/ode-modeler/{session}/ with its model/integrity.json: {shown})")
+        return revision
+    if not names:
+        raise ValueError(f"no captured revision under runs/ode-modeler/{session}/ has the export zip's "
+                         "model/integrity.json; capture the revision the bundle was exported from first")
+    if len(names) > 1:
+        raise ValueError(f"several captured revisions match the export zip ({shown}); pass --revision")
+    return names.pop()
+
+
 # ---------------------------------------------------------------- draft
 
-def draft(root: Path, purpose: str, *, ode_session: str, revision, bundle_rel: str, measurements_rel: str,
-          sources: list[tuple[str, str]] = ()) -> Path:
+def draft(root: Path, purpose: str, *, ode_session: str, bundle_rel: str, measurements_rel: str,
+          sources: list[tuple[str, str]] = (), revision=None) -> Path:
     """Write a skeleton mapping: model binding, measurement table and sources (sha256 computed).
 
+    The revision is derived from the bundle (bundle_revision); a given `revision` must be that one.
     Readouts, rules and fit are empty, every condition of the table is listed without
-    overrides, every measurement is `unmapped` with the reason "TODO", and time.model_unit
-    and the factors are TODO: `check` refuses all of these until they are filled in.
+    overrides, every measurement is `unmapped` with the reason "TODO", and time.model_unit,
+    the time/dose factors and the values block (one entry per readout with its value units,
+    and the viability units of dosed rows) are TODO: `check` refuses all of these until they
+    are filled in (delete the values.readouts entries no `absolute` rule needs).
     """
     root = Path(root)
     state.identifier(purpose)
@@ -164,6 +229,7 @@ def draft(root: Path, purpose: str, *, ode_session: str, revision, bundle_rel: s
         raise ValueError(f"{target.relative_to(root).as_posix()} exists; drafts never overwrite a mapping")
     bundle = _bundle_path(root, ode_session, bundle_rel)
     model_zip.introspect(bundle)
+    revision = bundle_revision(root, ode_session, bundle, revision)
     meas = _measurements_path(root, measurements_rel)
     rows = table.read(meas)
     declared = []
@@ -174,6 +240,11 @@ def draft(root: Path, purpose: str, *, ode_session: str, revision, bundle_rel: s
     conditions = list(dict.fromkeys(row["condition"] for row in rows))
     dose_units = list(dict.fromkeys(row["dose_unit"] for row in rows if row["dose"] is not None and row["dose_unit"]))
     units = list(dict.fromkeys(row["time_unit"] for row in rows if row["time_unit"]))
+    value_units: dict = {}
+    for row in rows:
+        if row["dose"] is None and row["readout"] and row["value_unit"]:
+            value_units.setdefault(row["readout"], {})[row["value_unit"]] = None
+    viability_units = {row["value_unit"]: None for row in rows if row["dose"] is not None and row["value_unit"]}
     mapping = {
         "kind": "ode_mapping",
         "schema_version": 1,
@@ -183,6 +254,9 @@ def draft(root: Path, purpose: str, *, ode_session: str, revision, bundle_rel: s
                    "sources": declared},
         "time": {"model_unit": "TODO", "factors": {unit: None for unit in units}},
         "dose": {"model_unit": "TODO", "factors": {unit: None for unit in dose_units}},
+        "values": {"readouts": {name: {"model_unit": "TODO", "factors": units_}
+                                for name, units_ in value_units.items()},
+                   "viability": {"factors": viability_units}},
         "readouts": [],
         "conditions": [{"condition": c, "parameters": [], "initials": []} for c in conditions],
         "rules": [],
@@ -217,6 +291,10 @@ class _Checker:
         self.units: set[str] = set()
         self.time_factors: dict = {}
         self.dose_factors: dict = {}
+        self.value_factors: dict[str, dict] = {}  # readout -> {value_unit: factor} (values.readouts)
+        self.viability_factors: dict = {}  # value_unit -> factor into a fraction (values.viability)
+        self.overrides: dict[str, dict[str, set]] = {}  # condition -> {"parameters": names, "initials": names}
+        self.inhibitors: list[tuple[str, object]] = []  # (rule label, species set to the dose)
         self.readouts: set[str] = set()
         self.readout_observable: dict[str, object] = {}
         self.scored: set[str] = set()  # measurement ids that are fit targets of a rule (not references)
@@ -242,8 +320,9 @@ class _Checker:
             self.error("inputs.model must have exactly ode_session, revision, bundle, sha256")
             return
         revision = model["revision"]
-        if not (_is_text(revision) or (type(revision) is int and revision >= 0)):
-            self.error("inputs.model: revision must be a non-empty string or a non-negative integer")
+        revision_ok = isinstance(revision, str) and bool(REVISION.fullmatch(revision))
+        if not revision_ok:
+            self.error("inputs.model: revision must be a generated revision id rev_<32 lowercase hex>")
         try:
             path = _bundle_path(self.root, model["ode_session"], model["bundle"])
         except (ValueError, OSError) as exc:
@@ -258,6 +337,12 @@ class _Checker:
             self.names = model_zip.introspect(path)
         except (ValueError, OSError) as exc:
             self.error(f"inputs.model: cannot read {model['bundle']}: {exc}")
+            return
+        if revision_ok:
+            try:
+                bundle_revision(self.root, model["ode_session"], path, revision)
+            except (ValueError, OSError) as exc:
+                self.error(f"inputs.model: {exc}")
 
     def measurements(self, meas) -> None:
         if not isinstance(meas, dict) or set(meas) not in (FILE_KEYS, PROPOSAL_KEYS):
@@ -350,6 +435,45 @@ class _Checker:
                 self.error(f'measurement {row["measurement_id"]}: dose_unit "{row["dose_unit"]}" has no '
                            "positive factor in dose.factors")
 
+    # -- values (decision U: explicit factors for absolute values and viability)
+    def _factor_map(self, label: str, factors) -> dict:
+        if not isinstance(factors, dict):
+            self.error(f"{label}.factors must be an object of value unit -> positive factor")
+            return {}
+        good = {}
+        for unit, factor in factors.items():
+            if not _is_number(factor) or factor <= 0:
+                self.error(f"{label}.factors[{unit!r}] must be a positive number (units are never inferred)")
+            else:
+                good[unit] = factor
+        return good
+
+    def values_section(self, value) -> None:
+        if not isinstance(value, dict) or set(value) != {"readouts", "viability"}:
+            self.error("values must have exactly readouts and viability")
+            return
+        readouts = value["readouts"]
+        if not isinstance(readouts, dict):
+            self.error("values.readouts must be an object of readout -> {model_unit, factors}")
+        else:
+            for name, entry in readouts.items():
+                label = f"values.readouts[{name!r}]"
+                if name not in self.readouts:
+                    self.error(f"{label}: {name} is not declared under readouts")
+                if not isinstance(entry, dict) or set(entry) != {"model_unit", "factors"}:
+                    self.error(f"{label} must have exactly model_unit and factors")
+                    continue
+                unit = entry["model_unit"]
+                if not _is_text(unit) or unit.strip().upper() == "TODO":
+                    self.error(f"{label}: model_unit must be a real unit (the observable's unit in the model), "
+                               "not empty or TODO")
+                self.value_factors[name] = self._factor_map(label, entry["factors"])
+        via = value["viability"]
+        if not isinstance(via, dict) or set(via) != {"factors"}:
+            self.error("values.viability must have exactly factors (value unit -> factor into a fraction)")
+        else:
+            self.viability_factors = self._factor_map("values.viability", via["factors"])
+
     # -- readouts and conditions
     def readouts_section(self, items) -> None:
         if not isinstance(items, list):
@@ -405,6 +529,7 @@ class _Checker:
             if cid in self.conditions:
                 self.error(f"conditions[{n}]: condition {cid} is declared twice")
             self.conditions.add(cid)
+            overridden = self.overrides.setdefault(cid, {"parameters": set(), "initials": set()})
             for key, universe, noun in (("parameters", "parameters", "parameter"),
                                         ("initials", "species", "species")):
                 entries = item[key]
@@ -418,6 +543,7 @@ class _Checker:
                         if name in seen:
                             self.error(f"condition {cid}: {name} is set twice in {key}")
                         seen.add(name)
+                        overridden[key].add(name)
 
     # -- fit
     def fit_section(self, items) -> None:
@@ -541,10 +667,74 @@ class _Checker:
                 self.rule_rows(label, item, rid)
             return
         rows = self.rule_rows(label, item, rid)
-        if method == "relative_to_condition":
-            self.condition(label, "reference", item["reference"])
+        reference_ok = method != "relative_to_condition" or self.condition(label, "reference", item["reference"])
         self.forbid_dose(label, rows)
         self.scored.update(row["measurement_id"] for row in rows)
+        if method == "absolute":
+            for row in rows:
+                factors = self.value_factors.get(row["readout"], {})
+                if row["value_unit"] and row["value_unit"] not in factors:
+                    self.error(f"{label}: measurement {row['measurement_id']} value_unit {row['value_unit']!r} has no "
+                               f"positive factor in values.readouts[{row['readout']!r}].factors (absolute values are "
+                               "converted into the observable's model unit; units are never inferred)")
+        elif reference_ok:
+            self.normalised(label, method, rows, item.get("reference"))
+
+    def converted(self, row: dict):
+        """The row's time in the model unit, or None when its unit or time is reported elsewhere."""
+        factor = self.time_factors.get(row["time_unit"])
+        return row["time"] * factor if factor is not None and _is_number(row["time"]) else None
+
+    def one_unit(self, label: str, rows: list[dict], what: str) -> None:
+        units = sorted({row["value_unit"] for row in rows if row["value_unit"]})
+        if len(units) > 1:
+            self.error(f"{label}: {what} mixes value_unit {units}; data are normalised within one group, "
+                       "so its rows must share one unit")
+
+    @staticmethod
+    def _groups(rows: list[dict], *keys: str) -> dict:
+        groups: dict = {}
+        for row in rows:
+            groups.setdefault(tuple(row[k] for k in keys), []).append(row)
+        return groups
+
+    def normalised(self, label: str, method, rows: list[dict], reference) -> None:
+        """Decision N: the data of a normalised time_course are divided like the predictions; check the divisor."""
+        if any(self.converted(row) is None or not _is_number(row["value"]) for row in rows):
+            return  # reported by the time section / the table check
+        if method == "fold_change_vs_t0":
+            for (readout, cond, use), group in self._groups(rows, "readout", "condition", "use").items():
+                self.one_unit(label, group, f"readout {readout} in condition {cond} (use={use})")
+                t0 = [row["value"] for row in group if self.converted(row) == 0.0]
+                if not t0:
+                    for row in group:
+                        self.error(f"{label}: measurement {row['measurement_id']} has no time-0 row of the same "
+                                   "readout, condition and use (fold_change_vs_t0 divides data and predictions by "
+                                   "their t0 value)")
+                elif sum(t0) / len(t0) == 0:
+                    self.error(f"{label}: the t0 value of readout {readout} in condition {cond} (use={use}) is 0; "
+                               "fold_change_vs_t0 cannot divide by it")
+        elif method == "relative_to_condition":
+            for (readout, use), group in self._groups(rows, "readout", "use").items():
+                self.one_unit(label, group, f"readout {readout} (use={use})")
+                for row in group:
+                    t = self.converted(row)
+                    refs = [o["value"] for o in group if o["condition"] == reference
+                            and math.isclose(self.converted(o), t, rel_tol=TIME_RTOL)]
+                    if not refs:
+                        self.error(f"{label}: measurement {row['measurement_id']} has no reference row (condition "
+                                   f"{reference!r}, same readout and use) at time {t!r}; relative_to_condition "
+                                   "divides data and predictions by the reference")
+                    elif sum(refs) / len(refs) == 0:
+                        self.error(f"{label}: measurement {row['measurement_id']}: the reference value (condition "
+                                   f"{reference!r}) at time {t!r} is 0; relative_to_condition cannot divide by it")
+        elif method == "max_normalized":
+            for (readout, use), group in self._groups(rows, "readout", "use").items():
+                self.one_unit(label, group, f"readout {readout} (use={use})")
+                top = max(row["value"] for row in group)
+                if top <= 0:
+                    self.error(f"{label}: the max of readout {readout} (use={use}) is {top!r}; max_normalized "
+                               "needs a positive maximum")
 
     def same_time(self, label: str, rows: list[dict], time, what: str) -> None:
         """Each row's time, converted to the model unit, must equal `time` (relative tolerance 1e-9)."""
@@ -582,6 +772,18 @@ class _Checker:
             for what in ("test", "reference"):
                 if item[what] not in present:
                     self.error(f"{label}: no measurement of the {what} condition {item[what]!r}")
+            for row in rows:  # a third condition would be averaged into the reference mean
+                if row["condition"] not in (item["test"], item["reference"]):
+                    self.error(f"{label}: measurement {row['measurement_id']} condition {row['condition']!r} is "
+                               f"neither the test {item['test']!r} nor the reference {item['reference']!r}")
+            paired = [row for row in rows if row["condition"] in (item["test"], item["reference"])]
+            for (readout, use), group in self._groups(paired, "readout", "use").items():
+                self.one_unit(label, group, f"readout {readout} (use={use})")
+                refs = [row["value"] for row in group if row["condition"] == item["reference"]]
+                if method == "ratio" and refs and all(_is_number(v) for v in refs) and sum(refs) / len(refs) == 0:
+                    self.error(f"{label}: the reference mean of readout {readout} (use={use}, condition "
+                               f"{item['reference']!r}) is {sum(refs) / len(refs)!r}; a ratio contrast cannot "
+                               "divide by it")
             refs = {(row["readout"], row["use"]) for row in rows if row["condition"] == item["reference"]}
             for row in rows:
                 if row["condition"] == item["test"] and (row["readout"], row["use"]) not in refs:
@@ -600,6 +802,11 @@ class _Checker:
                            "dose_response needs dosed rows")
         self.drug_entry(label, item["drug_entry"])
         self.scored.update(row["measurement_id"] for row in rows)
+        for row in rows:
+            if row["value_unit"] and row["value_unit"] not in self.viability_factors:
+                self.error(f"{label}: measurement {row['measurement_id']} value_unit {row['value_unit']!r} has no "
+                           "positive factor in values.viability.factors (viability is converted into a fraction; "
+                           "units are never inferred)")
         via = item["viability"]
         if isinstance(via, dict) and _is_number(via.get("time")):
             self.same_time(label, [row for row in rows if row["dose"] is not None], via["time"], "viability.time")
@@ -632,6 +839,7 @@ class _Checker:
             elif not _is_number(k) or k <= 0:
                 self.error(f"{label}: drug_entry K must be a positive number or {{\"fit\": name}}")
         elif form == "inhibitor_species" and set(entry) == {"form", "species"}:
+            self.inhibitors.append((label, entry["species"]))
             if self.names is not None and entry["species"] not in self.names["species"]:
                 self.error(f"{label}: drug_entry species {entry['species']!r} is not a species of the model")
         else:
@@ -658,6 +866,19 @@ class _Checker:
                 self.error(f"{label}: measurement {mid} is not in the measurement table")
             elif mid in self.uses:
                 self.uses[mid].append(label)
+
+    def fit_overrides(self) -> None:
+        """A fitted name a condition overrides (or an inhibitor dose sets) is masked there: refuse it."""
+        for cid, overridden in self.overrides.items():
+            for key, kind in (("parameters", "parameter"), ("initials", "initial")):
+                for name in sorted(overridden[key]):
+                    if self.fit_kinds.get(name) == kind:
+                        self.error(f"fit {name}: condition {cid} also overrides it ({key}); the override replaces "
+                                   f"the fitted value there, so those measurements would not constrain {name}")
+        for label, species in self.inhibitors:
+            if isinstance(species, str) and self.fit_kinds.get(species) == "initial":
+                self.error(f"fit {species}: {label} sets it to the dose (inhibitor_species), which replaces the "
+                           "fitted value in every dose condition")
 
     def fit_targets(self) -> None:
         if self.rows and not any(self.rows[mid]["use"] == "fit" for mid in self.scored if mid in self.rows):
@@ -689,7 +910,7 @@ def load_and_check(root: Path, rel: str) -> tuple[dict, str, list[str]]:
     if data.get("kind") != "ode_mapping" or type(data.get("schema_version")) is not int \
             or data.get("schema_version") != 1:
         checker.error('kind must be "ode_mapping" and schema_version 1')
-    if tuple(data) != KEYS and set(data) != set(KEYS):
+    if set(data) != set(KEYS):
         checker.error(f"mapping keys must be exactly {', '.join(KEYS)}")
     else:
         # inputs first: the other sections are checked against the model names and table rows.
@@ -699,8 +920,10 @@ def load_and_check(root: Path, rel: str) -> tuple[dict, str, list[str]]:
         checker.fit_section(data["fit"])
         checker.time(data["time"])
         checker.dose(data["dose"])
+        checker.values_section(data["values"])
         checker.rules_section(data["rules"])
         checker.unmapped_section(data["unmapped"])
+        checker.fit_overrides()
         checker.coverage()
         checker.fit_targets()
         checker.sources.uncited()
@@ -723,7 +946,7 @@ def main(argv: list[str] | None = None) -> int:
     d = sub.add_parser("draft")
     d.add_argument("--purpose", required=True)
     d.add_argument("--ode-session", required=True)
-    d.add_argument("--revision", required=True)
+    d.add_argument("--revision", help="optional: must equal the captured revision derived from the bundle")
     d.add_argument("--bundle", required=True, metavar="ZIP")
     d.add_argument("--measurements", required=True, metavar="CSV")
     d.add_argument("--source", action="append", default=[], metavar="ID:PATH",

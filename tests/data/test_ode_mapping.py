@@ -28,6 +28,9 @@ ROWS = [
     "M5,pR,ligand,30,min,0.1,uM,0.8,fraction,,,,fit,s1,Fig. 2",
     "M6,pR,ligand,30,min,1,uM,0.4,fraction,,,,holdout,s1,Fig. 2",
 ]
+REV = "rev_" + "a" * 32  # the captured revision the export zip carries (model/integrity.json)
+REV_DIR = f"runs/ode-modeler/ode-1/captures/c1/{REV}"
+INTEGRITY = '{"generated_model/ode.py": "' + "0" * 64 + '"}\n'
 PARAMS = ["kf1", "kr1", "kf2", "kf3"]
 SPECIES = ["E", "R", "ER", "pER"]
 
@@ -44,9 +47,11 @@ def sha(path):
 
 
 def make_zip(path, parameters=PARAMETERS_PY, species=SPECIES_PY, observable=OBSERVABLE_PY,
-             requirements="biomass==0.14.0\n"):
+             requirements="biomass==0.14.0\n", integrity=INTEGRITY):
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w") as zf:
+        if integrity is not None:
+            zf.writestr("model/integrity.json", integrity)
         zf.writestr("model/name2idx/parameters.py", parameters)
         zf.writestr("model/name2idx/species.py", species)
         zf.writestr("model/observable.py", observable)
@@ -61,6 +66,8 @@ class OdeFixture(unittest.TestCase):
         self.root = Path(tmp.name).resolve()
         shutil.copyfile(state.ROOT / "templates" / "DECISIONS.md", self.root / "DECISIONS.md")
         make_zip(self.root / BUNDLE)
+        (self.root / REV_DIR).mkdir(parents=True)
+        (self.root / REV_DIR / "integrity.json").write_text(INTEGRITY, encoding="utf-8")
         self.write_rows(ROWS)
         src = self.root / SOURCE
         src.parent.mkdir(parents=True)
@@ -79,13 +86,15 @@ class OdeFixture(unittest.TestCase):
 
     def complete(self):
         """A draft turned into a complete, valid mapping (written to MAP)."""
-        ode_mapping.draft(self.root, "p1", ode_session=SESSION, revision="r1", bundle_rel=BUNDLE,
+        ode_mapping.draft(self.root, "p1", ode_session=SESSION, bundle_rel=BUNDLE,
                           measurements_rel=MEAS, sources=[("s1", SOURCE)])
         data = self.load()
         data["time"] = {"model_unit": "min", "factors": {"min": 1.0}}
         data["dose"] = {"model_unit": "nM", "factors": {"uM": 1000.0}}
+        data["values"] = {"readouts": {"pR": {"model_unit": "molecule", "factors": {"a.u.": 1.0}}},
+                          "viability": {"factors": {"fraction": 1.0}}}
         data["readouts"] = [{"readout": "pR", "observable": "pR"}]
-        override = {"name": "kf1", "value": 2.0, "value_unit": "x", "model_unit": "x", "factor": 1.0}
+        override = {"name": "kr1", "value": 2.0, "value_unit": "x", "model_unit": "x", "factor": 1.0}
         data["conditions"] = [
             {"condition": "ctrl", "parameters": [],
              "initials": [{"name": "E", "value": 2.0, "value_unit": "nM", "model_unit": "molecule", "factor": 6.0}]},
@@ -140,13 +149,13 @@ class IntrospectTests(OdeFixture):
 
 class DraftTests(OdeFixture):
     def test_draft_refuses_overwrite_and_lists_todo(self):
-        path = ode_mapping.draft(self.root, "p1", ode_session=SESSION, revision="r1", bundle_rel=BUNDLE,
+        path = ode_mapping.draft(self.root, "p1", ode_session=SESSION, bundle_rel=BUNDLE,
                                  measurements_rel=MEAS, sources=[("s1", SOURCE)])
         self.assertEqual(path.relative_to(self.root).as_posix(), MAP)
         data = self.load()
         self.assertEqual(tuple(data), ode_mapping.KEYS)
         self.assertEqual((data["kind"], data["schema_version"]), ("ode_mapping", 1))
-        self.assertEqual(data["inputs"]["model"], {"ode_session": SESSION, "revision": "r1", "bundle": BUNDLE,
+        self.assertEqual(data["inputs"]["model"], {"ode_session": SESSION, "revision": REV, "bundle": BUNDLE,
                                                    "sha256": sha(self.root / BUNDLE)})
         self.assertEqual(data["inputs"]["measurements"], {"path": MEAS, "sha256": sha(self.root / MEAS)})
         self.assertEqual([u["id"] for u in data["inputs"]["sources"]], ["s1"])
@@ -155,8 +164,11 @@ class DraftTests(OdeFixture):
         self.assertEqual(data["fit"], [])
         self.assertEqual(data["unmapped"], [{"measurement_id": f"M{n}", "reason": "TODO"} for n in range(1, 7)])
         self.assertEqual([c["condition"] for c in data["conditions"]], ["ligand", "ctrl"])
+        # decision U: every value unit is listed for an explicit factor (TODO until the researcher fills it in)
+        self.assertEqual(data["values"], {"readouts": {"pR": {"model_unit": "TODO", "factors": {"a.u.": None}}},
+                                          "viability": {"factors": {"fraction": None}}})
         with self.assertRaisesRegex(ValueError, "exists"):
-            ode_mapping.draft(self.root, "p1", ode_session=SESSION, revision="r1", bundle_rel=BUNDLE,
+            ode_mapping.draft(self.root, "p1", ode_session=SESSION, bundle_rel=BUNDLE,
                               measurements_rel=MEAS, sources=[])
         errors = ode_mapping.check(self.root, MAP)
         self.assertError(errors, "TODO")
@@ -165,14 +177,29 @@ class DraftTests(OdeFixture):
         other = "runs/ode-modeler/ode-2/captures/c/export.zip"
         make_zip(self.root / other)
         with self.assertRaisesRegex(ValueError, "runs/ode-modeler/ode-1"):
-            ode_mapping.draft(self.root, "p1", ode_session=SESSION, revision="r1", bundle_rel=other,
+            ode_mapping.draft(self.root, "p1", ode_session=SESSION, bundle_rel=other,
                               measurements_rel=MEAS, sources=[])
+
+    def test_draft_derives_the_revision_from_the_captured_export(self):
+        # review ode_mapping.py:244: the revision is the captured revision whose integrity.json the zip carries
+        with self.assertRaisesRegex(ValueError, "rev_" + "b" * 32):
+            ode_mapping.draft(self.root, "p1", ode_session=SESSION, revision="rev_" + "b" * 32, bundle_rel=BUNDLE,
+                              measurements_rel=MEAS, sources=[])
+        make_zip(self.root / BUNDLE, integrity='{"other": "1"}\n')
+        with self.assertRaisesRegex(ValueError, "no captured revision"):
+            ode_mapping.draft(self.root, "p1", ode_session=SESSION, bundle_rel=BUNDLE, measurements_rel=MEAS,
+                              sources=[])
+        make_zip(self.root / BUNDLE, integrity=None)
+        with self.assertRaisesRegex(ValueError, "integrity.json"):
+            ode_mapping.draft(self.root, "p1", ode_session=SESSION, bundle_rel=BUNDLE, measurements_rel=MEAS,
+                              sources=[])
+        self.assertFalse((self.root / MAP).exists())
 
     def test_cli_draft_and_check(self):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": str(self.root)}), \
                 redirect_stdout(out), redirect_stderr(err):
-            code = ode_mapping.main(["draft", "--purpose", "p1", "--ode-session", SESSION, "--revision", "r1",
+            code = ode_mapping.main(["draft", "--purpose", "p1", "--ode-session", SESSION,
                                      "--bundle", BUNDLE, "--measurements", MEAS, "--source", f"s1:{SOURCE}"])
             self.assertEqual(code, 0, err.getvalue())
             self.assertEqual(ode_mapping.main(["check", MAP]), 1)
@@ -200,6 +227,109 @@ class CheckTests(OdeFixture):
         data, digest, errors = ode_mapping.load_and_check(self.root, MAP)
         self.assertEqual((errors, digest), ([], sha(self.root / MAP)))
         self.assertEqual(data["kind"], "ode_mapping")
+
+    def test_revision_must_be_the_captured_revision_of_the_bundle(self):
+        # review ode_mapping.py:244: a revision that is not the one the export zip binds is refused
+        other = "rev_" + "b" * 32
+        self.assertError(self.mutated(lambda d: d["inputs"]["model"].update(revision=other)), "revision", other)
+        (self.root / f"runs/ode-modeler/ode-1/captures/c2/{other}").mkdir(parents=True)
+        (self.root / f"runs/ode-modeler/ode-1/captures/c2/{other}/integrity.json").write_text('{"x": "y"}\n')
+        self.assertError(self.mutated(lambda d: d["inputs"]["model"].update(revision=other)), "revision", other)
+        self.assertError(self.mutated(lambda d: d["inputs"]["model"].update(revision="r1")), "revision")
+        self.assertError(self.mutated(lambda d: d["inputs"]["model"].update(revision=3)), "revision")
+
+    def test_stray_contrast_condition_refused(self):
+        # review repro t2 (check side): a row of a third condition in an endpoint_contrast rule
+        def stray(d):
+            self.rewrite(d, ROWS + ["M8,pR,other,30,min,,,100,a.u.,,,,holdout,s1,Fig. 1B"])
+            d["conditions"].append({"condition": "other", "parameters": [], "initials": []})
+            d["rules"][1]["measurements"].append("M8")
+        self.assertError(self.mutated(stray), "R2", "M8", "neither")
+
+    def test_zero_ratio_reference_refused(self):
+        # review repro t3: a ratio contrast whose reference mean is 0 passed check, then build died on NaN
+        def zero(d):
+            self.rewrite(d, [r.replace(",1.0,a.u.", ",0,a.u.") if r.startswith("M3") else r for r in ROWS])
+        self.assertError(self.mutated(zero), "R2", "reference", "ctrl", "0")
+
+        def difference(d):
+            zero(d)
+            d["rules"][1]["method"] = "difference"
+        self.assertEqual(self.mutated(difference), [])
+
+    def test_values_block_shape(self):
+        self.assertError(self.mutated(lambda d: d.pop("values")), "keys")
+        self.assertError(self.mutated(lambda d: d.update(values=5)), "values")
+        self.assertError(self.mutated(lambda d: d["values"].update(extra={})), "values")
+        self.assertError(self.mutated(lambda d: d["values"]["readouts"].update(
+            ghost={"model_unit": "nM", "factors": {"nM": 1}})), "ghost")
+        self.assertError(self.mutated(lambda d: d["values"]["readouts"]["pR"].update(model_unit="TODO")),
+                         "values.readouts", "model_unit")
+        self.assertError(self.mutated(lambda d: d["values"]["readouts"]["pR"]["factors"].update({"a.u.": 0})),
+                         "values.readouts", "positive")
+        self.assertError(self.mutated(lambda d: d["values"]["viability"]["factors"].update({"%": None})),
+                         "values.viability", "positive")
+
+    def test_absolute_rows_need_a_value_factor(self):
+        # decision U: absolute values are converted into the observable's model unit by an explicit factor
+        def absolute(d):
+            d["rules"][0]["method"] = "absolute"
+            d["values"]["readouts"] = {}
+        self.assertError(self.mutated(absolute), "M1", "a.u.", "values.readouts")
+
+        def fine(d):
+            d["rules"][0]["method"] = "absolute"
+        self.assertEqual(self.mutated(fine), [])
+
+    def test_viability_rows_need_a_fraction_factor(self):
+        self.assertError(self.mutated(lambda d: d["values"]["viability"].update(factors={})),
+                         "M5", "fraction", "values.viability")
+
+    def test_fold_change_needs_a_nonzero_t0_row(self):
+        def no_t0(d):
+            d["rules"][0]["measurements"] = ["M2"]
+            d["unmapped"] = [{"measurement_id": "M1", "reason": "not used"}]
+        self.assertError(self.mutated(no_t0), "R1", "M2", "time-0")
+
+        def zero_t0(d):
+            self.rewrite(d, [r.replace(",1.0,a.u.", ",0,a.u.") if r.startswith("M1") else r for r in ROWS])
+        self.assertError(self.mutated(zero_t0), "R1", "t0", "0")
+
+    def test_normalisation_group_must_share_one_value_unit(self):
+        def mixed(d):
+            self.rewrite(d, [r.replace("a.u.", "ng") if r.startswith("M2") else r for r in ROWS])
+        self.assertError(self.mutated(mixed), "R1", "value_unit")
+
+        def mixed_contrast(d):
+            self.rewrite(d, [r.replace("a.u.", "ng") if r.startswith("M4") else r for r in ROWS])
+        self.assertError(self.mutated(mixed_contrast), "R2", "value_unit")
+
+    def test_relative_to_condition_needs_reference_rows_at_the_same_time(self):
+        def missing(d):
+            d["rules"][0] = {"rule_id": "R1", "type": "time_course", "method": "relative_to_condition",
+                             "reference": "ctrl", "measurements": ["M1", "M2"]}
+        errors = self.mutated(missing)
+        self.assertError(errors, "R1", "M1", "reference")
+        self.assertError(errors, "R1", "M2", "reference")
+
+    def test_max_normalized_needs_a_positive_maximum(self):
+        def zero(d):
+            self.rewrite(d, [r.replace(",1.0,a.u.", ",0,a.u.").replace(",3.0,a.u.", ",0,a.u.")
+                             if r[:2] in ("M1", "M2") else r for r in ROWS])
+            d["rules"][0]["method"] = "max_normalized"
+        self.assertError(self.mutated(zero), "R1", "max")
+
+    def test_fitted_name_overridden_by_a_condition_refused(self):
+        # review run.py:248: the override would mask the fitted value in that condition
+        def masked(d):
+            d["conditions"][1]["parameters"][0]["name"] = "kf2"
+        self.assertError(self.mutated(masked), "kf2", "ligand")
+
+        def inhibitor(d):
+            d["fit"].append({"name": "ER", "kind": "initial", "lower": 1.0, "upper": 5.0, "unit": "nM",
+                             "justification": {"text": "range"}})
+            d["rules"][2]["drug_entry"] = {"form": "inhibitor_species", "species": "ER"}
+        self.assertError(self.mutated(inhibitor), "ER", "R3")
 
     def test_missing_time_factor_refused(self):
         self.write_rows([ROWS[0].replace(",min,", ",h,"), *ROWS[1:]])
@@ -414,8 +544,10 @@ class CheckTests(OdeFixture):
 
     def test_relative_to_condition_reference_must_be_a_condition(self):
         def ok(d):
+            self.rewrite(d, ROWS + ["M8,pR,ctrl,0,min,,,0.5,a.u.,,,,fit,s1,Fig. 1A",
+                                    "M9,pR,ctrl,30,min,,,1.5,a.u.,,,,fit,s1,Fig. 1A"])
             d["rules"][0] = {"rule_id": "R1", "type": "time_course", "method": "relative_to_condition",
-                             "reference": "ctrl", "measurements": ["M1", "M2"]}
+                             "reference": "ctrl", "measurements": ["M1", "M2", "M8", "M9"]}
         self.assertEqual(self.mutated(ok), [])
 
         def bad(d):
