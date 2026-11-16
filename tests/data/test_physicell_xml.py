@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import tempfile
@@ -160,6 +161,22 @@ class CaptureBindingTests(unittest.TestCase):
         with unittest.mock.patch.object(Path, "read_bytes", counting):
             sx.capture(self.project, self.rel)
         self.assertEqual(len(reads), 1)
+
+    def test_manifest_sha256_is_of_the_bytes_verified(self):
+        # PR #17 review 4587427279: the binding carries the sha256 of exactly the capture.json bytes it parsed
+        raw = (self.folder / "capture.json").read_bytes()
+        original = Path.read_bytes
+
+        def first_read_then_replaced(path):
+            data = original(path)
+            if path.name == "capture.json":  # replaced after this read: the binding keeps the bytes it verified
+                path.write_bytes(data + b"\n")
+            return data
+        with unittest.mock.patch.object(Path, "read_bytes", first_read_then_replaced):
+            bound, _ = sx.capture_tree(self.project, self.rel)
+        self.assertEqual(bound["manifest_sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertNotEqual(bound["manifest_sha256"], hashlib.sha256((self.folder / "capture.json").read_bytes())
+                            .hexdigest())
 
     def test_capture_tree_is_parsed_from_the_verified_bytes(self):
         # PR #17 review 4586112201: the tree comes from the bytes whose hash was verified, read once

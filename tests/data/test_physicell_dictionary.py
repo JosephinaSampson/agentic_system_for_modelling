@@ -439,8 +439,12 @@ class ConformanceTests(DictionaryTests):
         self.capture = built_capture(self.root, "mc-stage-a", f"cap-c{self.count}", edit=edit, **kw)
         self.refused(self.good(), "does not conform to the design.*" + pattern)
 
+    def conform(self, design, capture):
+        """conformance on the caller's binding of `capture` (settings_xml.capture_tree), as its callers do."""
+        return cd.conformance(self.root, design, *cd.sx.capture_tree(self.root, capture))
+
     def test_conforming_capture_passes(self):
-        self.assertEqual(cd.conformance(self.root, self.design, self.capture), [])
+        self.assertEqual(self.conform(self.design, self.capture), [])
 
     def test_cell_definition_set(self):
         def extra(xml_root):
@@ -530,10 +534,10 @@ class ConformanceTests(DictionaryTests):
                   "cfg": (folder / "maboss-hyp/model.cfg").read_bytes()}
         right = built_capture(self.root, STAGE_A, "cap-two", edit=second_model, **mine,
                               files={"hyp.bnd": theirs["bnd"], "hyp.cfg": theirs["cfg"]})
-        self.assertEqual(cd.conformance(self.root, design, right), [])
+        self.assertEqual(self.conform(design, right), [])
         swapped = built_capture(self.root, STAGE_A, "cap-swap", edit=second_model, **theirs,
                                 files={"hyp.bnd": mine["bnd"], "hyp.cfg": mine["cfg"]})
-        problems = cd.conformance(self.root, design, swapped)
+        problems = self.conform(design, swapped)
         for cell in ("tumor", "tumor_hypoxic"):
             self.assertTrue(any(p.startswith(f"cell definition {cell}: its MaBoSS .bnd") for p in problems), problems)
 
@@ -546,7 +550,35 @@ class ConformanceTests(DictionaryTests):
         tampered = cd.sx.load(self.root / self.design["basis"]["capture"] / "package/config" / cd.sx.XML_NAME)
         tampered.find("domain/x_max").text = "500"
         with mock.patch.object(cd.sx, "load", return_value=tampered):
-            self.assertEqual(cd.conformance(self.root, self.design, self.capture), [])
+            self.assertEqual(self.conform(self.design, self.capture), [])
+
+    def test_capture_bound_once_per_dictionary(self):
+        # PR #17 review 4587427279: capture_dictionary binds the stage-A capture once (sx.capture_tree) and passes the
+        # binding to conformance; capture.json, original.xml, the package XML and each dependency are read once
+        from unittest import mock
+        reads = []
+        original = Path.read_bytes
+        stage_a = self.root / self.capture
+
+        def counting(path):
+            if stage_a in path.parents:
+                reads.append(path.relative_to(stage_a).as_posix())
+            return original(path)
+        with mock.patch.object(Path, "read_bytes", counting):
+            out = json.loads(self.run_capture(self.good()).read_text())
+        files = ["capture.json", "original.xml", *(d["path"] for d in json.loads(
+            (stage_a / "capture.json").read_text())["dependencies"]), f"package/config/{cd.sx.XML_NAME}"]
+        self.assertEqual(sorted(reads), sorted(files))
+        self.assertEqual(out["capture"]["sha256"], hashlib.sha256((stage_a / "capture.json").read_bytes()).hexdigest())
+
+    def test_conformance_takes_the_binding(self):
+        # PR #17 review 4587427279: conformance never binds the stage-A capture itself
+        from unittest import mock
+        bound, tree = cd.sx.capture_tree(self.root, self.capture)
+        with mock.patch.object(cd.sx, "capture_tree", wraps=cd.sx.capture_tree) as binds:
+            self.assertEqual(cd.conformance(self.root, self.design, bound, tree), [])
+        basis = [] if self.design["basis"] is None else [self.design["basis"]["capture"]]
+        self.assertEqual([c.args[1] for c in binds.call_args_list], basis)
 
     def test_no_enabled_rules_ruleset(self):
         self.refused_capture("enabled rules ruleset", rules=True)

@@ -194,14 +194,15 @@ INPUT_FILES_RELOAD = ("the PhysiCell server (2.5.2) cannot reload a captured con
 def capture(root: Path, capture_rel: str) -> dict:
     """Bind a captured configuration, verified against its capture.json manifest.
 
-    Returns {session, capture, xml_path, xml_sha256, rules_path, rules_sha256, manifest}; `manifest` is the
-    capture.json parsed from the same bytes whose hashes were verified here."""
+    Returns {session, capture, xml_path, xml_sha256, rules_path, rules_sha256, manifest, manifest_sha256}; `manifest`
+    is the capture.json parsed from the same bytes whose hashes were verified here, `manifest_sha256` the sha256 of
+    exactly those capture.json bytes."""
     return capture_tree(root, capture_rel)[0]
 
 
 def capture_tree(root: Path, capture_rel: str) -> tuple[dict, ET.Element]:
     """(capture(root, capture_rel), the package XML parsed from exactly the bytes whose sha256 it verified): read once,
-    so a caller never loads a verified path again."""
+    so a caller never loads a verified path again (capture.json included: the binding's manifest_sha256)."""
     root = Path(root)
     rel = PurePosixPath(capture_rel) if isinstance(capture_rel, str) else None
     if rel is None or rel.is_absolute() or "\\" in capture_rel or rel.as_posix() != capture_rel \
@@ -217,7 +218,8 @@ def capture_tree(root: Path, capture_rel: str) -> tuple[dict, ET.Element]:
     reject_symlinks(manifest_path, root)
     if not manifest_path.is_file():
         raise ValueError("capture manifest capture.json missing")
-    manifest = strict_json(manifest_path.read_bytes())
+    manifest_raw = manifest_path.read_bytes()
+    manifest = strict_json(manifest_raw)
     if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
         raise ValueError("unsupported capture manifest")
     if manifest.get("session_id") != session or manifest.get("capture_id") != capture_id:
@@ -258,4 +260,5 @@ def capture_tree(root: Path, capture_rel: str) -> tuple[dict, ET.Element]:
         rules_sha = by_name[name]
     return {"session": session, "capture": capture_id,
             "xml_path": (rel / "package/config" / XML_NAME).as_posix(), "xml_sha256": xml_sha,
-            "rules_path": rules_path, "rules_sha256": rules_sha, "manifest": manifest}, tree
+            "rules_path": rules_path, "rules_sha256": rules_sha, "manifest": manifest,
+            "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest()}, tree

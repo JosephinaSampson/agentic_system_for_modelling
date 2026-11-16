@@ -417,8 +417,11 @@ def _carrier_models(tree, manifest: dict, models: dict, problems: list) -> None:
                                 "MaBoSS export was imported")
 
 
-def conformance(root: Path, design: dict, capture_rel: str) -> list[str]:
+def conformance(root: Path, design: dict, bound: dict, tree) -> list[str]:
     """Every difference between a checked design and its stage-A capture (ruling T9-b); [] when it conforms.
+
+    `bound, tree` is the caller's settings_xml.capture_tree of the stage-A capture (the binding and the XML parsed
+    from exactly the verified bytes); conformance never binds or reads that capture again.
 
     The cell definitions (plus nothing else), their cycles, the substrates (the untouched library default substrate
     of a new configuration aside) with their label, values, units and Dirichlet settings, the domain and max_time
@@ -426,7 +429,6 @@ def conformance(root: Path, design: dict, capture_rel: str) -> list[str]:
     .bnd/.cfg bytes (sha256) of its design handoff's bnd_file/cfg_file, no PhysiBoSS link and no enabled rules
     ruleset."""
     root = Path(root)
-    bound, tree = sx.capture_tree(root, capture_rel)  # trees of exactly the verified bytes, never a second read
     basis_tree = None
     if design["basis"] is not None:
         basis_tree = sx.capture_tree(root, design["basis"]["capture"])[1]
@@ -445,7 +447,7 @@ def conformance(root: Path, design: dict, capture_rel: str) -> list[str]:
 def capture_dictionary(root: Path, invocation_rel: str, capture_rel: str, design_rel: str) -> Path:
     root = Path(root)
     session, invocation = _invocation(invocation_rel)
-    bound = sx.capture(root, capture_rel)
+    bound, tree = sx.capture_tree(root, capture_rel)  # bound once: conformance and the record use this binding
     if bound["session"] != session:
         raise ValueError(f"invocation session {session} is not the capture's session {bound['session']}")
     design, design_sha, problems = pd.load_and_check(root, design_rel)
@@ -460,12 +462,9 @@ def capture_dictionary(root: Path, invocation_rel: str, capture_rel: str, design
     except ValueError as exc:
         raise ValueError(f"lineage: the invocation folder {folder} has no task.txt with the design's DATA_INPUT line "
                          f"(its tool_calls.json must be the record of the dispatched run): {exc}") from exc
-    problems = conformance(root, design, capture_rel)
+    problems = conformance(root, design, bound, tree)
     if problems:
         raise ValueError(f"the stage-A capture {capture_rel} does not conform to the design: " + "; ".join(problems))
-    manifest = root / capture_rel / "capture.json"
-    reject_symlinks(manifest, root)
-    manifest_sha = hashlib.sha256(manifest.read_bytes()).hexdigest()
     path = root / invocation
     reject_symlinks(path, root)
     if not path.is_file():
@@ -478,7 +477,7 @@ def capture_dictionary(root: Path, invocation_rel: str, capture_rel: str, design
     if errors:
         raise ValueError("dictionary not recorded: " + "; ".join(errors))
     out = {"kind": "physicell_dictionary", "schema_version": 1, "session": session, "invocation": invocation,
-           "capture": {"path": capture_rel, "sha256": manifest_sha},
+           "capture": {"path": capture_rel, "sha256": bound["manifest_sha256"]},
            "design": {"path": design_rel, "sha256": design_sha}, "signals": found["signals"],
            "behaviors": found["behaviors"], "source_sha256": hashlib.sha256(raw).hexdigest()}
     target = (root / design_rel).with_name("physicell_dictionary.json")

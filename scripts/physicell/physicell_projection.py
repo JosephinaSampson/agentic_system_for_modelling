@@ -220,6 +220,7 @@ class _Checker(pd.Citations):
     def __init__(self, root: Path):
         super().__init__(root, has_basis=True)
         self.capture: dict | None = None
+        self.bound: dict | None = None         # the settings_xml binding of the capture (with self.xml, its tree)
         self.session: str | None = None
         self.xml = None
         self.parents: dict = {}
@@ -262,6 +263,7 @@ class _Checker(pd.Citations):
             return
         self.parents = {child: parent for parent in self.xml.iter() for child in parent}
         self.capture = ref
+        self.bound = bound
         self.session = bound["session"]
         if bound["rules_path"] is not None:
             self.error(f"capture {ref['path']!r} has an enabled rules ruleset; {sx.RULES_RELOAD}")
@@ -305,7 +307,7 @@ class _Checker(pd.Citations):
                            f"{exc}")
         if self.capture is not None:
             try:  # ruling T9-b: stage B starts only from a stage-A capture that conforms to its design
-                problems = cd.conformance(self.root, design, self.capture["path"])
+                problems = cd.conformance(self.root, design, self.bound, self.xml)  # the capture bound once
             except (ValueError, OSError) as exc:
                 problems = [str(exc)]
             if problems:

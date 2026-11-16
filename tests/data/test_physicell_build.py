@@ -585,7 +585,13 @@ class SettingsCopyTests(Base):
 
     def test_binding_mismatch_is_refused(self):
         self.write_verification(after={**self.after, "xml_sha256": "0" * 64})
-        self.refused("no longer matches")
+        self.refused("no longer matches.*regenerate the verification with verify_export.py")
+
+    def test_verification_written_before_manifest_sha256_is_refused(self):
+        # PR #17 review 4587427279: the after binding gained manifest_sha256; an older file must be regenerated
+        old = {k: v for k, v in self.after.items() if k != "manifest_sha256"}
+        self.write_verification(after=old)
+        self.refused("without manifest_sha256.*regenerate the verification with verify_export.py")
 
     def test_existing_backup_is_refused_and_report_names_settings(self):
         # a build that finds an existing backup: pre-seed through a make that creates one

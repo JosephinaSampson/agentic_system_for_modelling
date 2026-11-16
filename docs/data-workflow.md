@@ -445,7 +445,8 @@ changes are allowed (setting values, the added links, the rules CSV rows and its
 difference fails. A failed or retried attempt keeps its own file. `build.py --verification` never trusts the file:
 it recomputes the verification (`verify_export.compute`) on the file's own projection and after capture and
 refuses unless it passes with the same entries, unexpected changes, bindings and projection. Settings with an
-intracellular MaBoSS model need `--template template_BM` (`template` is refused).
+intracellular MaBoSS model need `--template template_BM` (`template` is refused). Verification files written before
+the capture binding recorded `manifest_sha256` (the capture.json sha256) must be regenerated with `verify_export.py`.
 
 **Limitations.** Server 2.5.2 cannot reload a captured configuration's input files into a new session, so a
 design basis may have no input files (rules CSV, MaBoSS models, initial cells) and a projection's capture no

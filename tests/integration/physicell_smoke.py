@@ -566,7 +566,8 @@ class Smoke:
             name = Path(model.findtext(tag).strip()).name
             assert deps[name] == handoff[field]["sha256"], (tag, name, deps, handoff[field])
         design = json.loads((self.root / REAL_DESIGN).read_text())
-        assert cd.conformance(self.root, design, a["capture"]) == [], cd.conformance(self.root, design, a["capture"])
+        problems = cd.conformance(self.root, design, *sx.capture_tree(self.root, a["capture"]))
+        assert problems == [], problems
         # a stage-A capture that differs from the design (oxygen decay_rate) is refused before any dictionary
         folder = Path(a["artifacts"])
         tree = ET.parse(folder / sx.XML_NAME)
