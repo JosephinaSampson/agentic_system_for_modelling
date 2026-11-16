@@ -475,6 +475,16 @@ class _Checker:
                     self.error(f"{label}: model_unit must be a real unit (the observable's unit in the model), "
                                "not empty or TODO")
                 self.value_factors[name] = self._factor_map(label, entry["factors"])
+            units: dict = {}  # model_unit describes the observable: its readouts must agree
+            for name, entry in readouts.items():
+                obs = self.readout_observable.get(name)
+                if isinstance(entry, dict) and _is_text(entry.get("model_unit")) and isinstance(obs, str):
+                    units.setdefault(obs, {})[name] = entry["model_unit"]
+            for obs, by_readout in sorted(units.items()):
+                if len(set(by_readout.values())) > 1:
+                    shown = ", ".join(f"{r}: {u!r}" for r, u in sorted(by_readout.items()))
+                    self.error(f"values.readouts: readouts of observable {obs} give different model_unit ({shown}); "
+                               "model_unit is the observable's unit in the model")
         via = value["viability"]
         if not isinstance(via, dict) or set(via) != {"factors"}:
             self.error("values.viability must have exactly factors (value unit -> factor into a fraction)")

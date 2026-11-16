@@ -305,7 +305,7 @@ def _check_proposal_table(session: Path, pid, entry: dict, schema: dict, errors:
         errors.append(f"{label}: must be a .csv or .tsv table")
         return
     suffixes = schema.get("suffixes")
-    if suffixes and Path(rel).suffix.lower() not in suffixes:
+    if suffixes and Path(rel).suffix not in suffixes:  # case-sensitive, like ode_mapping
         errors.append(f"{label}: must be a {' or '.join(suffixes)} table (the {entry.get('kind')} reader is "
                       "comma-separated .csv only)")
         return

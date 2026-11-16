@@ -18,6 +18,8 @@ Three commands, run inside this folder:
        Runs all restarts (see "restarts" in job.json), several at a time (never more than this
        machine's cores divided by job.json "workers"; one at a time for workers -1), then collects. Ctrl-C is safe and rerunning it resumes:
        finished restarts are kept, interrupted ones start again, running ones are never touched.
+       A restart refused as "running" names its owner (host, pid); if that process is confirmed
+       gone (another machine, or a reused pid), remove out/restart-N by hand and rerun.
        Success: the last line is "results.tar.gz written: N/N restarts (... ok)".
 
   3. Send back results.tar.gz (it contains the fitted values, scores, traces, figures, logs

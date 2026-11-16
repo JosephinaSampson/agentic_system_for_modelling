@@ -324,6 +324,15 @@ class ManifestTests(unittest.TestCase):
         self.build()
         errs = self.errors()
         self.assertTrue(any("ode_measurements" in e and ".csv" in e for e in errs), errs)
+        # fix round 1 #5: case-sensitive, like ode_mapping (an upper-case .CSV is refused at the first check)
+        (self.dir / "proposals" / "P1_ode.tsv").unlink()
+        (self.dir / "proposals" / "P1_ode.CSV").write_text(self.ODE, encoding="utf-8")
+        self.write_json("proposals/index.json", [{
+            "id": "P1", "target_layer": "biomass", "kind": "ode_measurements",
+            "path": "proposals/P1_ode.CSV", "method": "m", "thresholds": {}}])
+        self.build()
+        errs = self.errors()
+        self.assertTrue(any("ode_measurements" in e and ".csv" in e for e in errs), errs)
 
     def test_wrong_layer_rejected(self):
         errs = self.set_proposal("seed_genes", "maboss", self.SEED)

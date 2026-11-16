@@ -336,6 +336,18 @@ class CheckTests(OdeFixture):
         self.assertError(self.mutated(lambda d: d["values"]["viability"]["factors"].update({"%": None})),
                          "values.viability", "positive")
 
+    def test_readouts_of_one_observable_share_its_model_unit(self):
+        # fix round 1 #6: model_unit describes the observable, so two readouts of it cannot disagree
+        def two(d):
+            d["readouts"].append({"readout": "pQ", "observable": "pR"})
+            d["values"]["readouts"]["pQ"] = {"model_unit": "nM", "factors": {"a.u.": 1.0}}
+        self.assertError(self.mutated(two), "pR", "pQ", "model_unit")
+
+        def same(d):
+            two(d)
+            d["values"]["readouts"]["pQ"]["model_unit"] = "molecule"
+        self.assertEqual(self.mutated(same), [])
+
     def test_absolute_rows_need_a_value_factor(self):
         # decision U: absolute values are converted into the observable's model unit by an explicit factor
         def absolute(d):

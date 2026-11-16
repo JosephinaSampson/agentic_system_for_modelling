@@ -474,12 +474,46 @@ class RuntimeReviewTests(unittest.TestCase):
         code, started, kept, err = self.calibrate()  # owner = this live process on this host
         self.assertEqual((code, started, kept), (3, False, True))
         self.assertIn("running", err)
+        # fix round 1 #4: the refusal names the owner and how to recover once it is confirmed gone
+        for needle in (socket.gethostname(), f"pid {os.getpid()}", "out/restart-1", "remove"):
+            self.assertIn(needle, err)
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
         code, started, kept, _ = self.calibrate(pid=dead.pid)  # stale: removed and run again
         self.assertEqual((code, started, kept), (0, True, False))
         code, started, kept, _ = self.calibrate(host="node-9", pid=1)  # another host, nothing to ask: kept
         self.assertEqual((code, started, kept), (3, False, True))
+
+    def test_restart_folder_appears_with_its_owner_and_a_concurrent_twin_loses(self):
+        # fix round 1 #3: the folder is created with owner.json inside (temp dir + rename), and a duplicate
+        # that loses the race leaves the winner's folder alone
+        self.job()
+        target = self.root / "out" / "restart-1"
+        real_rename = os.rename
+        seen = {}
+
+        def rival_wins(src, dst):
+            if Path(dst) == target:
+                seen["owner_in_temp"] = (Path(src) / "owner.json").is_file()
+                target.mkdir(parents=True)
+                (target / "owner.json").write_text(json.dumps({"host": "rival", "pid": 1}))
+            return real_rename(src, dst)
+        done = {"restart": 1, "seed": 1, "score": 1.0, "status": "ok", "params": {}, "wall_time_s": 0.0}
+        err = io.StringIO()
+        with mock.patch.object(run.os, "rename", rival_wins), mock.patch.object(run, "status"), \
+                mock.patch.object(run, "run_restart", return_value=done) as restart, \
+                mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", err):
+            self.assertEqual(run.cmd_calibrate(self.root, 1), 3)
+        restart.assert_not_called()
+        self.assertTrue(seen["owner_in_temp"])
+        self.assertEqual(json.loads((target / "owner.json").read_text())["host"], "rival")
+        self.assertEqual(sorted(p.name for p in (self.root / "out").iterdir()), ["restart-1"])  # no temp left
+        shutil.rmtree(target)
+        with mock.patch.object(run, "status"), mock.patch.object(run, "run_restart", return_value=done) as restart, \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(run.cmd_calibrate(self.root, 1), 0)
+            self.assertTrue((target / "owner.json").is_file())
+        self.assertEqual(sorted(p.name for p in (self.root / "out").iterdir()), ["restart-1"])
 
     def test_calibrate_asks_slurm_about_an_owner_on_another_node(self):
         self.job()
@@ -566,9 +600,11 @@ class RuntimeReviewTests(unittest.TestCase):
                 self.spec, self.compare, self.fit, self.names = spec, compare, spec["fit"], list(spec["times_model"])
                 self._ready = True
 
-            def simulate(self, name, fitted):
+            def simulate(self, name, fitted, times=None):
                 simulated.append(name)
-                return {"obs": {t: 1.0 + t for t in run.model_times(spec, name)}}
+                self.times_passed = getattr(self, "times_passed", {})
+                self.times_passed[name] = times
+                return {"obs": {t: 1.0 + t for t in (times if times is not None else run.model_times(spec, name))}}
         return Fake, simulated
 
     def test_fit_evaluation_simulates_only_what_fit_rows_need(self):
@@ -579,6 +615,16 @@ class RuntimeReviewTests(unittest.TestCase):
         simulated.clear()
         Fake(self.root).evaluate({"k1": 1.0}, "all")
         self.assertEqual(sorted(simulated), ["ctrl", "drug"])
+
+    def test_fit_evaluation_integrates_only_up_to_the_fit_horizon(self):
+        # fix round 1 #1: ctrl has a fit row at 10 and a hold-out row at 30; the fit simulation must not reach 30
+        Fake, _ = self.fake_problem(self.spec())
+        problem = Fake(self.root)
+        problem.evaluate({"k1": 1.0}, "fit")
+        self.assertEqual(problem.times_passed, {"ctrl": [0.0, 10.0]})
+        problem.times_passed = {}
+        problem.evaluate({"k1": 1.0}, "holdout")
+        self.assertEqual(problem.times_passed, {"ctrl": [0.0, 30.0], "drug": [0.0, 20.0]})
 
     def test_collect_shows_no_hold_out_prediction(self):
         self.job()
@@ -622,8 +668,9 @@ class RuntimeReviewTests(unittest.TestCase):
         self.assertEqual(rule({"workers": 2, "parallel": 8}), 1)                    # cores unknown: K = 1
         for cores in (None, 64):
             self.assertEqual(rule({"workers": -1, "parallel": 4}, 3, max_cores=cores), 1)  # every core
-        with mock.patch.dict(os.environ, {"SLURM_CPUS_PER_TASK": "1"}):  # -1 under a 1-cpu allocation is 1 worker
-            self.assertEqual(rule({"workers": -1, "parallel": 4}), 4)
+        with mock.patch.dict(os.environ, {"SLURM_CPUS_PER_TASK": "4"}):  # fix round 1 #2: raw -1 is K = 1
+            self.assertEqual(rule({"workers": -1, "parallel": 4}), 1)
+            self.assertEqual(rule({"workers": -1, "parallel": 4}, max_cores=64), 1)
         with mock.patch.object(run.os, "cpu_count", return_value=6), mock.patch("sys.stdout", io.StringIO()) as out:
             self.job(workers=2, parallel=8)
             with mock.patch.object(run, "ROOT", self.root):

@@ -142,7 +142,11 @@ Calibration is a portable job the researcher approves step by step; no specialis
    1 worker.
    Ctrl-C (or `remote.sh cancel`) leaves no `failed` result: interrupted restarts are rerun from their seed
    by the next `local.sh`/`start`, and a restart folder whose owner is still alive (same host, or a SLURM
-   task sacct reports active) is never deleted or started twice. `slurm submit --resubmit` is refused while
+   task sacct reports active) is never deleted or started twice; the refusal names the owner's host and pid,
+   and once that process is confirmed gone (another host without SLURM ids, a reused pid) remove
+   `out/restart-N` by hand and rerun. A restart folder appears with its `owner.json` already inside.
+   Each simulation integrates only up to the times of the rows being scored, so a hold-out time never
+   extends or fails a fit simulation. `slurm submit --resubmit` is refused while
    an earlier recorded array is active per sacct (or sacct cannot tell).
    **SLURM return path, end to end:** on the login node, `launch.py slurm submit <job-id>` (or the printed
    `sbatch` and `echo <id> > state/slurm_job` lines) from the unpacked job folder; follow it with

@@ -25,8 +25,9 @@ How a parameter vector is scored (no biomass.optimize, no generated data files):
     so float times are used as is; a single-point grid [0.0] is padded with 1.0, which is then
     dropped) and simulations = an empty (n_obs, 1, n_t) array; simulate(x, y0) returning False or
     raising is a solver failure (that condition is then missing, so compare gives PENALTY);
-  * only the simulations the scored rows need are run (compare.needed(spec, use)): calibration never
-    simulates a hold-out-only condition;
+  * only the simulations the scored rows need are run, each only up to the times those rows need
+    (compare.needed(spec, use)): calibration never simulates a hold-out-only condition, and a hold-out time
+    never extends the integration of a condition shared with fit rows;
   * predictions and the objective come from calibration/compare.py (unweighted SSE over use=fit rows,
     PENALTY 1e12 on any failure).
 
@@ -322,8 +323,10 @@ class Problem:
         return gene2val(self.fit, genes)
 
     # -- simulation
-    def simulate(self, name: str, fitted: dict) -> dict | None:
-        """{observable: {time: value}} for a condition, or None on a solver failure."""
+    def simulate(self, name: str, fitted: dict, times=None) -> dict | None:
+        """{observable: {time: value}} for a condition at `times` (default: every time of spec["times_model"]),
+        or None on a solver failure. biomass integrates over (times[0], times[-1]), so evaluate passes only the
+        times its rows need: a later hold-out time never extends (or fails) a fit simulation."""
         self._load()
         np = self.np
         overrides = self.compare.condition_overrides(self.spec, name, fitted)
@@ -341,7 +344,7 @@ class Problem:
             x[self.p_index[key]] *= factor
         if not all(math.isfinite(v) for v in (*x, *y0)):
             return None
-        times = model_times(self.spec, name)
+        times = sorted({0.0, *(float(t) for t in times)}) if times is not None else model_times(self.spec, name)
         grid = times if len(times) > 1 else [times[0], times[0] + 1.0]
         obs = self.obs
         obs.conditions = ["__mapped__"]
@@ -359,10 +362,11 @@ class Problem:
         return {obs_name: {t: float(obs.simulations[i, 0, j]) for j, t in enumerate(times)}
                 for i, obs_name in enumerate(self.obs_names)}
 
-    def simulate_all(self, fitted: dict, names=None) -> dict:
+    def simulate_all(self, fitted: dict, times: dict | None = None) -> dict:
+        """Simulate every condition of `times` ({name: model times}; default every spec condition and time)."""
         sims = {}
-        for name in self.names if names is None else names:
-            result = self.simulate(name, fitted)
+        for name in self.names if times is None else [n for n in self.names if n in times]:
+            result = self.simulate(name, fitted) if times is None else self.simulate(name, fitted, times[name])
             if result is not None:
                 sims[name] = result
         return sims
@@ -371,7 +375,7 @@ class Problem:
         """(score, predictions, sims); use "all" sums the fit and hold-out scores (PENALTY if either is)."""
         self._load()
         needed = getattr(self, "needed", None) or {u: self.compare.needed(self.spec, u) for u in USES}
-        sims = self.simulate_all(fitted, [name for name in self.names if name in needed[use]])
+        sims = self.simulate_all(fitted, needed[use])  # the conditions AND times of this use only
         predictions = self.compare.predict(self.spec, sims)
         if use == "all":
             scores = [self.compare.objective(self.spec, predictions, use=u) for u in ("fit", "holdout")]
@@ -506,18 +510,32 @@ def effective_workers(workers: int) -> int:
 
 def effective_parallel(settings: dict, requested: int | None = None, max_cores: int | None = None) -> int:
     """Restarts to run at a time, K, so restarts never oversubscribe the cores (one rule for every launcher):
-    with workers = effective_workers(settings workers) and P = `requested` or settings parallel,
+    with workers = settings workers and P = `requested` or settings parallel,
       workers -1 (every core)          K = 1
       max_cores known, workers >= 1    K = min(P, max_cores // workers), at least 1
       max_cores unknown                K = P when workers is 1, else 1
     max_cores: a configured host's max_cores, os.cpu_count() locally, None for a printed unconfigured host."""
     k = max(1, int(requested) if requested else int(settings["parallel"]))
-    workers = effective_workers(int(settings["workers"]))
-    if workers == -1:
+    if int(settings["workers"]) == -1:  # the raw setting: under SLURM effective_workers would turn it into a count
         return 1
+    workers = int(settings["workers"])
     if max_cores is None:
         return k if workers == 1 else 1
     return max(1, min(k, int(max_cores) // max(1, workers)))
+
+
+def _refuse_running(out_dir: Path, restart: int) -> int:
+    try:
+        owner = read_json(out_dir / "owner.json")
+    except (OSError, ValueError):
+        owner = {}
+    owner = owner if isinstance(owner, dict) else {}
+    slurm = f", SLURM job {owner['slurm_job']} task {owner.get('slurm_task') or '-'}" if owner.get("slurm_job") else ""
+    print(f"error: restart {restart} is running: owner host {owner.get('host', '?')} pid {owner.get('pid', '?')} "
+          f"(started {owner.get('started_at', '?')}{slurm}); it is never deleted or started twice. If that process "
+          f"is confirmed gone (e.g. on another host without SLURM ids, or the pid was reused), remove "
+          f"out/restart-{restart} by hand and run again.", file=sys.stderr)
+    return 3
 
 
 def cmd_calibrate(root: Path, restart: int) -> int:
@@ -532,16 +550,24 @@ def cmd_calibrate(root: Path, restart: int) -> int:
         return 0
     if out_dir.exists():
         if _owner_alive(out_dir, ask_slurm=True):
-            print(f"error: restart {restart} is running (out/restart-{restart}/owner.json names a live owner); "
-                  "it is never deleted or started twice", file=sys.stderr)
-            return 3
+            return _refuse_running(out_dir, restart)
         shutil.rmtree(out_dir)  # an interrupted (stale) attempt; start the restart again from its seed
-    out_dir.mkdir(parents=True)
     owner = {"host": socket.gethostname(), "pid": os.getpid(), "started_at": now()}
     slurm = _slurm_ids()
     if slurm:
         owner.update(slurm_job=slurm[0], slurm_task=slurm[1])
-    write_json(out_dir / "owner.json", owner)
+    # the folder appears with owner.json already inside (temp dir + rename): no ownerless window in which a
+    # concurrent duplicate could take it for stale; a duplicate that loses the rename backs off
+    (root / OUT).mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f".restart-{restart}.", dir=root / OUT))
+    try:
+        write_json(tmp / "owner.json", owner)
+        os.rename(tmp, out_dir)
+    except OSError:
+        shutil.rmtree(tmp, ignore_errors=True)
+        if out_dir.exists():
+            return _refuse_running(out_dir, restart)
+        raise
     _status_best_effort(root)
     result = run_restart(root, restart, settings["seeds"][restart - 1], settings["optimizer_options"],
                          effective_workers(settings["workers"]), out_dir)
@@ -810,14 +836,12 @@ def cmd_collect(root: Path) -> int:
             # use=fit only: hold-out rows (and hold-out-only times) stay unseen until score_holdout
             score, predictions, sims = problem.evaluate(best["params"], "fit")
             rows = prediction_rows(problem.spec, predictions, "fit")
-            keep = problem.compare.needed(problem.spec, "fit")
             write_json(stage / "predictions.json", {"best_restart": best["restart"], "params": best["params"],
                                                     "score_fit": _finite_or_none(score), "rows": rows})
             write_json(stage / "simulations.json", {
                 "best_restart": best["restart"], "time_model_unit": problem.spec["time_model_unit"],
-                "conditions": {name: {obs: [[t, _finite_or_none(v)] for t, v in values.items() if t in keep[name]]
-                                      for obs, values in by_obs.items()}
-                               for name, by_obs in sims.items() if name in keep}})
+                "conditions": {name: {obs: [[t, _finite_or_none(v)] for t, v in values.items()]
+                                      for obs, values in by_obs.items()} for name, by_obs in sims.items()}})
             log(f"best restart {best['restart']} score {score!r}")
         except Exception as exc:  # noqa: BLE001
             log(f"best-fit predictions failed: {type(exc).__name__}: {exc}")
