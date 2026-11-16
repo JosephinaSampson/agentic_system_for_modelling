@@ -43,7 +43,7 @@ Units are never inferred. This holds for setting entries and rule and link quant
 Checks: names exactly as in the captured dictionary (signals; behaviors per cell definition) and, for PhysiBoSS
 links, the cell definition's approved MaBoSS handoff (input links: its network nodes; output links: its declared
 output nodes and readouts); an unknown name lists up to 3 close matches. A setting path resolves to exactly one leaf
-element of the captured XML holding a number; its converted unit equals the element's units attribute exactly (no
+element of the captured XML holding a number (a strict ASCII decimal, settings_xml.number: no nan, inf or "_"); its converted unit equals the element's units attribute exactly (no
 spelling normalisation); without a units attribute, target_unit plus a non-empty target_unit_justification is
 required, and target_unit must equal the units the parent element declares, if any. Rule model values satisfy
 half_max > 0, hill_power > 0, saturation_value >= 0. The capture must have no enabled rules ruleset: server 2.5.2
@@ -548,9 +548,7 @@ class _Checker(pd.Citations):
         if len(element):
             self.error(f"{label}: path {e['path']} must name a leaf element, not <{element.tag}> with children")
             return
-        try:
-            float((element.text or "").strip())
-        except ValueError:
+        if sx.number(element.text) is None:  # the strict ASCII decimal verify_export compares (no nan, inf, _)
             self.error(f"{label}: <{element.tag}> at {e['path']} holds {element.text!r}, not a number")
         attribute = sx.units(element)
         if attribute is not None:

@@ -299,6 +299,25 @@ class SettingTests(ProjectionBase):
         self.assertRefused(self.setting(tool_hint=""), "tool_hint")
 
 
+class NonDecimalLeafTests(ProjectionBase):
+    """PR #17 review 4586111969: a setting's element must hold a strict ASCII decimal (sx.number), as verify_export
+    requires; float() would accept 'inf', 'nan', '1_000' and full-width digits."""
+
+    LEAVES = ((APOPTOSIS, "inf"), (RATE0, "1_000"), (f"{TUMOR}/death/model[@name='necrosis']/death_rate", "nan"),
+              (f"{TUMOR}/motility/speed", "\uff11"))
+
+    def edit_capture(self, xml_root):
+        for path, text in self.LEAVES:
+            xml_root.find(path).text = text
+
+    def test_non_decimal_leaf_refused(self):
+        for path, text in self.LEAVES:
+            with self.subTest(text=text):
+                data, entry = self.entry("set1")
+                entry.update(path=path, target_unit="1/min", target_unit_justification="the parent's units")
+                self.assertRefused(data, f"holds {text!r}, not a number")
+
+
 class TransformTests(unittest.TestCase):
     def test_model_values(self):
         self.assertAlmostEqual(pp.model_value(q(2, "h", factor=60)), 120)
