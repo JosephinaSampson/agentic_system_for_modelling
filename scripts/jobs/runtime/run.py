@@ -37,7 +37,7 @@ for use=fit rows (and fit-needed times) only, and `validate --use U` reports onl
 A restart folder is deleted (and the restart run again) only when its owner (owner.json: host, pid, process start
 identity, and the SLURM job/task/restart count/procid when run under SLURM) is gone (_owner_state: this pid, a
 dead or reused pid, an ended SLURM task, or this task's own requeue), or with `calibrate --takeover` when it cannot
-be checked from here; the takeover is atomic (cmd_calibrate). An interrupted restart (Ctrl-C, SIGTERM, SystemExit)
+be checked from here. Every claimant holds out/.claim-restart-N/ from judging to placing the folder (cmd_calibrate). An interrupted restart (Ctrl-C, SIGTERM, SystemExit)
 writes no result.json, so a rerun starts it again from its seed; only real errors and the selftest cap write
 a `failed` result. Restarts run K at a time with K = effective_parallel (workers -1: 1; otherwise
 min(parallel, cores // workers), locally cores = os.cpu_count()).
@@ -84,6 +84,11 @@ INIT_THRESHOLD = 1e12
 INIT_MAX_DRAWS = 10000  # per population member
 MIN_POPULATION = 5  # scipy differential_evolution refuses an init array with fewer members
 USES = ("fit", "holdout", "all")
+# The bundle's runtime/compare version, stamped into job.json as "runtime_version" by build.py. Bump it whenever
+# run.py or compare.py change what a bundle computes or accepts; import_results.py and score_holdout.py refuse a
+# job with an older or missing stamp ("rebuild this job"). 2: validate --partial/--nominal, fit-scale
+# max_normalized, divisor rows by use, "trivial" rows.
+RUNTIME_VERSION = 2
 
 
 # ---------------------------------------------------------------- pure helpers (stdlib)
@@ -196,21 +201,27 @@ def slurm_active(job: str, task: str = "") -> bool | None:
     return any(state not in SLURM_ENDED for state in states)
 
 
-def _process_start(pid: int) -> tuple[str, float] | None:
-    """(identity, start time in epoch seconds) of a live process, or None when it cannot be read.
+def _boot_id() -> str | None:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
 
-    Linux: /proc/<pid>/stat field 22 (start, in clock ticks since boot); identity = boot id + ticks (exact, immune
-    to wall-clock jumps), time = /proc/stat btime + ticks / CLK_TCK. Elsewhere: `ps -o lstart= -p PID`."""
+
+def _process_start(pid: int) -> tuple[str | None, float] | None:
+    """(identity or None, start time in epoch seconds) of a live process, or None when it cannot be read.
+
+    Linux: /proc/<pid>/stat field 22 (start, in clock ticks since boot); identity = "linux:<boot id>:<ticks>"
+    (exact, immune to wall-clock jumps; None without a boot id: btime moves with the wall clock), time = /proc/stat
+    btime + ticks / CLK_TCK. Elsewhere: `ps -o lstart= -p PID`, identity "ps:<lstart>". Identities are compared
+    only within one scheme (_owner_state)."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
         ticks = int(stat[stat.rindex(")") + 2:].split()[19])
         btime = next(int(line.split()[1]) for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines()
                      if line.startswith("btime "))
-        try:
-            boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
-        except OSError:
-            boot = f"btime-{btime}"
-        return f"linux:{boot}:{ticks}", btime + ticks / os.sysconf("SC_CLK_TCK")
+        boot = _boot_id()
+        return (f"linux:{boot}:{ticks}" if boot else None), btime + ticks / os.sysconf("SC_CLK_TCK")
     except (OSError, ValueError, IndexError, StopIteration):
         pass
     import subprocess
@@ -223,6 +234,10 @@ def _process_start(pid: int) -> tuple[str, float] | None:
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
     return None
+
+
+def _scheme(identity) -> str | None:
+    return identity.split(":", 1)[0] if isinstance(identity, str) and ":" in identity else None
 
 
 PID_START_SLACK_S = 2.0  # started_at is truncated to seconds and btime is whole seconds
@@ -260,7 +275,8 @@ def _owner_state(folder: Path, claiming: bool = False) -> str:
     """"alive", "stale" or "unknown" for a restart folder without result.json, from its owner.json.
 
     `claiming`: cmd_calibrate, before it takes the folder over. Same host: stale when the pid is gone, reused (its
-    process started after owner.json was written: the recorded process_start identity differs, or, for an older
+    process started after owner.json was written: the recorded process_start identity of the same scheme differs
+    (identities of different schemes are not compared: alive), or, for an older
     owner.json without it, its start time is later than started_at) or, when claiming, this very process (it has
     not created the folder yet); otherwise alive. Another host (a SLURM compute node: it cannot be checked from
     here): unknown, unless claiming and the owner recorded its SLURM job: this task's own requeue (_own_requeue)
@@ -292,7 +308,9 @@ def _owner_state(folder: Path, claiming: bool = False) -> str:
     if current is not None:
         recorded = owner.get("process_start")
         if isinstance(recorded, str) and recorded:
-            return "alive" if recorded == current[0] else "stale"  # another process now has that pid
+            if current[0] is not None and _scheme(recorded) == _scheme(current[0]):
+                return "alive" if recorded == current[0] else "stale"  # another process now has that pid
+            return "alive"  # identities of different schemes (or none now) prove nothing
         started = _epoch(owner.get("started_at"))
         if started is not None and current[1] > started + PID_START_SLACK_S:
             return "stale"  # the process with that pid started after the owner wrote owner.json
@@ -644,72 +662,128 @@ def _owner_bytes(folder: Path) -> bytes | None:
         return None
 
 
-def cmd_calibrate(root: Path, restart: int, takeover: bool = False) -> int:
-    """Run one restart in out/restart-N/, created with owner.json inside (temp dir + rename).
-
-    An existing folder without result.json is taken over only when its owner is stale (or, with `takeover`,
-    cannot be checked): the folder is first renamed to a unique trash name (only one process can win that
-    rename), its owner.json re-read (other bytes than the ones judged stale: another process took it over
-    first, so it is renamed back and this one backs off), then the new folder is renamed into place and the
-    trash deleted. A loser of either rename backs off with exit 3."""
-    job = read_json(root / "job.json")
-    settings = job["settings"]
-    if not 1 <= restart <= settings["restarts"]:
-        print(f"error: --restart must be in 1..{settings['restarts']}", file=sys.stderr)
-        return 2
-    out_dir = root / OUT / f"restart-{restart}"
-    if (out_dir / "result.json").exists():
-        print(f"restart {restart} already done (out/restart-{restart}/result.json); not rerun")
-        return 0
-    judged = None
-    stale = out_dir.exists()
-    if stale:
-        judged = _owner_bytes(out_dir)  # the owner.json bytes this decision is about
-        state = _owner_state(out_dir, claiming=True)
-        if state == "alive" or (state == "unknown" and not takeover):
-            return _refuse_running(out_dir, restart, state)
+def _owner_record() -> dict:
+    """owner.json of this process: host, pid, start time, process start identity and SLURM ids."""
     owner = {"host": socket.gethostname(), "pid": os.getpid(), "started_at": now()}
     identity = _process_start(os.getpid())
-    if identity is not None:
+    if identity is not None and identity[0] is not None:
         owner["process_start"] = identity[0]
     slurm = _slurm_ids()
     if slurm:
         owner.update(slurm_job=slurm[0], slurm_task=slurm[1], slurm_restart=os.environ.get("SLURM_RESTART_COUNT")
                      or "0", slurm_procid=os.environ.get("SLURM_PROCID", ""))
-    # the folder appears with owner.json already inside (temp dir + rename): no ownerless window in which a
-    # concurrent duplicate could take it for stale
-    (root / OUT).mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp(prefix=f".restart-{restart}.", dir=root / OUT))
-    trash = None
+    return owner
+
+
+def _place(out: Path, prefix: str, target: Path, owner: dict) -> bool:
+    """Create `target` with owner.json already inside (temp dir + rename, atomic and exclusive: the rename fails
+    when target exists); False when it exists."""
+    tmp = Path(tempfile.mkdtemp(prefix=prefix, dir=out))
     try:
         write_json(tmp / "owner.json", owner)
-        if stale:
-            trash = root / OUT / f".stale-restart-{restart}.{os.getpid()}.{os.urandom(4).hex()}"
-            try:
-                os.rename(out_dir, trash)  # the exclusive claim: only one process can move this folder
-            except FileNotFoundError:
-                trash = None
-                return _back_off(restart, "another process took the stale folder over first")
-            if _owner_bytes(trash) != judged:  # out_dir was replaced since it was judged: not ours to delete
-                try:
-                    os.rename(trash, out_dir)
-                    trash = None
-                except OSError:
-                    print(f"warning: could not move {trash.name} back to out/restart-{restart}; it holds another "
-                          "process's restart folder", file=sys.stderr)
-                    trash = None
-                return _back_off(restart, "another process took the folder over while it was being checked")
         try:
-            os.rename(tmp, out_dir)
+            os.rename(tmp, target)
+            return True
         except OSError:
-            if out_dir.exists():
-                return _back_off(restart, "another process created the folder first")
+            if target.exists():
+                return False
             raise
     finally:
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
-        if trash is not None:
-            shutil.rmtree(trash, ignore_errors=True)  # the verified stale attempt
+
+
+def _remove(out: Path, folder: Path, restart: int) -> bool:
+    """Move `folder` to a unique trash name, then delete it; False when it is already gone."""
+    trash = out / f".trash-restart-{restart}.{os.getpid()}.{os.urandom(4).hex()}"
+    try:
+        os.rename(folder, trash)
+    except FileNotFoundError:
+        return False
+    shutil.rmtree(trash, ignore_errors=True)
+    return True
+
+
+def _claim_path(out: Path, restart: int) -> Path:
+    return out / f".claim-restart-{restart}"
+
+
+def _break_token(out: Path, restart: int, judged: bytes | None) -> Path:
+    """The exclusive token for breaking the claim whose owner.json bytes are `judged` (one breaker per claim)."""
+    return out / f".claim-restart-{restart}.break-{hashlib.sha256(judged or b'').hexdigest()[:16]}"
+
+
+def _acquire_claim(out: Path, restart: int, owner: dict, takeover: bool) -> Path | str:
+    """The per-restart claim out/.claim-restart-N/ (owner.json inside), held from judging the restart folder to
+    placing it, so at most one claimant judges and changes out/restart-N at a time (atomic directory rename, which
+    works on NFS). Returns the claim, or the reason to back off.
+
+    A claim whose owner is stale (_owner_state, the restart folder's rules; or cannot be checked, with
+    `takeover`) is broken by the one process that creates its break token .claim-restart-N.break-<hash of the
+    claim's owner.json>: it re-reads those bytes in place (only a token holder removes a claim, and the token is
+    unique to these bytes, so they cannot change meanwhile), moves the claim away and retries. A break token
+    left by a dead breaker is reported, never removed automatically."""
+    claim = _claim_path(out, restart)
+    for _attempt in range(3):
+        if _place(out, f".claiming-restart-{restart}.", claim, owner):
+            return claim
+        judged = _owner_bytes(claim)
+        state = _owner_state(claim, claiming=True)
+        if state == "alive" or (state == "unknown" and not takeover):
+            try:
+                holder = json.loads(judged.decode("utf-8")) if judged else {}
+            except ValueError:
+                holder = {}
+            holder = holder if isinstance(holder, dict) else {}
+            return (f"another process is starting it (out/{claim.name} held by host {holder.get('host', '?')} pid "
+                    f"{holder.get('pid', '?')}); if that process is confirmed gone, remove out/{claim.name} by hand")
+        token = _break_token(out, restart, judged)
+        if not _place(out, f".breaking-restart-{restart}.", token, owner):
+            return (f"another process is clearing the stale claim out/{claim.name} (out/{token.name}); if no process "
+                    f"is starting restart {restart}, remove out/{token.name} by hand")
+        try:
+            if _owner_bytes(claim) == judged:
+                _remove(out, claim, restart)
+        finally:
+            shutil.rmtree(token, ignore_errors=True)
+    return f"out/{claim.name} keeps changing"
+
+
+def cmd_calibrate(root: Path, restart: int, takeover: bool = False) -> int:
+    """Run one restart in out/restart-N/, created with owner.json inside (temp dir + rename).
+
+    Every claimant first takes the per-restart claim (_acquire_claim) and holds it until out/restart-N is placed,
+    so judging and replacing the folder is one exclusive step. An existing folder without result.json is replaced
+    only when its owner is stale (or, with `takeover`, cannot be checked): it is renamed to a unique trash name and
+    deleted, and the new folder renamed into place. A claimant that cannot take the claim backs off with exit 3."""
+    job = read_json(root / "job.json")
+    settings = job["settings"]
+    if not 1 <= restart <= settings["restarts"]:
+        print(f"error: --restart must be in 1..{settings['restarts']}", file=sys.stderr)
+        return 2
+    out = root / OUT
+    out_dir = out / f"restart-{restart}"
+    if (out_dir / "result.json").exists():
+        print(f"restart {restart} already done (out/restart-{restart}/result.json); not rerun")
+        return 0
+    out.mkdir(parents=True, exist_ok=True)
+    owner = _owner_record()
+    claim = _acquire_claim(out, restart, owner, takeover)
+    if isinstance(claim, str):
+        return _back_off(restart, claim)
+    try:
+        if (out_dir / "result.json").exists():  # finished while this process waited for the claim
+            print(f"restart {restart} already done (out/restart-{restart}/result.json); not rerun")
+            return 0
+        if out_dir.exists():
+            state = _owner_state(out_dir, claiming=True)
+            if state == "alive" or (state == "unknown" and not takeover):
+                return _refuse_running(out_dir, restart, state)
+            _remove(out, out_dir, restart)  # an interrupted (stale) attempt; start the restart again from its seed
+        if not _place(out, f".restart-{restart}.", out_dir, owner):
+            return _back_off(restart, "the folder appeared while this process held the claim")
+    finally:
+        shutil.rmtree(claim, ignore_errors=True)
     _status_best_effort(root)
     result = run_restart(root, restart, settings["seeds"][restart - 1], settings["optimizer_options"],
                          effective_workers(settings["workers"]), out_dir)
@@ -745,8 +819,8 @@ def prediction_rows(spec: dict, predictions: dict, use: str = "all") -> dict:
             continue
         rows[mid] = {"rule_id": m["rule_id"], "type": m["type"], "observable": m["observable"],
                      "condition": m["condition"], "time": m["time"], "dose": m["dose"], "use": m["use"],
-                     "role": m["role"], "value": m["value"], "target": _finite_or_none(m["target"]),
-                     "prediction": _finite_or_none(predictions.get(mid))}
+                     "role": m["role"], "trivial": bool(m.get("trivial")), "value": m["value"],
+                     "target": _finite_or_none(m["target"]), "prediction": _finite_or_none(predictions.get(mid))}
     return rows
 
 

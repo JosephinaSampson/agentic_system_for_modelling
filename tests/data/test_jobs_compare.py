@@ -142,6 +142,22 @@ class CompareTests(unittest.TestCase):
         alone = compare.resolve(mapping([tc("max_normalized", ["h1"])]), rows[2:])  # no fit row: nan target
         self.assertTrue(math.isnan(alone["measurements"]["h1"]["target"]))
 
+    def test_rows_that_are_one_by_construction_are_flagged_trivial(self):
+        # review 2 follow-up N4b: score_holdout leaves these out of n_rows (their residual cannot depend on fit)
+        rows = [row("a0", "ctrl", 0.0, 1.0), row("a1", "ctrl", 30.0, 3.0), row("h0", "ctrl", 0.0, 1.1, use="holdout"),
+                row("h1", "ctrl", 60.0, 4.0, use="holdout")]
+        ms = compare.resolve(mapping([tc("fold_change_vs_t0", ["a0", "a1", "h0", "h1"])]), rows)["measurements"]
+        self.assertEqual({m: ms[m]["trivial"] for m in ms}, {"a0": True, "a1": False, "h0": True, "h1": False})
+        rows = [row("m1", "ctrl", 10.0, 3.0), row("r1", "ref", 10.0, 1.5), row("hr", "ref", 20.0, 1.0, use="holdout")]
+        ms = compare.resolve(mapping([tc("relative_to_condition", ["m1", "r1", "hr"], reference="ref")]),
+                             rows)["measurements"]
+        self.assertEqual({m: ms[m]["trivial"] for m in ms}, {"m1": False, "r1": True, "hr": True})
+        rows = [row("f1", "ctrl", 10.0, 1.0), row("f2", "ctrl", 10.0, 2.0), row("h1", "ctrl", 20.0, 2.0, use="holdout")]
+        ms = compare.resolve(mapping([tc("max_normalized", ["f1", "f2", "h1"])]), rows)["measurements"]
+        self.assertEqual({m: ms[m]["trivial"] for m in ms}, {"f1": True, "f2": True, "h1": False})
+        ms = compare.resolve(mapping([tc("absolute", ["f1"])]), rows[:1])["measurements"]
+        self.assertFalse(ms["f1"]["trivial"])
+
     def test_zero_denominator_is_nan(self):
         rows = [row("m0", "ctrl", 0.0, 1.0), row("m1", "ctrl", 30.0, 1.0)]
         spec = compare.resolve(mapping([tc("fold_change_vs_t0", ["m0", "m1"])]), rows)

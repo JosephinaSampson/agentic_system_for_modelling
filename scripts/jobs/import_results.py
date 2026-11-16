@@ -296,6 +296,7 @@ def import_results(root, job_id: str, *, reproduce=None) -> Path:
     root = Path(root)
     reproduce = reproduce or default_reproduce
     job_dir = launch.find_job(root, job_id)
+    launch.require_runtime_version(job_dir)
     job_bytes = (job_dir / "job.json").read_bytes()
     job = strict_json(job_bytes)
     archive = root.joinpath(*launch.RESULTS, job_id, "results.tar.gz")

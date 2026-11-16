@@ -14,7 +14,8 @@ canonical JSON (scripts/jobs/settings.py `digest`).
 
 bundle.tar.gz holds one directory `<job-id>/` with:
   job.json                {"kind": "biomass-calibration", "job_id", "mapping": {path, sha256, approval},
-                           "export_sha256", "settings", "framework_commit", "files": {relpath: sha256}}
+                           "export_sha256", "settings", "framework_commit", "runtime_version" (run.RUNTIME_VERSION),
+                           "files": {relpath: sha256}}
                           (`files` lists every other bundle file; the same bytes are written beside the bundle)
   model/<package>/...     the .py files of the export's Text2Model package, at their export path (BioMASS
                           2.5.x: model/generated_model/...), byte for byte; nothing else of the revision folder
@@ -57,6 +58,7 @@ from scripts.data import approvals  # noqa: E402
 from scripts.data.common import project_root, reject_symlinks, sha256_file, utc_now  # noqa: E402
 from scripts.jobs import settings as job_settings  # noqa: E402
 from scripts.jobs.runtime import compare  # noqa: E402
+from scripts.jobs.runtime.run import RUNTIME_VERSION  # noqa: E402,F401 - stamped into job.json
 from scripts.ode import measurements as table, model_zip, ode_mapping  # noqa: E402
 
 FRAMEWORK = Path(__file__).resolve().parents[2]
@@ -191,7 +193,7 @@ def assemble(root: Path, mapping_rel: str, approval_id: str, settings_rel: str) 
     job = {"kind": KIND, "job_id": jid,
            "mapping": {"path": mapping_rel, "sha256": mapping_sha, "approval": approval_id},
            "export_sha256": export_sha, "settings": settings, "framework_commit": commit,
-           "files": {rel: _sha(files[rel]) for rel in sorted(files)}}
+           "runtime_version": RUNTIME_VERSION, "files": {rel: _sha(files[rel]) for rel in sorted(files)}}
     job_bytes = (json.dumps(job, indent=2) + "\n").encode()
     files["job.json"] = job_bytes
     return jid, job_bytes, tar_gz(jid, files)

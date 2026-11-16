@@ -24,6 +24,8 @@ Three commands, run inside this folder:
        that process is gone (ps on that machine, or squeue), then either run
          .venv/bin/python run.py calibrate --restart N --takeover
        for that restart and rerun this command, or remove out/restart-N by hand and rerun.
+       A restart refused because "another process is starting it" names the claim folder
+       out/.claim-restart-N; if that process is confirmed gone, remove that folder and rerun.
        Success: the last line is "results.tar.gz written: N/N restarts (... ok)".
 
   3. Send back results.tar.gz (it contains the fitted values, scores, traces, figures, logs

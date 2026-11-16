@@ -793,6 +793,39 @@ class ReviewRound2CheckTests(OdeFixture):
         (deep / "integrity.json").write_bytes(sealed)
         self.assertError(self.errors(data), "revision", other)
 
+    def test_a_captured_copy_without_integrity_json_is_ignored(self):
+        # review 2 follow-up N3: a partial capture (no integrity.json) neither confirms nor contradicts
+        partial = self.root / REV_DIR.replace("captures/c1", "captures/c2")
+        (partial / "generated_model").mkdir(parents=True)
+        self.assertEqual(self.errors(), [])
+        (self.root / REV_DIR / "integrity.json").unlink()  # no copy with integrity.json: not captured
+        self.assertError(self.errors(), "revision", REV)
+
+    def test_max_normalized_replicates_at_one_point_are_trivial(self):
+        # review 2 follow-up N4a: two fit replicates at one (condition, time) are both v/v = 1
+        rows = [self.row("A1", "ligand", 30, 3.0, "fit"), self.row("A2", "ligand", 30, 3.5, "fit"),
+                self.row("H1", "ligand", 60, 4.0, "holdout")]
+        errors = self.mapping_with(rows, [self.tc("max_normalized", ["A1", "A2", "H1"])])
+        self.assertError(errors, "use=fit", "T1", "A1")
+        self.assertError(errors, "use=fit", "T1", "A2")
+        rows.append(self.row("A3", "ligand", 90, 5.0, "fit"))  # a second point: informative
+        self.assertEqual(self.mapping_with(rows, [self.tc("max_normalized", ["A1", "A2", "H1", "A3"])]), [])
+
+    def test_hold_out_rows_that_are_all_one_by_construction_refused(self):
+        # review 2 follow-up N4b: the one-time hold-out score would be 0 for every parameter set
+        rows = [self.row("A0", "ligand", 0, 1.0, "fit"), self.row("A1", "ligand", 30, 3.0, "fit"),
+                self.row("H0", "ligand", 0, 1.2, "holdout")]
+        errors = self.mapping_with(rows, [self.tc("fold_change_vs_t0", ["A0", "A1", "H0"])])
+        self.assertError(errors, "use=holdout", "T1", "H0")
+        rows.append(self.row("H1", "ligand", 60, 4.0, "holdout"))
+        self.assertEqual(self.mapping_with(rows, [self.tc("fold_change_vs_t0", ["A0", "A1", "H0", "H1"])]), [])
+        refs = [self.row("A1", "ligand", 30, 3.0, "fit"), self.row("R1", "ctrl", 30, 1.5, "fit"),
+                self.row("HR", "ctrl", 60, 2.0, "holdout")]
+        errors = self.mapping_with(refs, [self.tc("relative_to_condition", ["A1", "R1", "HR"], reference="ctrl")])
+        self.assertError(errors, "use=holdout", "T1", "HR")
+        no_holdout = [self.row("A0", "ligand", 0, 1.0, "fit"), self.row("A1", "ligand", 30, 3.0, "fit")]
+        self.assertEqual(self.mapping_with(no_holdout, [self.tc("fold_change_vs_t0", ["A0", "A1"])]), [])
+
     def test_every_captured_copy_of_the_revision_must_agree(self):
         twin = self.root / REV_DIR.replace("captures/c1", "captures/c2")
         twin.mkdir(parents=True)

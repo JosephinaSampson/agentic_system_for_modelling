@@ -14,10 +14,12 @@ the hold-out would no longer be a hold-out.
     parameter names and whose session_id is the proposal's ODE session;
   * `runner(root, job_id, params_file) -> {"score", "n_rows", "failed", "params"}` is injectable. The default
     runs `launch.py local validate <job-id> --use holdout --params <file> --partial --out <file>`: n_rows = the
-    hold-out rows with a finite prediction, failed = the hold-out rows (other than contrast references, which
-    get none) without one, params = the effective values (accepted + model defaults);
+    hold-out rows with a finite prediction that are not 1 by construction ("trivial"), failed = the hold-out
+    rows (other than contrast references, which get none, and trivial rows) without one, params = the effective
+    values (accepted + model defaults);
   * holdout_score.json appears only complete (temp file, fsync, os.link, which fails if it exists): a failed
-    write leaves none, so the hold-out can still be scored once;
+    write leaves none, so the hold-out can still be scored once (the job folder's filesystem must support hard
+    links); a job without the current runtime_version in job.json is refused ("rebuild this job");
   * nothing is written when no row received a prediction (an objective over no rows is 0.0), when any
     hold-out prediction failed (solver failure, NaN) or when the score is the penalty value: a failure is
     never recorded as the one-time hold-out score, so the hold-out can still be scored once it is fixed.
@@ -46,12 +48,14 @@ from scripts.jobs.runtime.compare import PENALTY  # noqa: E402
 
 def predicted_rows(report: dict, use: str = "holdout") -> tuple[int, list[str]]:
     """(rows with a finite prediction, ids of rows without one) of a `run.py validate` report, for this use;
-    contrast reference rows never get a prediction and are in neither."""
+    contrast reference rows never get a prediction, and rows 1 by construction ("trivial": their residual does not
+    depend on the parameters) carry no information: both are in neither."""
     rows = report.get("predictions") if isinstance(report, dict) else None
     if not isinstance(rows, dict):
         raise ValueError("the validate report has no predictions")
     scored = {mid: row for mid, row in rows.items()
-              if isinstance(row, dict) and row.get("use") == use and row.get("role") != "reference"}
+              if isinstance(row, dict) and row.get("use") == use and row.get("role") != "reference"
+              and row.get("trivial") is not True}
     failed = sorted(mid for mid, row in scored.items() if not finite_number(row.get("prediction")))
     return len(scored) - len(failed), failed
 
@@ -73,6 +77,7 @@ def score_holdout(root, job_id: str, approval_id: str, *, runner=None) -> Path:
     root = Path(root)
     runner = runner or default_runner
     job_dir = launch.find_job(root, job_id)
+    launch.require_runtime_version(job_dir)
     target = job_dir / "holdout_score.json"
     if target.exists():
         raise ValueError(f"{target.relative_to(root).as_posix()} exists; the hold-out is scored once and "
@@ -111,8 +116,8 @@ def score_holdout(root, job_id: str, approval_id: str, *, runner=None) -> Path:
         raise ValueError(f"the hold-out score {score!r} is the penalty value ({PENALTY:g}): a failed simulation, "
                          "not a hold-out score; nothing was written")
     if type(n_rows) is not int or n_rows < 1:
-        raise ValueError(f"no hold-out row received a prediction (n_rows {n_rows!r}): the mapping has no scored "
-                         "use=holdout measurement; nothing was written")
+        raise ValueError(f"no informative hold-out row received a prediction (n_rows {n_rows!r}): the mapping has no "
+                         "scored use=holdout measurement that is not 1 by construction; nothing was written")
     effective = outcome.get("params")
     result = {"kind": "holdout_score", "schema_version": 1, "job_id": job_id,
               "proposal": {"path": rel, "sha256": digest}, "approval": approval_id,
@@ -143,6 +148,10 @@ def _publish_once(root: Path, target: Path, data: bytes) -> None:
             os.link(tmp, target)
         except FileExistsError:
             raise ValueError(f"{target.relative_to(root).as_posix()} exists; the hold-out is scored once") from None
+        except OSError as exc:
+            raise ValueError(f"cannot create {target.relative_to(root).as_posix()}: the job folder's filesystem must "
+                             f"support hard links for the one-time hold-out score ({exc}); nothing was written, so the "
+                             "hold-out is still unscored: move the repository to such a filesystem") from None
     finally:
         with contextlib.suppress(OSError):
             os.unlink(tmp)

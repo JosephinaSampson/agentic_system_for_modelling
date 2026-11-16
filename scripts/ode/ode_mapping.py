@@ -78,7 +78,8 @@ Schema (schema_version 1; every key below is required unless marked optional):
 Every measurement row is used by exactly one rule or listed in unmapped with a real reason, and at
 least one use=fit row is scored by a rule with information: a contrast reference row is not scored, and a row
 whose normalised target and prediction are 1 by construction does not count (a fold_change_vs_t0 row at time 0,
-a relative_to_condition row of the reference condition, the only fit row of a max_normalized group). A fitted name that a
+a relative_to_condition row of the reference condition, the fit rows of a max_normalized readout with a single
+fit (condition, time) point). Scored use=holdout rows (optional) must not all be 1 by construction. A fitted name that a
 condition overrides (or an inhibitor_species dose sets) is refused: the override would mask it there.
 
 CLI:
@@ -197,8 +198,9 @@ def measurement_table(root: Path, meas: dict) -> tuple[Path, str]:
 def _revision_folders(root: Path, session: str) -> dict[str, list[tuple[str, bytes | None]]]:
     """{revision name: [(folder, integrity.json bytes or None)]} of the captured revision folders of a session:
     exactly runs/ode-modeler/<session>/captures/<capture>/rev_<32 hex>/, where record_ode_artifacts puts the
-    BioMASS server's <session>/rev_<hex>/ revision folders. A folder named rev_<hex> anywhere else (scratch,
-    exports, nested deeper) is not a capture and is ignored; symlinks are never followed."""
+    BioMASS server's <session>/rev_<hex>/ revision folders, each with its integrity.json (a copy without one, a
+    partial capture, is ignored). A folder named rev_<hex> anywhere else (scratch, exports, nested deeper) is not a
+    capture and is ignored; symlinks are never followed."""
     root = Path(root)
     base = root / ODE_RUNS[0] / ODE_RUNS[1] / session
     reject_symlinks(base, root)
@@ -213,14 +215,15 @@ def _revision_folders(root: Path, session: str) -> dict[str, list[tuple[str, byt
             if not REVISION.fullmatch(folder.name) or folder.is_symlink() or not folder.is_dir():
                 continue
             seal = folder / "integrity.json"
-            data = seal.read_bytes() if seal.is_file() and not seal.is_symlink() else None
-            found.setdefault(folder.name, []).append((folder.relative_to(root).as_posix(), data))
+            if seal.is_file() and not seal.is_symlink():  # a partial capture without it is ignored
+                found.setdefault(folder.name, []).append((folder.relative_to(root).as_posix(), seal.read_bytes()))
     return found
 
 
 def captured_revisions(root: Path, session: str, integrity: bytes) -> set[str]:
     """Names of the captured revisions (see _revision_folders) whose integrity.json is byte-identical to
-    `integrity` in EVERY captured folder of that name (one disagreeing copy and the name is never returned)."""
+    `integrity` in every captured copy of that name that has one (at least one; one disagreeing copy and the name
+    is never returned)."""
     return {name for name, copies in _revision_folders(root, session).items()
             if all(data == integrity for _folder, data in copies)}
 
@@ -820,9 +823,10 @@ class _Checker:
                                "readout in this rule; max_normalized divides every row, hold-out rows included, by "
                                "the fit rows' maximum")
                     continue
-                if len(fit) == 1:
-                    self.trivial[fit[0]["measurement_id"]] = (f"{label}: {fit[0]['measurement_id']} (the only fit "
-                                                              f"row of readout {readout})")
+                if len({(row["condition"], self.converted(row)) for row in fit}) == 1:
+                    for row in fit:  # every fit row at the only fit point is v/max(v) = v/v
+                        self.trivial[row["measurement_id"]] = (f"{label}: {row['measurement_id']} (the only fit "
+                                                               f"point of readout {readout})")
                 top = max(row["value"] for row in fit)
                 if top <= 0:
                     self.error(f"{label}: the max of the fit rows of readout {readout} is {top!r}; max_normalized "
@@ -983,13 +987,20 @@ class _Checker:
                            "fitted value in every dose condition")
 
     def fit_targets(self) -> None:
-        """At least one use=fit row is scored with information; rows 1 by construction (self.trivial) do not count."""
+        """At least one use=fit row is scored with information; rows 1 by construction (self.trivial) do not count.
+        Hold-out rows are optional, but scored hold-out rows that are all 1 by construction are refused: the one-time
+        hold-out score would be 0 for every parameter set."""
         fit = sorted(mid for mid in self.scored if mid in self.rows and self.rows[mid]["use"] == "fit")
         if self.rows and not [mid for mid in fit if mid not in self.trivial]:
             trivial = "; ".join(self.trivial[mid] for mid in fit)
             self.error("no use=fit measurement is scored by a rule with information (contrast reference rows are not "
                        "scored; a normalised row that is 1 by construction carries none"
                        + (f": {trivial}" if trivial else "") + "): the calibration objective would be constant")
+        held = sorted(mid for mid in self.scored if mid in self.rows and self.rows[mid]["use"] == "holdout")
+        if held and all(mid in self.trivial for mid in held):
+            self.error("every scored use=holdout measurement is 1 by construction ("
+                       + "; ".join(self.trivial[mid] for mid in held) + "): the one-time hold-out score would be 0 for "
+                       "every parameter set; hold out an informative row or none")
 
     def coverage(self) -> None:
         for mid, labels in self.uses.items():

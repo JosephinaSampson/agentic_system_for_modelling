@@ -96,8 +96,8 @@ Calibration is a portable job the researcher approves step by step; no specialis
    `requirements.txt` and `run_simulation.py`. `draft` derives `inputs.model.revision` from it: the
    captured revision folder (`rev_<32 hex>` directly in `runs/ode-modeler/<session>/captures/<capture>/`,
    where `record_ode_artifacts.py` puts it; folders elsewhere are ignored) whose `integrity.json` is
-   byte-identical to the zip's `model/integrity.json` in every captured copy of that revision (copies that
-   disagree are refused), and the zip's `model/` files must be exactly the
+   byte-identical to the zip's `model/integrity.json` in every captured copy of that revision that has one
+   (copies that disagree are refused; a partial copy without `integrity.json` is ignored), and the zip's `model/` files must be exactly the
    ones that inventory seals; `check` refuses any other revision, so the revision the ode-modeler later
    compares is the one that was fitted. The calibration bundle carries only the package's `.py` files, at
    their export path, and the runner imports the package by its own name. The mapping fixes
@@ -105,7 +105,9 @@ Calibration is a portable job the researcher approves step by step; no specialis
    hold-out rows (`use=holdout`) and the reasons for any unmapped row. `check` requires at least one
    `use=fit` row scored by a rule with information (a contrast reference row is not scored, and rows whose
    normalised target is 1 by construction do not count: `fold_change_vs_t0` rows at time 0,
-   `relative_to_condition` rows of the reference condition, the only fit row of a `max_normalized` readout),
+   `relative_to_condition` rows of the reference condition, the fit rows of a `max_normalized` readout with a
+   single fit (condition, time) point; scored hold-out rows, which are optional, must not all be 1 by
+   construction, or the one-time hold-out score would be 0 for every parameter set),
    a fitted dose-response `K` with a positive model default (read from `ode.py` `param_values()`, never
    imported: hold-out scoring keeps the default of a non-accepted `K`), every endpoint-contrast row and
    every dose row measured at the rule's time once converted (`time.factors`; compared with relative
@@ -154,12 +156,16 @@ Calibration is a portable job the researcher approves step by step; no specialis
    Ctrl-C (or `remote.sh cancel`) leaves no `failed` result: interrupted restarts are rerun from their seed
    by the next `local.sh`/`start`, and a restart folder whose owner is still alive (same host, or a SLURM
    task sacct reports active) is never deleted or started twice. On the same host a dead pid, a reused pid
-   (its process start differs from `owner.json`'s `process_start`, or started after `started_at`) and the
-   calling process's own pid are stale. On another host the folder is this task's own SLURM requeue only
+   (its process start identity differs from `owner.json`'s `process_start` of the same scheme; identities of
+   different schemes are not compared; without one, it started after `started_at`) and, for a claimant, its
+   own pid are stale. On another host the folder is this task's own SLURM requeue only
    when job and array task (non-array: `SLURM_PROCID`) match and `SLURM_RESTART_COUNT` >= 1 exceeds the
-   owner's; otherwise sacct decides. A stale folder is taken over atomically (renamed to a unique trash name,
-   its `owner.json` re-checked, the new folder renamed in, the trash deleted; a loser backs off with exit
-   3). When the owner cannot be checked (another host without SLURM ids, or sacct cannot tell) the refusal
+   owner's; otherwise sacct decides. Every claimant (with or without an existing folder) holds the per-restart
+   claim `out/.claim-restart-N/` (a directory renamed into place with its `owner.json`; atomic, also on NFS)
+   from judging the folder to placing its own, so a stale folder is replaced by exactly one process (moved to a
+   trash name and deleted, the new folder renamed in); a claim left by a dead claimant is broken under the same
+   identity rules by the one process holding its break token; a claimant that cannot take the claim backs off
+   with exit 3). When the owner cannot be checked (another host without SLURM ids, or sacct cannot tell) the refusal
    names its host and pid; once that process is confirmed gone, run `run.py calibrate --restart N
    --takeover` in the job folder (or remove `out/restart-N` by hand) and rerun. A restart folder appears
    with its `owner.json` already inside.
@@ -211,8 +217,10 @@ Calibration is a portable job the researcher approves step by step; no specialis
    accepted parameters at their best values (every other parameter keeps the bundled model's default,
    recorded as `effective_parameters`), and writes `holdout_score.json` with `n_rows`, the hold-out rows that
    received a prediction. It never overwrites, and the file appears only complete (temp file, fsync, then a
-   hard link that fails if it exists), so a failed write leaves the hold-out unscored. A job built before
-   commit 266511f (its `run.py` has no `validate --partial/--nominal`) is refused with "rebuild it" by
+   hard link that fails if it exists; the job folder's filesystem must support hard links, or nothing is
+   written), so a failed write leaves the hold-out unscored. `n_rows` counts only hold-out rows that are not 1
+   by construction. A job whose `job.json` has no `runtime_version` or an older one than the framework's
+   (`run.RUNTIME_VERSION`, stamped by `build.py`) is refused with "rebuild this job" by
    `score_holdout.py` and `import_results.py`. It writes nothing (so the hold-out stays unscored) when no
    hold-out row received a prediction (an objective over no rows is 0, not a score), when any hold-out
    prediction failed (solver failure, non-finite value; listed by row) or when the score is the penalty. It runs

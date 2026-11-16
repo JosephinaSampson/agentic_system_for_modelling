@@ -216,21 +216,18 @@ def fetch(root: Path, job_id: str) -> Path:
     return dest
 
 
-BUNDLE_FLAGS_COMMIT = "266511f"  # the commit that gave the bundled run.py `validate --partial` and `--nominal`
-
-
-def require_bundle_flags(target: Path, job_id: str, flags) -> None:
-    """ValueError when the job's bundled run.py has no `validate` option in `flags` (a job built by an older
-    runtime: its argparse would exit 2 with a bare usage message)."""
+def require_runtime_version(job_dir: Path) -> None:
+    """ValueError unless the job's job.json carries runtime_version >= run.RUNTIME_VERSION (a job built by an older
+    runtime computes or accepts something else: e.g. its run.py has no validate --partial/--nominal)."""
     try:
-        text = (Path(target) / "run.py").read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(f"cannot read the bundled run.py of job {job_id}: {exc}") from exc
-    missing = [flag for flag in flags if f'"{flag}"' not in text]
-    if missing:
-        raise ValueError(f"job {job_id} was built before commit {BUNDLE_FLAGS_COMMIT}: its run.py has no `validate "
-                         f"{' '.join(missing)}`, which import_results.py and score_holdout.py need; rebuild it with "
-                         "scripts/jobs/build.py (and run the new job) instead")
+        job = strict_json((Path(job_dir) / "job.json").read_bytes())
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(f"cannot read {Path(job_dir).name}/job.json: {exc}") from exc
+    version = job.get("runtime_version") if isinstance(job, dict) else None
+    if type(version) is not int or version < runtime.RUNTIME_VERSION:
+        raise ValueError(f"job {Path(job_dir).name} was built by an older runtime (runtime_version {version!r}, this "
+                         f"framework needs {runtime.RUNTIME_VERSION}); rebuild this job with scripts/jobs/build.py "
+                         "(a new job id) and run it again")
 
 
 def require_holdout_approval(root: Path, job_id: str) -> str:
@@ -269,7 +266,6 @@ def require_holdout_approval(root: Path, job_id: str) -> str:
 def validate(root: Path, job_id: str, params: str | None, use: str, out: str | None, *, partial: bool = False,
              nominal: bool = False) -> int:
     target = unpack(root, job_id)
-    require_bundle_flags(target, job_id, ["--partial"] * partial + ["--nominal"] * nominal)
     if _pid(target) and not _environment_ok(target):
         # a `start` is bootstrapping: a second bootstrap would rebuild .venv under it
         raise ValueError(f"job {job_id} is running (pid {_pid(target)}) and its environment is not ready yet; "

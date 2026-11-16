@@ -227,7 +227,7 @@ class BuildTests(JobFixture):
         job = json.loads(files["job.json"])
         self.assertEqual(files["job.json"], (job_dir / "job.json").read_bytes())
         self.assertEqual(list(job), ["kind", "job_id", "mapping", "export_sha256", "settings", "framework_commit",
-                                     "files"])
+                                     "runtime_version", "files"])
         self.assertEqual(job["kind"], "biomass-calibration")
         self.assertEqual(job["job_id"], job_dir.name)
         self.assertEqual(job["mapping"], {"path": MAP, "sha256": sha((self.root / MAP).read_bytes()),
@@ -522,8 +522,21 @@ class RuntimeReviewTests(unittest.TestCase):
         code, started, kept, _ = self.calibrate(pid=child.pid, started_at="2000-01-01T00:00:00+00:00",
                                                 process_start=identity[0])  # the recorded identity matches
         self.assertEqual((code, started, kept), (3, False, True))
-        code, started, kept, _ = self.calibrate(pid=child.pid, started_at=run.now(), process_start="other")
+        other = identity[0].rsplit(":", 1)[0] + ":1"  # the same scheme, another start: the pid was reused
+        code, started, kept, _ = self.calibrate(pid=child.pid, started_at=run.now(), process_start=other)
         self.assertEqual((code, started, kept), (0, True, False))
+
+    def test_process_identities_of_different_schemes_are_not_compared(self):
+        # review 2 follow-up N2: a "ps:" identity recorded where /proc gives "linux:" is no proof of pid reuse
+        self.job()
+        child = self.live_child()
+        code, started, kept, _ = self.calibrate(pid=child.pid, started_at=run.now(), process_start="ps:Mon Jan  1")
+        self.assertEqual((code, started, kept), (3, False, True))
+        # without a boot id the identity is unknown (btime moves with the wall clock): no identity is recorded
+        with mock.patch.object(run, "_boot_id", return_value=None):
+            identity, started_epoch = run._process_start(child.pid)
+        self.assertIsNone(identity)
+        self.assertIsInstance(started_epoch, float)
 
     def test_takeover_overrides_only_an_owner_that_cannot_be_checked(self):
         # review 2 launch.py:454 / run.py:216: an explicit, documented escape hatch for a foreign-host owner
@@ -545,26 +558,44 @@ class RuntimeReviewTests(unittest.TestCase):
             run.main(["calibrate", "--restart", "1", "--takeover"])
         self.assertEqual(called.call_args.kwargs, {"takeover": True})
 
-    def test_two_takeovers_of_one_stale_folder_never_both_run(self):
-        # review 2 run.py:551: B judges the folder stale and takes it over while A is still deciding; A must then
-        # not delete B's live folder (A's rename sees an owner.json other than the one it judged, puts it back)
-        self.job()
+    def stale_restart(self):
         target = self.root / "out" / "restart-1"
         target.mkdir(parents=True)
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
         (target / "owner.json").write_text(json.dumps({"host": socket.gethostname(), "pid": dead.pid,
                                                        "started_at": "2000-01-01T00:00:00+00:00"}))
-        real = run._owner_state
-        order = []
+        return target, dead.pid
+
+    def as_other_process(self, fn):
+        """Run fn as another claimant: a different pid (in-process claimants would share this one)."""
+        other = self.live_child()
+        with mock.patch.object(run.os, "getpid", return_value=other.pid):
+            return fn()
+
+    def test_three_claimants_one_run(self):
+        # review 2 follow-up N1: A and B judge the stale folder, A takes it over; meanwhile a fresh C finds no
+        # folder. Every claimant holds out/.claim-restart-N from judging to placement, so B and C back off.
+        self.job()
+        target, _ = self.stale_restart()
+        real_state, real_rename = run._owner_state, os.rename
+        codes, started = {}, set()
+
+        def other(name):
+            started.add(name)
+            codes[name] = self.as_other_process(lambda: run.cmd_calibrate(self.root, 1))
 
         def judged(folder, claiming=False):
-            state = real(folder, claiming)
-            if not order:
-                order.append("B")
-                self.assertEqual(run.cmd_calibrate(self.root, 1), 0)  # B: judges stale, takes over, runs
-                order.append("A")
+            state = real_state(folder, claiming)
+            if Path(folder) == target and "B" not in started:
+                other("B")  # B judges the same stale folder while A holds it
             return state
+
+        def rename(src, dst):
+            result = real_rename(src, dst)
+            if Path(src) == target and "C" not in started:  # A moved the stale folder away: C finds none
+                other("C")
+            return result
         runs = []
         done = {"restart": 1, "seed": 1, "score": 1.0, "status": "ok", "params": {}, "wall_time_s": 0.0}
 
@@ -572,13 +603,47 @@ class RuntimeReviewTests(unittest.TestCase):
             runs.append(json.loads((out_dir / "owner.json").read_text()))
             return done  # still "running": no result.json
         err = io.StringIO()
-        with mock.patch.object(run, "_owner_state", judged), mock.patch.object(run, "status"), \
-                mock.patch.object(run, "run_restart", restart), mock.patch("sys.stdout", io.StringIO()), \
-                mock.patch("sys.stderr", err):
-            self.assertEqual(run.cmd_calibrate(self.root, 1), 3)  # A backs off
-        self.assertEqual((order, len(runs)), (["B", "A"], 1))
-        self.assertEqual(json.loads((target / "owner.json").read_text()), runs[0])  # B's folder, intact
-        self.assertEqual(sorted(p.name for p in (self.root / "out").iterdir()), ["restart-1"])  # no trash, no temp
+        with mock.patch.object(run, "_owner_state", judged), mock.patch.object(run.os, "rename", rename), \
+                mock.patch.object(run, "status"), mock.patch.object(run, "run_restart", restart), \
+                mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", err):
+            codes["A"] = run.cmd_calibrate(self.root, 1)
+        self.assertEqual(codes, {"B": 3, "C": 3, "A": 0}, err.getvalue())
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["pid"], os.getpid())  # A's folder
+        self.assertEqual(json.loads((target / "owner.json").read_text()), runs[0])
+        self.assertIn(".claim-restart-1", err.getvalue())
+        self.assertEqual(sorted(p.name for p in (self.root / "out").iterdir()), ["restart-1"])  # no claim, trash
+
+    def test_stale_claims_are_broken_live_claims_are_not(self):
+        # review 2 follow-up N1: a claim left by a dead claimant is broken (identity rules); a live one is not
+        self.job()
+        claim = self.root / "out" / ".claim-restart-1"
+        claim.mkdir(parents=True)
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        (claim / "owner.json").write_text(json.dumps({"host": socket.gethostname(), "pid": dead.pid,
+                                                      "started_at": "2000-01-01T00:00:00+00:00"}))
+        judged = (claim / "owner.json").read_bytes()
+        token = run._break_token(self.root / "out", 1, judged)
+        token.mkdir()  # a breaker of this very claim is still (or was) at work: back off, name it
+        (token / "owner.json").write_text("{}")
+        code, started, _, err = self.calibrate()
+        self.assertEqual((code, started), (3, False))
+        self.assertIn(token.name, err)
+        shutil.rmtree(token)
+        shutil.rmtree(self.root / "out" / "restart-1")
+        code, started, _, err = self.calibrate()
+        self.assertEqual((code, started), (0, True), err)
+        self.assertFalse(claim.exists())
+        child = self.live_child()
+        claim.mkdir()
+        (claim / "owner.json").write_text(json.dumps({"host": socket.gethostname(), "pid": child.pid,
+                                                      "started_at": run.now()}))
+        shutil.rmtree(self.root / "out" / "restart-1")
+        code, started, _, err = self.calibrate()
+        self.assertEqual((code, started), (3, False))
+        self.assertIn(".claim-restart-1", err)
+        self.assertTrue(claim.is_dir())
 
     def test_two_processes_racing_on_a_stale_folder(self):
         # review 2 run.py:551: the reviewer's repro (a delay after the liveness check), with two real processes
@@ -1098,20 +1163,21 @@ class LaunchTests(JobFixture):
         self.assertIn("--partial", command)
         self.assertIn("--nominal", command)
 
-    def test_validate_refuses_a_bundle_built_before_partial_and_nominal(self):
-        # review 2 score_holdout.py:58: an older bundled run.py has no validate --partial/--nominal (argparse exit 2)
-        old = self.root / "old-bundle"
-        old.mkdir()
-        (old / "run.py").write_text((RUNTIME / "run.py").read_text().replace('"--partial"', '"--x1"')
-                                    .replace('"--nominal"', '"--x2"'))
-        with mock.patch.object(launch, "unpack", return_value=old), \
-                mock.patch.object(launch.subprocess, "run") as called:
-            for kwargs in ({"partial": True}, {"nominal": True}):
-                with self.subTest(**kwargs), self.assertRaisesRegex(ValueError, "built before.*rebuild"):
-                    launch.validate(self.root, self.job_id, "p.json", "holdout", "o.json", **kwargs)
-            called.assert_not_called()
-            called.return_value.returncode = 0
-            self.assertEqual(launch.validate(self.root, self.job_id, None, "fit", None), 0)  # plain validate works
+    def test_job_json_carries_the_runtime_version(self):
+        # review 2 follow-up N5: the bundle's runtime/compare version is stamped in job.json
+        job = json.loads((self.job_dir / "job.json").read_text())
+        self.assertEqual(job["runtime_version"], build.RUNTIME_VERSION)
+        self.assertGreaterEqual(build.RUNTIME_VERSION, 2)
+        launch.require_runtime_version(self.job_dir)
+        for value in (None, build.RUNTIME_VERSION - 1, "2", True):
+            data = dict(job)
+            if value is None:
+                data.pop("runtime_version")
+            else:
+                data["runtime_version"] = value
+            (self.job_dir / "job.json").write_text(json.dumps(data))
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "rebuild this job"):
+                launch.require_runtime_version(self.job_dir)
 
 
 if __name__ == "__main__":

@@ -13,9 +13,11 @@ and returns a JSON-serialisable `spec` (string keys only; times and doses are fl
   rules            the mapping's rules
   fit              [{name, kind, lower, upper, log10_lower, log10_upper}]
   measurements     {id: {rule_id, type, readout, observable, condition, time, dose, dose_condition, use, value,
-                         value_unit, target, role}}   time/dose in model units; value is the raw table value,
-                   target the value normalised (or converted) exactly like the prediction; role is
-                   "fit_target" or "reference"
+                         value_unit, target, role, trivial}}   time/dose in model units; value is the raw table
+                   value, target the value normalised (or converted) exactly like the prediction; role is
+                   "fit_target" or "reference"; trivial is true for a row whose prediction is 1 by construction
+                   (a fold_change_vs_t0 row at time 0, a relative_to_condition row of the reference condition, a
+                   max_normalized fit row when the fit rows have one (condition, time) point): no information
   time_model_unit  the model time unit
   dose_model_unit  the model dose unit (mapping["dose"]["model_unit"]; the dose axis of the figures)
 
@@ -157,14 +159,18 @@ def _normalise_time_course(rule: dict, entries: list[dict]) -> None:
         if method == "fold_change_vs_t0":
             t0 = _divisors([o for o in group if o["condition"] == e["condition"] and o["time"] == 0.0], e["use"])
             e["target"] = _ratio(e["value"], _mean([o["value"] for o in t0]) if t0 else math.nan)
+            e["trivial"] = e["time"] == 0.0  # v(0)/v(0)
         elif method == "relative_to_condition":
             refs = _divisors([o for o in group if o["condition"] == rule["reference"]
                               and math.isclose(o["time"], e["time"], rel_tol=TIME_RTOL)], e["use"])
             e["target"] = _ratio(e["value"], _mean([o["value"] for o in refs]) if refs else math.nan)
+            e["trivial"] = e["condition"] == rule["reference"]  # v_ref(t)/v_ref(t)
         elif method == "max_normalized":
-            fit = [o["value"] for o in group if o["use"] == "fit"]
-            top = max(fit) if fit else math.nan
+            fit = [o for o in group if o["use"] == "fit"]
+            top = max(o["value"] for o in fit) if fit else math.nan
             e["target"] = e["value"] / top if top > 0 else math.nan
+            # every fit row at the fit rows' only simulated point is v/max(v) = v/v
+            e["trivial"] = e["use"] == "fit" and len({(o["condition"], o["time"]) for o in fit}) == 1
 
 
 def resolve(mapping: dict, rows: list[dict]) -> dict:
@@ -185,7 +191,8 @@ def resolve(mapping: dict, rows: list[dict]) -> dict:
             entry = {"rule_id": rid, "type": kind, "readout": row["readout"], "observable": observable[row["readout"]],
                      "condition": row["condition"], "time": float(row["time"]) * float(factors[row["time_unit"]]),
                      "dose": None, "dose_condition": None, "use": row["use"], "value": row["value"],
-                     "value_unit": row["value_unit"], "target": row["value"], "role": "fit_target"}
+                     "value_unit": row["value_unit"], "target": row["value"], "role": "fit_target",
+                     "trivial": False}
             if kind == "time_course":
                 if rule["method"] == "absolute":
                     entry["target"] = row["value"] * _readout_factor(mapping, row)

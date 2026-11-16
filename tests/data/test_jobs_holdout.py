@@ -93,7 +93,7 @@ class HoldoutTests(HoldoutFixture):
         # compare.objective sums nothing (0.0) when no row has use=holdout: never a once-only score
         self.make_proposal()
         self.approve_calibration()
-        with self.assertRaisesRegex(ValueError, "no hold-out"):
+        with self.assertRaisesRegex(ValueError, "no informative hold-out"):
             self.score(score=0.0, n_rows=0)
         self.assertFalse((self.job_dir / "holdout_score.json").exists())
 
@@ -281,6 +281,43 @@ class ReviewRound2HoldoutTests(HoldoutFixture):
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["score"], 0.7)
         with self.assertRaisesRegex(ValueError, "exists"):
             self.score()
+
+    def test_filesystem_without_hard_links_is_a_clear_error(self):
+        # review 2 follow-up N6: os.link failing for another reason than an existing file
+        import errno
+        self.make_proposal()
+        self.approve_calibration()
+        with mock.patch.object(score_holdout.os, "link", side_effect=OSError(errno.EPERM, "Operation not permitted")):
+            with self.assertRaisesRegex(ValueError, "hard link.*nothing was written"):
+                self.score()
+        self.assertFalse((self.job_dir / "holdout_score.json").exists())
+        self.assertEqual([p.name for p in self.job_dir.iterdir() if p.name.startswith(".")], [])
+
+    def test_trivial_hold_out_rows_are_not_counted(self):
+        # review 2 follow-up N4b: rows 1 by construction carry no information about the accepted values
+        rows = {"h0": {"use": "holdout", "role": "fit_target", "prediction": 1.0, "trivial": True},
+                "h1": {"use": "holdout", "role": "fit_target", "prediction": 2.0, "trivial": False}}
+        self.assertEqual(score_holdout.predicted_rows({"predictions": rows}), (1, []))
+        self.assertEqual(score_holdout.predicted_rows({"predictions": {"h0": rows["h0"]}}), (0, []))
+        self.make_proposal()
+        self.approve_calibration()
+        with self.assertRaisesRegex(ValueError, "informative"):
+            self.score(score=0.0, n_rows=0)
+
+    def test_jobs_of_an_older_runtime_are_refused(self):
+        # review 2 follow-up N5: no runtime_version (or an older one) in job.json: rebuild this job
+        self.make_proposal()
+        self.approve_calibration()
+        job_json = self.job_dir / "job.json"
+        data = json.loads(job_json.read_text(encoding="utf-8"))
+        data.pop("runtime_version")
+        job_json.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "rebuild this job"):
+            self.score()
+        from scripts.jobs import import_results
+        with self.assertRaisesRegex(ValueError, "rebuild this job"):
+            import_results.import_results(self.root, self.job_id, reproduce=lambda *a: None)
+        self.assertEqual(self.seen, [])
 
     def test_cli_holdout_predictions_need_an_ode_calibration_approval(self):
         # review 2 launch.py:496: `launch.py local validate --use holdout|all` showed the hold-out before approval
