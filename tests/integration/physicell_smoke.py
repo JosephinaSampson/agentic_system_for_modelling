@@ -41,11 +41,10 @@ from scripts import state  # noqa: E402
 from scripts.capture.record_physicell_config import record_physicell  # noqa: E402
 from scripts.physicell import build as physicell_build  # noqa: E402
 from scripts.physicell import capture_dictionary as cd  # noqa: E402
-from scripts.physicell import physicell_projection as pp  # noqa: E402
 from scripts.physicell import settings_xml as sx  # noqa: E402
 from tests.data.test_physicell_design import CAPTURE, MABOSS, REL, SESSION, STAGE_A, write_config  # noqa: E402
 from tests.data.test_physicell_dictionary import INVOCATION, good_calls  # noqa: E402
-from tests.data.test_physicell_projection import PROJ, built_capture, q  # noqa: E402
+from tests.data.test_physicell_projection import PROJ, built_capture, fill_model_values, q  # noqa: E402
 from tests.data.test_physicell_verify import VerifyBase, placeholder_rules  # noqa: E402
 
 SERVERS = "mcp-biomodelling-servers==2.5.2"
@@ -161,7 +160,6 @@ def configure(stage):
     """Stage A builds the design and lists signals/behaviors; stage B replays the same calls in a new session,
     then applies exactly the projection's entries (model values) and exports the rules CSV before the XML."""
     from mcp_biomodelling_servers.PhysiCell import server as s
-    from scripts.physicell import physicell_projection as pp
     design = json.loads((PROJECT / args["design"]).read_text())
     physicell(s, "create_session", set_as_default=True)
     build_design(s, design)
@@ -173,14 +171,15 @@ def configure(stage):
         rules = False
         for e in projection["entries"]:
             if e["kind"] == "rule":
+                # the configurator copies each model_value verbatim and does no arithmetic (ruling T9-e)
                 physicell(s, "add_single_cell_rule", cell_type=e["cell_definition"], signal=e["signal"],
                           direction=e["direction"], behavior=e["behavior"],
-                          saturation_value=pp.model_value(e["saturation_value"]),
-                          half_max=pp.model_value(e["half_max"]), hill_power=pp.model_value(e["hill_power"]))
+                          saturation_value=e["saturation_value"]["model_value"],
+                          half_max=e["half_max"]["model_value"], hill_power=e["hill_power"]["model_value"])
                 rules = True
             elif e["kind"] == "physiboss_input":
                 physicell(s, "add_physiboss_input_link", cell_type=e["cell_definition"], physicell_signal=e["signal"],
-                          boolean_node=e["node"], action=e["action"], threshold=pp.model_value(e["threshold"]),
+                          boolean_node=e["node"], action=e["action"], threshold=e["threshold"]["model_value"],
                           smoothing=e["smoothing"])
             else:
                 raise ValueError(f"the smoke applies only rule and physiboss_input entries, not {e['kind']}")
@@ -401,7 +400,7 @@ class Smoke:
         assert dictionary["signals"][0]["name"] == "oxygen" and "tumor" in dictionary["behaviors"], dictionary
         self.draft_projection("p1", h.capture, REL, "design-1")
         self.check_refused_then_passes("scripts/physicell/physicell_projection.py", PROJ,
-                                       lambda data: data.update(entries=h.entries()))
+                                       lambda data: fill_model_values(data.update(entries=h.entries()) or data))
         self.approve("proj-1", "physicell_projection", STAGE_A, ["in1", "out1", "rule1", "set1"], PROJ)
         step(f"fixtures: design drafted (refused), filled, check passed, design-1 approved (anchor {SESSION}) and "
              f"dispatched; stage A in session {STAGE_A}; dictionary captured from its invocation record (bound by the "
@@ -586,15 +585,23 @@ class Smoke:
              "half_max": q(0.5, "dimensionless"), "hill_power": q(2, "dimensionless")},
             {"entry_id": "in1", "kind": "physiboss_input", **common, "cell_definition": "tumor", "signal": "oxygen",
              "node": "A", "action": "activation", "threshold": q(10, "mmHg"), "smoothing": 0}]
+        # without model values the check refuses and prints the value to paste (the orchestrator pastes them)
+        draft = json.loads((self.root / REAL_PROJ).read_text())
+        write_json(self.root / REAL_PROJ, {**draft, "entries": entries})
+        unpasted = self.py("scripts/physicell/physicell_projection.py", "check", REAL_PROJ, check=False)
+        assert unpasted.returncode == 1 and "saturation_value: model_value must be a number: paste 0.01" in \
+            unpasted.stderr, unpasted.stderr
+        write_json(self.root / REAL_PROJ, draft)
         self.check_refused_then_passes("scripts/physicell/physicell_projection.py", REAL_PROJ,
-                                       lambda data: data.update(entries=entries))
+                                       lambda data: fill_model_values(data.update(entries=entries) or data))
         self.approve("proj-2", "physicell_projection", a["session"], ["rule1", "in1"], REAL_PROJ)
         dispatched = self.hook(gate, {"projection": REAL_PROJ, "sha256": sha256(self.root / REAL_PROJ),
                                       "approval": "proj-2", "record_session_id": a["session"]},
                                "Replay the approved design, then apply the approved projection.")
         assert dispatched.returncode == 0, dispatched.stderr
         step("real projection (rule1: pressure increases apoptosis, 0.6 1/h -> 0.01 1/min; in1: oxygen -> A) "
-             "checked and approved; the hook accepts its DATA_INPUT line")
+             "refused without model values (the check prints the value to paste), pasted, checked and approved; the "
+             "hook accepts its DATA_INPUT line; stage B applies each model_value verbatim")
 
         # stage B: a new session replays the design, applies the entries, exports rules CSV then XML
         b = self.server("B", design=REAL_DESIGN, capture="capB", agent="agent-b", projection=REAL_PROJ)

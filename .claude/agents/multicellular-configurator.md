@@ -104,9 +104,9 @@ The orchestrator compares the stage-A capture with the design before anything el
   projection's `design.path` as above (the hook has re-checked it). Do not call the discovery list tools again.
   Then apply exactly the entries with the matching tools: `physiboss_input` with `add_physiboss_input_link`,
   `physiboss_output` with `add_physiboss_output_link`, `rule` with `add_single_cell_rule`, and `setting` with the
-  tool its `tool_hint` names. Use each quantity's model value: identity and unit_factor `value*factor`, reciprocal
-  `factor/value`, ln2_over `factor*ln(2)/value`. Compare each returned stored value with that model value
-  (relative tolerance 1e-9). Return `blocked` on any difference, or if an entry has no matching tool.
+  tool its `tool_hint` names. Apply each quantity's `model_value` verbatim (a `setting` entry carries its own
+  `model_value`); do no arithmetic and never derive a value from `value`, `transform` or `factor`. Compare each
+  returned stored value with that `model_value` (relative tolerance 1e-9). Return `blocked` on any difference, or if an entry has no matching tool.
   Apply only the projection entries. Then export (Cell Rules CSV before XML).
 
 Report every applied entry id with its requested and stored values, and label the values `data-derived` (projection

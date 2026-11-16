@@ -83,7 +83,8 @@ after `STAGE_GATE`, names an approved `physicell_design.json` (stage A) or
 - Projection: re-apply the approved design exactly as in stage A (build the design named in the verified
   projection's `design.path`); do not call the discovery list tools again. Then apply exactly the entries with
   the matching tools (`add_physiboss_input_link()`, `add_physiboss_output_link()`, `add_single_cell_rule()`, and a
-  setting's `tool_hint`) at each quantity's model value. Compare each returned stored value (rel 1e-9) and
+  setting's `tool_hint`) at each quantity's `model_value`, applied verbatim (no arithmetic). Compare each returned
+  stored value with it (rel 1e-9) and
   return `blocked` on any difference. Apply only the projection entries. Then export (rules CSV before XML).
 
 ## Repeatable operations and patch semantics

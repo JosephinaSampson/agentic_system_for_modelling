@@ -209,7 +209,9 @@ PHYSICELL_DATA_RULES = (
 # Ruling T5-e: a projection is applied by replaying its design in a new session, never by loading its capture.
 PHYSICELL_STALE = ("for every projection", "projection's `capture.path`", "On the loaded capture", "on the loaded capture",
                    "load the captured configuration's packaged XML",
-                   "Add no rule, link, parameter or other value while building", "Add no rule, link or value while building")
+                   "Add no rule, link, parameter or other value while building", "Add no rule, link or value while building",
+                   # ruling T9-e: the configurator copies model values, never computes them
+                   "value*factor", "factor/value", "factor*ln(2)/value")
 REVISION_RULE = "return `blocked` unless the session's current revision equals `proposal.model.revision`"
 
 
@@ -229,6 +231,7 @@ class DataHandoffInstructionTests(unittest.TestCase):
                 "build the design named in the verified\n  projection's `design.path`",
                 "Do not call the discovery list tools again", "Then apply exactly the entries with the matching tools",
                 "relative tolerance 1e-9", "Return `blocked` on any difference",
+                "Apply each quantity's `model_value` verbatim", "do no arithmetic",
                 "Apply only the projection entries. Then export (Cell Rules CSV before XML).",
                 "no dispatcher check for this DATA_INPUT"),
             ".claude/skills/physicell-workflow/SKILL.md": PHYSICELL_DATA_RULES + (
@@ -239,6 +242,7 @@ class DataHandoffInstructionTests(unittest.TestCase):
                 "build the design named in the verified\n  projection's `design.path`",
                 "do not call the discovery list tools again", "apply exactly the entries with\n  the matching tools",
                 "rel 1e-9", "return `blocked` on any difference", "Apply only the projection entries",
+                "at each quantity's `model_value`, applied verbatim (no arithmetic)",
                 "Then export (rules CSV before XML)."),
             ".claude/agents/scientific-reviewer.md": ("Data-stage and mapping checklist", "unmapped", "locator"),
             ".claude/agents/reproducibility-auditor.md": ("Data-stage and mapping checklist", "data-derived", "locator", "seeds"),

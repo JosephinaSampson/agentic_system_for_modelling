@@ -30,7 +30,31 @@ SRC = {"source": "s1", "locator": "Table 1"}
 
 
 def q(value, unit, transform="identity", factor=1, **extra):
+    """A projection quantity without its model_value (fill_model_values pastes it, as the orchestrator does)."""
     return {"value": value, "value_unit": unit, "transform": transform, "factor": factor, **extra}
+
+
+QUANTITY_KEYS = ("threshold", "value", "base_value", "saturation_value", "half_max", "hill_power")
+
+
+def fill_model_values(data):
+    """Paste the model value the check prints into every quantity (and setting entry) that has none yet: the
+    orchestrator's step (ruling T9-e). An invalid quantity gets "TODO" (its own error is the one under test)."""
+    def paste(target):
+        if isinstance(target, dict) and "model_value" not in target:
+            try:
+                target["model_value"] = pp.model_value(target)
+            except ValueError:
+                target["model_value"] = "TODO"
+    for entry in data.get("entries") or ():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") == "setting":
+            paste(entry)
+        else:
+            for key in QUANTITY_KEYS:
+                paste(entry.get(key))
+    return data
 
 
 def sha(path):
@@ -91,9 +115,9 @@ class ProjectionBase(Base):
         data["entries"] = self.entries() if entries is None else entries
         return data
 
-    def write_projection(self, data):
+    def write_projection(self, data, fill=True):
         path = self.root / PROJ
-        path.write_text(json.dumps(data, indent=2))
+        path.write_text(json.dumps(fill_model_values(data) if fill else data, indent=2))
         return path
 
     def errors(self, data):
@@ -257,6 +281,55 @@ class TransformTests(unittest.TestCase):
         for bad in (q(1, "h", factor=60), q(1, "h", "unit_factor"), q(1, "micron/min", "reciprocal")):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "target_unit"):
                 pp.converted_unit(bad)
+
+
+class ModelValueTests(ProjectionBase):
+    """Ruling T9-e: every quantity carries the model value the configurator copies verbatim; the check recomputes
+    it and prints the value to paste."""
+
+    def test_missing_model_value_refused(self):
+        data = fill_model_values(self.projection())
+        del data["entries"][0]["threshold"]["model_value"]
+        self.write_projection(data, fill=False)
+        del data["entries"][3]["model_value"]
+        self.write_projection(data, fill=False)
+        errors = pp.check(self.root, PROJ)
+        self.assertTrue(any("in1" in e and "threshold: model_value must be a number: paste 10.0" in e
+                            for e in errors), errors)
+        self.assertTrue(any("set1" in e and "model_value must be a number: paste 2e-05" in e for e in errors), errors)
+        data["entries"][0]["threshold"].pop("value")
+        self.write_projection(data, fill=False)
+        self.assertTrue(any("threshold must be {value, value_unit, transform, factor, model_value}" in e
+                            for e in pp.check(self.root, PROJ)))
+
+    def test_todo_model_value_refused_with_the_value_to_paste(self):
+        data = fill_model_values(self.projection())
+        data["entries"][2]["half_max"]["model_value"] = "TODO"
+        data["entries"][3]["model_value"] = "TODO"
+        self.write_projection(data, fill=False)
+        errors = pp.check(self.root, PROJ)
+        self.assertTrue(any("rule1" in e and "half_max: model_value must be a number: paste 1.0" in e for e in errors),
+                        errors)
+        self.assertTrue(any("set1" in e and "model_value must be a number: paste 2e-05" in e for e in errors), errors)
+
+    def test_wrong_model_value_refused(self):
+        data, entry = self.entry("rule1")
+        entry["saturation_value"] = q(0.6, "1/h", "unit_factor", 1 / 60, target_unit="1/min", model_value=0.6)
+        self.write_projection(data)
+        errors = pp.check(self.root, PROJ)
+        self.assertTrue(any("saturation_value: model_value 0.6 is not the model value 0.01" in e and "paste 0.01" in e
+                            for e in errors), errors)
+        entry["saturation_value"]["model_value"] = 0.01 * (1 + 1e-10)
+        self.write_projection(data)
+        self.assertTrue(any("relative 1e-12" in e for e in pp.check(self.root, PROJ)))
+        entry["saturation_value"]["model_value"] = 0.6 / 60
+        self.write_projection(data)
+        self.assertEqual(pp.check(self.root, PROJ), [])
+
+    def test_bool_model_value_refused(self):
+        data, entry = self.entry("in1")
+        entry["threshold"]["model_value"] = True
+        self.assertRefused(data, "model_value must be a number")
 
 
 class QuantityAndRuleTests(ProjectionBase):

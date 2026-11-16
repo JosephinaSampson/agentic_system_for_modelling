@@ -24,7 +24,10 @@ Schema (schema_version 1; every key below is required):
     setting          {path, value, value_unit, transform, factor, target_unit?, target_unit_justification?, tool_hint}
   unmapped: [{from, reason}]     every cited source/proposal row that no entry uses, with the reason
 
-Q is a quantity {value, value_unit, transform, factor, target_unit?}. The model value is
+Q is a quantity {value, value_unit, transform, factor, target_unit?, model_value} (a setting entry carries the same
+keys itself). model_value is the number the configurator applies verbatim (it does no arithmetic): the orchestrator
+pastes the value the check computes and prints (a missing or "TODO" model_value is refused with it), and the check
+requires it to equal the model value within relative 1e-12. The model value is
   identity v*factor, unit_factor v*factor, reciprocal factor/v, ln2_over factor*ln(2)/v
 (value finite, factor finite and > 0, v != 0 for reciprocal/ln2_over). The converted unit is target_unit when given;
 otherwise it is derived only when factor == 1 and the transform is not unit_factor: identity keeps value_unit,
@@ -72,7 +75,8 @@ DICTIONARY = "physicell_dictionary.json"
 TRANSFORMS = ("identity", "unit_factor", "reciprocal", "ln2_over")
 ACTIONS = ("activation", "inhibition")
 DIRECTIONS = ("increases", "decreases")
-QUANTITY = ("value", "value_unit", "transform", "factor")
+QUANTITY = ("value", "value_unit", "transform", "factor", "model_value")
+MODEL_VALUE_TOL = 1e-12
 COMMON = ("entry_id", "kind", "from", "justification")
 KINDS = {
     "physiboss_input": ("cell_definition", "signal", "node", "action", "threshold", "smoothing"),
@@ -81,7 +85,8 @@ KINDS = {
     "rule": ("cell_definition", "signal", "direction", "behavior", "saturation_value", "half_max", "hill_power"),
     "setting": ("path", "value", "value_unit", "transform", "factor", "tool_hint"),
 }
-OPTIONAL = {"setting": ("target_unit", "target_unit_justification")}
+# model_value is required too; a missing one is refused by the value check, which prints the value to paste
+OPTIONAL = {"setting": ("model_value", "target_unit", "target_unit_justification")}
 COMPOUND = ("/", "*", "(", ")", " ")
 
 
@@ -363,18 +368,30 @@ class _Checker(pd.Citations):
     # -- values
 
     def quantity(self, label: str, key: str, q) -> float | None:
-        if not isinstance(q, dict) or not set(QUANTITY) <= set(q) or set(q) - set(QUANTITY) - {"target_unit"}:
-            self.error(f"{label}: {key} must be {{value, value_unit, transform, factor}} and optionally target_unit")
+        if not isinstance(q, dict) or not set(QUANTITY) - {"model_value"} <= set(q) \
+                or set(q) - set(QUANTITY) - {"target_unit"}:
+            self.error(f"{label}: {key} must be {{{', '.join(QUANTITY)}}} and optionally target_unit")
             return None
         try:
             converted_unit(q)
         except ValueError as exc:
             self.error(f"{label}: {key}: {exc}")
         try:
-            return model_value(q)
+            value = model_value(q)
         except ValueError as exc:
             self.error(f"{label}: {key}: {exc}")
             return None
+        self.copied(f"{label}: {key}: ", q.get("model_value"), value)
+        return value
+
+    def copied(self, prefix: str, given, computed: float) -> None:
+        """Ruling T9-e: the configurator copies model_value verbatim; it must be the computed model value."""
+        if not finite_number(given):
+            self.error(f"{prefix}model_value must be a number: paste {computed!r} (the model value of value, "
+                       f"transform and factor)")
+        elif not math.isclose(given, computed, rel_tol=MODEL_VALUE_TOL, abs_tol=0.0):
+            self.error(f"{prefix}model_value {given!r} is not the model value {computed!r} (relative "
+                       f"{MODEL_VALUE_TOL:g}): paste {computed!r}")
 
     def integer(self, label: str, key: str, value, nullable: bool = False) -> None:
         if value is None and nullable:
@@ -474,7 +491,7 @@ class _Checker(pd.Citations):
         except ValueError as exc:
             self.error(f"{label}: {exc}")
         try:
-            model_value(q)
+            self.copied(f"{label}: ", e.get("model_value"), model_value(q))
         except ValueError as exc:
             self.error(f"{label}: {exc}")
         if self.xml is None:

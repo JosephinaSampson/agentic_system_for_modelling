@@ -403,8 +403,11 @@ their cycles, the substrates and their values, units and Dirichlet settings, the
 basis's), the MaBoSS models on exactly the declared cells, no PhysiBoSS link and no enabled rules ruleset. The library
 default substrate `substrate` that `create_simulation_domain` inserts is accepted only untouched.
 
-**Values.** A quantity is `{value, value_unit, transform, factor, target_unit?}`. The model value is `value*factor`
-(`identity`, `unit_factor`), `factor/value` (`reciprocal`) or `factor*ln(2)/value` (`ln2_over`). Units are never
+**Values.** A quantity is `{value, value_unit, transform, factor, target_unit?, model_value}` (a `setting` entry
+carries these keys itself). The model value is `value*factor`
+(`identity`, `unit_factor`), `factor/value` (`reciprocal`) or `factor*ln(2)/value` (`ln2_over`). `model_value` is that
+number, pasted by the orchestrator from the check's message (the check refuses a missing, `TODO` or different
+`model_value`, relative 1e-12, and prints the value); the configurator applies it verbatim and does no arithmetic. Units are never
 inferred: `target_unit` is required when the factor is not 1, for `unit_factor` and for compound units, and a
 setting's converted unit must equal the XML `units` attribute exactly. Names must match the captured dictionary
 and, for PhysiBoSS links, the cell definition's MaBoSS handoff. One writer per (cell definition, behavior): one rule,
