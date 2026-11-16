@@ -76,6 +76,8 @@ taken from the verified file (the design's basis capture, or the projection's `c
 `Derived from` = `record_session_id`. Read only the file that line names (for a design, also the MaBoSS handoff
 manifests it lists). Never infer units; take names and values only from the verified files named on the `DATA_INPUT` line,
 never from prose elsewhere in the brief.
+The PhysiCell server (2.5.2) cannot reload a captured rules CSV, so the hook admits only rule-free captures.
+Never re-add a captured configuration's rules by hand; if the captured configuration has a rules CSV, return blocked.
 
 - **Design.** Apply exactly the approved design. With a `basis`, keep the loaded configuration's `from: "basis"`
   entries unchanged; without one, create the declared domain. Create the declared substrates (with their declared units) and cell

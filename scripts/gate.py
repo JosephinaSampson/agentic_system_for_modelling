@@ -944,8 +944,9 @@ def check_data_input(root, specialist, task):
     its line, or with `{` within 16 characters or on the next non-blank line) is refused
     with its line number and a quote, while a
     prose mention ("as defined in the DATA_INPUT mapping") is allowed. Returns None when
-    the prompt has no DATA_INPUT line and no data-analyst path, data session id or
-    seeds/mapping file (a prose-only mention carries no data).
+    the prompt has no DATA_INPUT line and no data-analyst path, data session id or model
+    input file (seeds, mapping, ode_mapping, calibration proposal, PhysiCell design, projection
+    or dictionary, recognised by content: _model_input_kind); a prose-only mention carries no data.
 
     network-curator: {"data_session", "proposals"} (approved seed_genes proposals) or
     {"seeds", "sha256", "approval"} (an approved data_seeds seeds.json from user sources).

@@ -17,7 +17,7 @@ from scripts.capture.record_physicell_config import record_physicell
 from scripts.data import approvals
 from scripts.physicell import capture_dictionary as cd
 from scripts.physicell import physicell_projection as pp
-from tests.data.test_physicell_design import FIXTURES, MABOSS, REL, SESSION, Base
+from tests.data.test_physicell_design import FIXTURES, MABOSS, REL, RULES_REFUSAL, SESSION, Base
 from tests.data.test_physicell_dictionary import INVOCATION, good_calls
 
 PROJ = "runs/orchestrator/p1/physicell_projection.json"
@@ -36,12 +36,15 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def built_capture(root, session, capture_id):
+def built_capture(root, session, capture_id, rules=False):
     """Record a capture of the fixture configuration whose tumor carries the PhysiBoSS fixture fragment (the
-    configuration the configurator built from the design): captured input link pressure -> B, output A -> apoptosis."""
+    configuration the configurator built from the design): captured input link pressure -> B, output A -> apoptosis.
+    Its rules ruleset is removed unless `rules` (ruling T5-d: server 2.5.2 cannot reload a captured rules CSV)."""
     source = root.parent / f"source-{session}-{capture_id}"
     (source / "config").mkdir(parents=True)
     tree = ET.parse(FIXTURES / "PhysiCell_settings.xml")
+    if not rules:
+        tree.getroot().remove(tree.getroot().find("cell_rules"))
     tumor = tree.getroot().find("cell_definitions/cell_definition[@name='tumor']/phenotype")
     tumor.append(ET.parse(FIXTURES / "intracellular_tumor.xml").getroot())
     tree.write(source / "config/PhysiCell_settings.xml", encoding="utf-8", xml_declaration=True)
@@ -397,6 +400,14 @@ class BindingTests(ProjectionBase):
         data["dictionary"]["sha256"] = sha(self.root / DICT)
         self.assertRefused(data, "design")
 
+    def test_capture_with_enabled_rules_csv_refused(self):
+        # Ruling T5-d(b): load_xml_configuration keeps no rules CSV rows, and no tool reloads one
+        rules = built_capture(self.root, SESSION, "cap-rules", rules=True)
+        data = self.projection()
+        data["capture"] = {"path": rules, "sha256": sha(self.root / rules / "capture.json")}
+        self.assertRefused(data, RULES_REFUSAL, "apply projections to the stage-A capture (no rules), and revise "
+                                                "and re-apply a projection from there")
+
     def test_capture_sha_mismatch_refused(self):
         data = self.projection()
         data["capture"]["sha256"] = "0" * 64
@@ -422,7 +433,8 @@ class BindingTests(ProjectionBase):
 
 
 class OneWriterTests(ProjectionBase):
-    """Ruling T4-d: one writer per behavior; the captured rules CSV and PhysiBoSS links are consulted."""
+    """Ruling T4-d: one writer per behavior; the captured PhysiBoSS links are consulted (a capture never carries
+    rules, ruling T5-d)."""
 
     def rule(self, entry_id="rule9", signal="oxygen", behavior="necrosis"):
         entry = copy.deepcopy(self.entries()[2])
@@ -434,22 +446,8 @@ class OneWriterTests(ProjectionBase):
         entry.update(entry_id=entry_id, node=node, behavior=behavior)
         return entry
 
-    def test_rule_already_in_captured_rules_csv_refused(self):
-        data = self.projection([self.rule()])
-        self.assertRefused(data, "rule9", "captured rules CSV row 1", "tumor,oxygen,decreases,necrosis")
-        self.assertEqual(self.errors(self.projection([self.rule(behavior="migration speed")])), [])
-
-    def test_no_captured_rules_csv_nothing_to_compare(self):
-        self.assertEqual(pp.captured_rules(self.root, {"rules_path": None, "rules_sha256": None}), [])
-
-    def test_output_on_behavior_driven_by_captured_rule_refused(self):
-        data = self.projection([self.output("out9", "A", "necrosis")])
-        self.assertRefused(data, "out9", "captured rules CSV row 1")
-
-    def test_changed_rules_csv_refused(self):
-        csv = self.root / self.capture / "package/config/cell_rules.csv"
-        csv.write_text(csv.read_text() + "tumor,oxygen,increases,apoptosis,1,1,1,0\n")
-        self.assertRefused(self.projection(), "capture")
+    def test_rule_and_output_on_a_free_behavior_pass(self):
+        self.assertEqual(self.errors(self.projection([self.rule(), self.output("out9", "A", "migration speed")])), [])
 
     def test_two_outputs_on_one_behavior_refused(self):
         data = self.projection([self.output("out1", "A"), self.output("out2", "B")])

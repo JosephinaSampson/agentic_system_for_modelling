@@ -34,10 +34,11 @@ output nodes and readouts); an unknown name lists up to 3 close matches. A setti
 element of the captured XML holding a number; its converted unit equals the element's units attribute exactly (no
 spelling normalisation); without a units attribute, target_unit plus a non-empty target_unit_justification is
 required, and target_unit must equal the units the parent element declares, if any. Rule model values satisfy
-half_max > 0, hill_power > 0, saturation_value >= 0. One writer per behavior: one rule per (cell_definition, signal,
-behavior), not already a row of the captured rules CSV; at most one physiboss_output per (cell_definition, behavior),
-and never a rule and an output link on the same (cell_definition, behavior), counting the captured rules CSV and the
-captured XML's PhysiBoSS output links; an input link not already in the captured XML; each XML element at most once,
+half_max > 0, hill_power > 0, saturation_value >= 0. The capture must have no enabled rules ruleset: server 2.5.2
+cannot reload a captured rules CSV (load_xml_configuration keeps links, not rules), so projections apply to the
+stage-A capture and are revised and re-applied from there. One writer per behavior: one rule per (cell_definition,
+signal, behavior); at most one physiboss_output per (cell_definition, behavior), and never a rule and an output link
+on the same (cell_definition, behavior), counting the captured XML's PhysiBoSS output links; an input link not already in the captured XML; each XML element at most once,
 never inside a cell definition's phenotype/intracellular (the links own it). target_unit_justification needs
 target_unit. `from` is "basis" (the captured configuration), {source, locator}, {data, locator}
 or a non-empty list of those; every declared source and proposal is cited by an entry or an unmapped row.
@@ -45,10 +46,8 @@ or a non-empty list of those; every declared source and proposal is cited by an 
 from __future__ import annotations
 
 import argparse
-import csv
 import difflib
 import hashlib
-import io
 import json
 import math
 import sys
@@ -145,31 +144,6 @@ def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def captured_rules(root: Path, bound: dict) -> list[tuple[int, list[str]]]:
-    """(line number, stripped fields) of each rule row of a capture's rules CSV ([] without one).
-
-    `bound` is settings_xml.capture(...). The CSV is the server's export (physicell_config save_rules_to_csv): no
-    header, CBHG v3.0 columns cell_type,signal,direction,behavior,saturation_value,half_max,hill_power,apply_to_dead.
-    Blank lines and lines starting with // or # are skipped."""
-    if bound.get("rules_path") is None:
-        return []
-    path = Path(root) / bound["rules_path"]
-    reject_symlinks(path, Path(root))
-    raw = path.read_bytes()
-    if _sha(raw) != bound["rules_sha256"]:
-        raise ValueError("its rules CSV changed while being read")
-    rows = []
-    for number, fields in enumerate(csv.reader(io.StringIO(raw.decode("utf-8"))), 1):
-        fields = [f.strip() for f in fields]
-        if not any(fields) or fields[0].startswith(("//", "#")):
-            continue
-        if len(fields) < 4:
-            raise ValueError(f"rules CSV row {number} has {len(fields)} columns, not the CBHG v3.0 layout "
-                             "cell_type,signal,direction,behavior,...")
-        rows.append((number, fields))
-    return rows
-
-
 # ---------------------------------------------------------------- draft
 
 def draft(root: Path, purpose: str, *, capture: str, design: str, design_approval: str, dictionary: str | None = None,
@@ -224,8 +198,7 @@ class _Checker(pd.Citations):
         self.used: set = set()
         self.targets: dict = {}
         self.writers: dict = {}               # (cell, behavior) -> [(kind, label)] of entries
-        self.captured_rules: dict = {}        # (cell, signal, behavior) -> description of the CSV row
-        self.captured_writers: dict = {}      # (cell, behavior) -> description of a captured rule or output link
+        self.captured_writers: dict = {}      # (cell, behavior) -> description of the captured XML output link
         self.captured_inputs: dict = {}       # (cell, signal, node) -> description of the captured input link
 
     def head(self, data: dict) -> None:
@@ -249,7 +222,6 @@ class _Checker(pd.Citations):
             if _sha(raw) != bound["xml_sha256"]:
                 raise ValueError("its settings XML changed while being read")
             self.xml = sx.parse_bytes(raw)
-            rules = captured_rules(self.root, bound)
         except (ValueError, OSError, UnicodeDecodeError) as exc:
             self.xml = None
             self.error(f"capture {ref['path']!r}: {exc}")
@@ -257,11 +229,8 @@ class _Checker(pd.Citations):
         self.parents = {child: parent for parent in self.xml.iter() for child in parent}
         self.capture = ref
         self.session = bound["session"]
-        for number, fields in rules:
-            cell, signal, behavior = fields[0], fields[1], fields[3]
-            where = f"captured rules CSV row {number} ({','.join(fields[:4])})"
-            self.captured_rules.setdefault((cell, signal, behavior), where)
-            self.captured_writers.setdefault((cell, behavior), where)
+        if bound["rules_path"] is not None:
+            self.error(f"capture {ref['path']!r} has an enabled rules ruleset; {sx.RULES_RELOAD}")
         for definition in self.xml.findall("cell_definitions/cell_definition"):
             cell = definition.get("name")
             for link in definition.findall("phenotype/intracellular/mapping/input"):
@@ -437,8 +406,8 @@ class _Checker(pd.Citations):
     def write_behavior(self, label: str, kind: str, cell: str, behavior: str) -> None:
         """One writer per (cell, behavior): an output link excludes every other writer; rules exclude outputs."""
         key = (cell, behavior)
-        captured = self.captured_writers.get(key)
-        if captured is not None and (kind == "physiboss_output" or "output link" in captured):
+        captured = self.captured_writers.get(key)  # only output links: a capture never carries rules (T5-d)
+        if captured is not None:
             self.error(f"{label}: behavior {behavior!r} of {cell} is already written by {captured}")
         clashes = [other for other_kind, other in self.writers.get(key, ())
                    if kind == "physiboss_output" or other_kind == "physiboss_output"]
@@ -470,9 +439,6 @@ class _Checker(pd.Citations):
             if value is not None and not test(value):
                 self.error(f"{label}: {key} model value must be {domain}, not {value!r}")
         triple = (cell, e["signal"], e["behavior"])
-        if triple in self.captured_rules:
-            self.error(f"{label}: duplicate rule for ({cell}, {e['signal']}, {e['behavior']}): already "
-                       f"{self.captured_rules[triple]}")
         key = ("rule", *triple)
         if key in self.targets:
             self.error(f"{label}: duplicate rule for ({cell}, {e['signal']}, {e['behavior']}) "

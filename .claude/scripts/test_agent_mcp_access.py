@@ -192,6 +192,8 @@ class DataAnalystAccessTests(unittest.TestCase):
             )
 
 
+RULES_RELOAD_RULE = ("Never re-add a captured configuration's rules by hand; if the captured configuration has a "
+                     "rules CSV, return blocked.")
 REVISION_RULE = "return `blocked` unless the session's current revision equals `proposal.model.revision`"
 
 
@@ -212,8 +214,8 @@ class DataHandoffInstructionTests(unittest.TestCase):
                 "so the invocation record holds them", "apply exactly the entries with the matching tools",
                 "relative tolerance 1e-9", "Return `blocked` on any difference", "Never infer units",
                 "take names and values only from the verified files named on the `DATA_INPUT` line",
-                "no dispatcher check for this DATA_INPUT"),
-            ".claude/skills/physicell-workflow/SKILL.md": (
+                "no dispatcher check for this DATA_INPUT", RULES_RELOAD_RULE),
+            ".claude/skills/physicell-workflow/SKILL.md": (RULES_RELOAD_RULE,
                 "`DATA_INPUT` on line 2", "`record_session_id` is a\nlineage anchor, never a live session",
                 "Create a new PhysiCell session", "`load_xml_configuration()`: `<capture>/package/config/PhysiCell_settings.xml`",
                 "as an absolute path under the project root", "Never pass `record_session_id` to any tool",

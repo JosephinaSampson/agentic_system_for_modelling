@@ -1281,6 +1281,16 @@ class PhysiCellDataInputTests(ProjectionBase):
         self.refused(self.task(self.design_line(), gate_line=bad_gate), "approval")
         self.refused(self.task(self.projection_line(), gate_line=bad_gate), "approval")
 
+    def test_stage_gate_only_brief_naming_a_mapping_file_refused(self):
+        # Intended (CLAUDE.md): model input files, recognised by content, are named only on a DATA_INPUT line
+        rel = "runs/orchestrator/p5/mapping.json"
+        (self.root / rel).parent.mkdir(parents=True)
+        (self.root / rel).write_text(json.dumps({"schema_version": 1, "inputs": {}, "contexts": [],
+                                                 "perturbations": [], "readouts": [], "criteria": []}))
+        self.assertEqual(gate._model_input_kind(self.root / rel), "mapping")
+        self.refused(f"{MC_GATE}\nImport the handoff; scenarios are in {rel}.", f"mapping file {rel}.*no DATA_INPUT line")
+        self.refused(self.task(self.design_line(), tail=f" Scenarios: {rel}."), f"mapping file {rel}")
+
     def test_wrong_sha_refused(self):
         self.refused(self.task(self.design_line(digest="0" * 64)), "sha256")
         self.refused(self.task(self.projection_line(digest="0" * 64)), "sha256")

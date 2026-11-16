@@ -17,6 +17,20 @@ SESSION = "mc-session-1"
 CAPTURE = "cap-1"
 MABOSS = "maboss-session"
 REL = "runs/orchestrator/p1/physicell_design.json"
+RULES_REFUSAL = "the PhysiCell server (2.5.2) cannot reload a captured rules CSV"
+
+
+def write_config(folder, rules=False):
+    """The fixture PhysiCell_settings.xml in folder (with cell_rules.csv), its enabled rules ruleset removed unless
+    `rules`: server 2.5.2 cannot reload a captured rules CSV, so designs and projections build on rule-free captures."""
+    folder.mkdir(parents=True, exist_ok=True)
+    text = (FIXTURES / "PhysiCell_settings.xml").read_text()
+    if not rules:
+        start, end = text.index("<cell_rules>"), text.index("</cell_rules>") + len("</cell_rules>")
+        text = text[:start] + text[end:]
+    (folder / "PhysiCell_settings.xml").write_text(text)
+    shutil.copy(FIXTURES / "cell_rules.csv", folder)
+    return folder / "PhysiCell_settings.xml"
 
 
 def file_ref(root, path, server, session, role):
@@ -34,10 +48,7 @@ class Base(unittest.TestCase):
         self.root = base / "project"
         self.root.mkdir()
         source = base / "source"
-        (source / "config").mkdir(parents=True)
-        shutil.copy(FIXTURES / "PhysiCell_settings.xml", source / "config")
-        shutil.copy(FIXTURES / "cell_rules.csv", source / "config")
-        record_physicell(self.root, source, source / "config/PhysiCell_settings.xml", SESSION, CAPTURE)
+        record_physicell(self.root, source, write_config(source / "config"), SESSION, CAPTURE)
         self.capture = f"runs/multicellular-configurator/{SESSION}/configs/{CAPTURE}"
         for name in ("CURRENT_STATE.md", "DECISIONS.md", "VALIDATION_PLAN.md"):
             shutil.copyfile(state.ROOT / "templates" / name, self.root / name)
@@ -238,6 +249,17 @@ class CheckTests(Base):
         xml = self.root / self.capture / "package/config/PhysiCell_settings.xml"
         xml.write_text(xml.read_text() + "\n")
         self.assertRefused(data, "basis")
+
+    def test_basis_with_enabled_rules_csv_refused(self):
+        # Ruling T5-d(a): load_xml_configuration keeps no rules CSV rows, and no tool reloads one
+        source = self.root.parent / "source-rules"
+        record_physicell(self.root, source, write_config(source / "config", rules=True), SESSION, "cap-rules")
+        self.assertEqual(self.errors(self.complete()), [])
+        data = self.complete()
+        data["basis"]["capture"] = f"runs/multicellular-configurator/{SESSION}/configs/cap-rules"
+        self.assertRefused(data, RULES_REFUSAL)
+        self.assertRefused(data, "apply projections to the stage-A capture (no rules), and revise and re-apply a "
+                                 "projection from there")
 
     def test_load_and_check_returns_hash_of_bytes_read(self):
         path = self.write(self.complete())

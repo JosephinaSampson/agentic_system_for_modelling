@@ -135,6 +135,12 @@ def _enabled(element: ET.Element, parents: dict) -> bool:
     return True
 
 
+# Server 2.5.2: load_xml_configuration keeps the intracellular blocks and links but no rules CSV rows
+# (physicell_config's cell_rules.load_from_xml registers rulesets only, and no MCP tool reloads a CSV); a later
+# export_cell_rules_csv writes only the new rules and leaves two enabled rulesets in the XML.
+RULES_RELOAD = ("the PhysiCell server (2.5.2) cannot reload a captured rules CSV; apply projections to the stage-A "
+                "capture (no rules), and revise and re-apply a projection from there")
+
 def capture(root: Path, capture_rel: str) -> dict:
     """Bind a captured configuration, verified against its capture.json manifest."""
     root = Path(root)

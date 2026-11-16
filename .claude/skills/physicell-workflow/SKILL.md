@@ -64,6 +64,7 @@ lineage anchor, never a live session (MCP sessions end with each run).
   `load_xml_configuration()`: `<capture>/package/config/PhysiCell_settings.xml`,
   as an absolute path under the project root, with the capture taken from the
   verified file (the design's basis capture, or the projection's `capture.path`).
+- The server (2.5.2) cannot reload a captured rules CSV. Never re-add a captured configuration's rules by hand; if the captured configuration has a rules CSV, return blocked.
 - Never pass `record_session_id` to any tool. Report the new full session ID; the
   orchestrator registers it with `Derived from` = `record_session_id`.
 - Read only the verified file (and, for a design, the handoff manifests it lists).

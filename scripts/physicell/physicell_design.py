@@ -8,8 +8,8 @@ exported MaBoSS model, and how each behavior group is coupled. Stdlib only.
 Schema (schema_version 1; every key below is required):
   kind: "physicell_design"
   basis: {capture} | null        capture = runs/multicellular-configurator/<session>/configs/<capture>, a
-                                 recorded configuration (settings_xml.capture verifies its hashes); null = a new
-                                 configuration
+                                 recorded configuration (settings_xml.capture verifies its hashes) with no enabled
+                                 rules ruleset (server 2.5.2 cannot reload a rules CSV); null = a new configuration
   session: str                   the PhysiCell session; with a basis it must be the capture's session
   domain: null | {x_min,x_max,y_min,y_max,z_min,z_max,dx,dy,dz, units: "micron", max_time, time_units: "min"}
                                  required (all numbers) when basis is null; must be null with a basis
@@ -226,6 +226,8 @@ class _Checker(Citations):
             else:
                 self.has_basis = True
                 try:
+                    if sx.capture(self.root, basis["capture"])["rules_path"] is not None:
+                        self.error(f"basis: capture {basis['capture']} has an enabled rules ruleset; {sx.RULES_RELOAD}")
                     self.basis = _basis_facts(self.root, basis["capture"])
                 except (ValueError, OSError) as exc:
                     self.error(f"basis: {exc}")
