@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import posixpath
@@ -517,7 +516,8 @@ def _check_ode_calibration_input(root, value):
     proposal's ODE session (= the approval's session_id) and `accept` (unique, nonempty) exactly the
     approval's outputs, so the modeler takes the session and the parameter names only from this verified line.
     The proposal must come from its job: the job.json beside it has the proposal's job_sha256, job id
-    (= the folder name) and mapping, an approved ode_mapping of the same ODE session.
+    (= the folder name) and mapping, an approved ode_mapping of the same ODE session
+    (approvals.require_proposal_job, run by require_calibration_approval for the gate and score_holdout alike).
     """
     if set(value) != ODE_CALIBRATION_KEYS:
         raise ValueError("ode-modeler DATA_INPUT requires exactly calibration, sha256, approval, record_session_id "
@@ -536,6 +536,7 @@ def _check_ode_calibration_input(root, value):
         raise ValueError("DATA_INPUT calibration needs a lowercase hex sha256")
     if not CALIBRATION_REL.fullmatch(rel):
         raise ValueError("DATA_INPUT calibration must be runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json")
+    # Every approval and proposal <-> job check (shared with score_holdout): approvals.require_calibration_approval.
     record, proposal = approvals.require_calibration_approval(root, approval_id, rel, digest)
     ode_session = proposal["model"]["ode_session"]
     if session != ode_session:
@@ -544,31 +545,6 @@ def _check_ode_calibration_input(root, value):
     if set(accept) != set(record["outputs"]):
         raise ValueError(f"DATA_INPUT accept {sorted(accept)} must equal the outputs of approval {approval_id} "
                          f"{sorted(record['outputs'])}")
-    # The proposal must come from an approved mapping and from the job built beside it.
-    ref = proposal.get("mapping")
-    if not isinstance(ref, dict) or set(ref) != {"path", "sha256", "approval"} \
-            or not all(isinstance(ref[k], str) and ref[k] for k in ref):
-        raise ValueError(f"{rel} has no mapping {{path, sha256, approval}}")
-    try:
-        mapping_record = approvals.require_ode_mapping_approval(root, ref["approval"], ref["path"], ref["sha256"])
-    except ValueError as exc:
-        raise ValueError(f"{rel}: its mapping {ref['path']} (approval {ref['approval']}) is not an approved "
-                         f"ode_mapping: {exc}") from None
-    if mapping_record.get("session_id") != ode_session:
-        raise ValueError(f"{rel}: mapping approval {ref['approval']} is for ODE session "
-                         f"{mapping_record.get('session_id')!r}, not the proposal's {ode_session}")
-    folder = (Path(root) / rel).parent
-    job_json = folder / "job.json"
-    job_raw = job_json.read_bytes() if job_json.is_file() and not job_json.is_symlink() else None
-    if job_raw is None or hashlib.sha256(job_raw).hexdigest() != proposal.get("job_sha256"):
-        raise ValueError(f"{rel}: job_sha256 does not match the job.json beside it")
-    job = _strict_object(job_raw.decode("utf-8"), f"{folder.name}/job.json")
-    if job.get("job_id") != folder.name or proposal.get("job_id") != folder.name:
-        raise ValueError(f"{rel}: the job_id of the proposal ({proposal.get('job_id')!r}) and of its job.json "
-                         f"({job.get('job_id')!r}) must both be its job folder name {folder.name}")
-    if job.get("mapping") != ref:
-        raise ValueError(f"{rel}: its mapping {ref} is not the mapping of the job.json beside it "
-                         f"({job.get('mapping')!r})")
     return {"calibration": rel, "sha256": digest, "approval_id": approval_id, "ode_session": ode_session,
             "outputs": list(accept)}, set()
 

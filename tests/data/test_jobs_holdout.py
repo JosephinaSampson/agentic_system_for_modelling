@@ -206,6 +206,37 @@ class HoldoutTests(HoldoutFixture):
             self.score()
         self.assertEqual(self.seen, [])
 
+    def unbind(self, edit, record_id):
+        """Rewrite the proposal (as a hand edit would), approve exactly those bytes, and return the approval id."""
+        path = self.root / self.proposal_rel
+        data = json.loads(path.read_text(encoding="utf-8"))
+        edit(data)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        return self.approve_calibration(record_id)
+
+    def test_proposal_not_bound_to_its_job_refused_and_nothing_written(self):
+        # batch B fix round 1: the proposal <-> job binding is shared with the gate (approvals helper)
+        self.make_proposal()
+        job = json.loads((self.job_dir / "job.json").read_text(encoding="utf-8"))
+        for n, (edit, pattern) in enumerate((
+                (lambda d: d.update(job_sha256="0" * 64, job_id="job-somethingelse"), "job_sha256|job.json"),
+                (lambda d: d.update(job_id="job-somethingelse"), "job_id"),
+                (lambda d: d["mapping"].update(approval="missing-approval"), "missing-approval"),
+                (lambda d: d.update(mapping={**job["mapping"], "extra": 1}), "mapping"))):
+            with self.subTest(n=n):
+                self.make_proposal_fresh()
+                record_id = self.unbind(edit, f"cal-unbound-{n}")
+                with self.assertRaisesRegex(ValueError, pattern):
+                    self.score(record_id)
+                self.assertFalse((self.job_dir / "holdout_score.json").exists())
+        self.assertEqual(self.seen, [])
+
+    def make_proposal_fresh(self):
+        """Restore the imported proposal bytes (each case edits them)."""
+        if not hasattr(self, "_proposal_bytes"):
+            self._proposal_bytes = (self.root / self.proposal_rel).read_bytes()
+        (self.root / self.proposal_rel).write_bytes(self._proposal_bytes)
+
     def test_failed_runner_writes_nothing(self):
         self.make_proposal()
         self.approve_calibration()

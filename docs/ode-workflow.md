@@ -184,7 +184,8 @@ Calibration is a portable job the researcher approves step by step; no specialis
    (`configure_model` replaces the configuration), then reports the new revision. Tag the values
    `data-calibrated`; register the new revision with Derived from = the calibrated session, the job id,
    proposal short hash and approval id. The new revision needs the usual review and approval.
-8. **Hold-out.** `score_holdout.py <job-id> --approval <id>` scores the held-out rows once, passing only the
+8. **Hold-out.** `score_holdout.py <job-id> --approval <id>` (the same approval and job-binding checks as the
+   hook) scores the held-out rows once, passing only the
    accepted parameters at their best values (every other parameter keeps the bundled model's default,
    recorded as `effective_parameters`), and writes `holdout_score.json` with `n_rows`, the hold-out rows that
    received a prediction. It never overwrites. It writes nothing (so the hold-out stays unscored) when no

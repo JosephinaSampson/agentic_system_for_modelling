@@ -212,7 +212,8 @@ def require_calibration_approval(root: Path, record_id: str, rel: str, sha256: s
       * the proposal (parsed from the same bytes whose sha256 was checked) is a calibration_proposal with an
         ODE session and parameter names;
       * outputs (the accepted parameters) are a nonempty list of unique proposal parameter names;
-      * session_id is the proposal's ODE session.
+      * session_id is the proposal's ODE session;
+      * the proposal belongs to its job (require_proposal_job).
     """
     from scripts.data.common import strict_json
     state = _state()
@@ -249,4 +250,48 @@ def require_calibration_approval(root: Path, record_id: str, rel: str, sha256: s
     if record.get("session_id") != session:
         raise ValueError(f"calibration approval {record_id} has session_id {record.get('session_id')!r}; "
                          f"it must be the proposal's ODE session {session}")
+    require_proposal_job(root, rel, proposal)
     return record, proposal
+
+
+def require_proposal_job(root: Path, rel: str, proposal: dict) -> dict:
+    """The job.json beside a calibration proposal, after checking that the proposal belongs to that job.
+
+      * the proposal's mapping {path, sha256, approval} is an approved ode_mapping
+        (require_ode_mapping_approval, incl. validate_record) of the proposal's ODE session;
+      * the job.json beside it (a regular file, no symlink) has sha256 == proposal.job_sha256;
+      * job.json job_id == proposal job_id == the folder name, and job.json mapping == proposal mapping.
+    """
+    from scripts.data.common import strict_json
+    root = Path(root)
+    session = proposal["model"]["ode_session"]
+    ref = proposal.get("mapping")
+    if not isinstance(ref, dict) or set(ref) != {"path", "sha256", "approval"} \
+            or not all(isinstance(ref[k], str) and ref[k] for k in ref):
+        raise ValueError(f"{rel} has no mapping {{path, sha256, approval}}")
+    try:
+        mapping_record = require_ode_mapping_approval(root, ref["approval"], ref["path"], ref["sha256"])
+    except ValueError as exc:
+        raise ValueError(f"{rel}: its mapping {ref['path']} (approval {ref['approval']}) is not an approved "
+                         f"ode_mapping: {exc}") from None
+    if mapping_record.get("session_id") != session:
+        raise ValueError(f"{rel}: mapping approval {ref['approval']} is for ODE session "
+                         f"{mapping_record.get('session_id')!r}, not the proposal's {session}")
+    folder = (root / rel).parent
+    job_json = folder / "job.json"
+    job_raw = job_json.read_bytes() if job_json.is_file() and not job_json.is_symlink() else None
+    if job_raw is None or hashlib.sha256(job_raw).hexdigest() != proposal.get("job_sha256"):
+        raise ValueError(f"{rel}: job_sha256 does not match the job.json beside it")
+    try:
+        job = strict_json(job_raw)
+    except (ValueError, RecursionError) as exc:
+        raise ValueError(f"cannot read {folder.name}/job.json: {exc}") from None
+    if not isinstance(job, dict):
+        raise ValueError(f"{folder.name}/job.json must be a JSON object")
+    if job.get("job_id") != folder.name or proposal.get("job_id") != folder.name:
+        raise ValueError(f"{rel}: the job_id of the proposal ({proposal.get('job_id')!r}) and of its job.json "
+                         f"({job.get('job_id')!r}) must both be its job folder name {folder.name}")
+    if job.get("mapping") != ref:
+        raise ValueError(f"{rel}: its mapping {ref} is not the mapping of the job.json beside it "
+                         f"({job.get('mapping')!r})")
+    return job

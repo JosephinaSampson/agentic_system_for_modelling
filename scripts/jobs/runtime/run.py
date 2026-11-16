@@ -613,8 +613,8 @@ def validate(root: Path, params: dict | None, use: str, partial: bool = False, w
     """Score `params` (None: the model defaults) on the rows of `use`, with one loaded Problem.
 
     partial: `params` may name only some fitted values; the others keep the model defaults (`params` is the
-    effective vector, `params_given` the names given). with_nominal: also score the model defaults on the
-    same rows (report["nominal"] = {params, score, penalty}).
+    effective vector, `params_given` the names given). with_nominal: also report the model defaults of the
+    fitted names (report["nominal"] = {"params": ...}), read from the loaded model, never simulated.
     """
     problem = problem or Problem(root)
     nominal = problem.nominal() if params is None or partial or with_nominal else None
@@ -626,9 +626,7 @@ def validate(root: Path, params: dict | None, use: str, partial: bool = False, w
     if partial:
         report["params_given"] = sorted(params or {})
     if with_nominal:
-        nominal_score = score if params is None else problem.evaluate(nominal, use)[0]
-        report["nominal"] = {"params": nominal, "score": float(nominal_score),
-                             "penalty": nominal_score >= problem.compare.PENALTY}
+        report["nominal"] = {"params": nominal}
     return report
 
 
@@ -905,7 +903,7 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--out", metavar="FILE")
     v.add_argument("--partial", action="store_true",
                    help="--params may give a subset of the fitted names; the others keep the model defaults")
-    v.add_argument("--nominal", action="store_true", help="also report the score at the model defaults")
+    v.add_argument("--nominal", action="store_true", help="also report the model defaults of the fitted names")
     c = sub.add_parser("calibrate")
     c.add_argument("--restart", type=int, required=True)
     sub.add_parser("collect")

@@ -684,9 +684,10 @@ class RuntimeReviewTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 run._read_params(path, fit, partial=True)
 
-    def test_validate_reports_the_nominal_score_in_the_same_process(self):
+    def test_validate_reports_the_nominal_values_in_the_same_process(self):
+        # import needs only the nominal values: one Problem, one evaluation (the given params), no nominal run
         Fake, simulated = self.fake_problem(self.spec())
-        loads = []
+        loads, evaluated = [], []
 
         class WithDefaults(Fake):
             def __init__(self, root):
@@ -697,20 +698,22 @@ class RuntimeReviewTests(unittest.TestCase):
                 return {"k1": 1.0}
 
             def simulate(self, name, fitted, times=None):
+                evaluated.append(dict(fitted))
                 return {"obs": {t: fitted["k1"] + t for t in times}}
         with mock.patch.object(run, "Problem", WithDefaults):
             report = run.validate(self.root, {"k1": 2.0}, "fit", with_nominal=True)
-        self.assertEqual(len(loads), 1)  # one Problem for both scores
+        self.assertEqual(len(loads), 1)
+        self.assertEqual(evaluated, [{"k1": 2.0}])  # the defaults are read, never simulated
         self.assertEqual(report["params_source"], "given")
         self.assertEqual(report["score"], (12.0 - 2.0) ** 2)
-        self.assertEqual(report["nominal"], {"params": {"k1": 1.0}, "score": (11.0 - 2.0) ** 2, "penalty": False})
+        self.assertEqual(report["nominal"], {"params": {"k1": 1.0}})
         params = self.root / "best.json"
         params.write_text(json.dumps({"k1": 2.0}))
         out = self.root / "out.json"
         with mock.patch.object(run, "Problem", WithDefaults), mock.patch.object(run, "ROOT", self.root), \
                 mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(run.main(["validate", "--params", str(params), "--nominal", "--out", str(out)]), 0)
-        self.assertEqual(json.loads(out.read_text())["nominal"]["params"], {"k1": 1.0})
+        self.assertEqual(json.loads(out.read_text())["nominal"], {"params": {"k1": 1.0}})
         self.assertEqual(len(loads), 2)  # cmd_validate loads the Problem once
 
     # launch.py:294 + run.py:525 (controller ruling R-A3)

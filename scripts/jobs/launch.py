@@ -497,7 +497,7 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--out", metavar="FILE")
     v.add_argument("--partial", action="store_true", help="--params gives some fitted names; the rest keep the "
                    "model defaults")
-    v.add_argument("--nominal", action="store_true", help="also report the score at the model defaults")
+    v.add_argument("--nominal", action="store_true", help="also report the model defaults of the fitted names")
     p = modes.add_parser("print")
     p.add_argument("job_id")
     p.add_argument("--host", required=True, metavar="NAME")

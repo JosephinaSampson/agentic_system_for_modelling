@@ -359,7 +359,7 @@ class DefaultReproduceTests(ImportFixture):
             given = json.loads(Path(params).read_text(encoding="utf-8")) if params else None
             seen.append({"job_id": job_id, "params": given, "use": use, "nominal": nominal})
             report = {"score": 1.0, "use": use, "params_source": "given", "params": given,
-                      "nominal": {"params": local, "score": 3.0, "penalty": False}}
+                      "nominal": {"params": local}}
             Path(out).write_text(json.dumps(report), encoding="utf-8")
             return 0
 
@@ -372,8 +372,8 @@ class DefaultReproduceTests(ImportFixture):
     def test_default_reproduce_refuses_a_report_without_nominal_params(self):
         self.write_archive()
         for report in ({"score": 1.0, "params_source": "given"},
-                       {"score": 1.0, "params_source": "given", "nominal": {"score": 3.0}},
-                       {"score": 1.0, "params_source": "nominal", "nominal": {"params": {}, "score": 3.0}}):
+                       {"score": 1.0, "params_source": "given", "nominal": {}},
+                       {"score": 1.0, "params_source": "nominal", "nominal": {"params": {}}}):
             def fake_validate(root, job_id, params, use, out, nominal=False, report=report):
                 Path(out).write_text(json.dumps(report), encoding="utf-8")
                 return 0
