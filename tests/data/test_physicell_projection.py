@@ -82,11 +82,11 @@ class ProjectionBase(Base):
         self.capture = built_capture(self.root, STAGE_A, "cap-2", edit=self.edit_capture, links=self.links)
         self.write(self.design)
         self.design_sha = sha(self.root / REL)
-        dispatch_design(self.root)
         state.update(self.root, "record", {
             "id": "design-1", "kind": "stage_approval", "session_id": SESSION, "stage": "physicell_design",
             "outputs": ["default", "tumor", "tumor_hypoxic", "oxygen", "drug"], "approved_by": "researcher",
             "authorization": "approved", "artifact": {"path": REL, "sha256": self.design_sha}})
+        dispatch_design(self.root)  # its DATA_INPUT line names design-1
         invocation = self.root / INVOCATION
         invocation.parent.mkdir(parents=True, exist_ok=True)
         invocation.write_text(json.dumps(good_calls(extra_behaviors=("necrosis", "apoptosis"))))

@@ -231,6 +231,24 @@ def standalone(root, stage, decision_id, outputs):
     return {"passed": True, "downstream_stage": stage, "standalone_decision_id": decision_id, "artifact": record["artifact"], "outputs": outputs}
 
 
+STAGE_GATE_FORMS = ({"upstream_session_id", "outputs"}, {"standalone_decision_id", "outputs"})
+
+
+def stage_gate_form(line):
+    """The value of a well-formed line-1 `STAGE_GATE` (strict JSON object: exactly upstream_session_id or
+    standalone_decision_id, an identifier, and outputs, a nonempty unique list of node names); ValueError otherwise.
+    Shape only: check_task resolves it against the durable records (lineage uses this to recognise a recorded brief
+    whose dispatch the hook verified)."""
+    if not isinstance(line, str) or not line.startswith("STAGE_GATE "):
+        raise ValueError("line 1 is not a STAGE_GATE line")
+    value = _strict_object(line[len("STAGE_GATE "):], "STAGE_GATE")
+    if set(value) not in STAGE_GATE_FORMS:
+        raise ValueError("STAGE_GATE must have exactly upstream_session_id or standalone_decision_id, and outputs")
+    identifier(value.get("upstream_session_id", value.get("standalone_decision_id")))
+    _names(value["outputs"], "STAGE_GATE outputs")
+    return value
+
+
 def check_task(root, specialist, task):
     """A literal first-line envelope makes dispatch context machine-checkable.
 

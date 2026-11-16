@@ -112,11 +112,35 @@ def built_capture(root, session, capture_id, rules=False, edit=None, links=False
     return f"runs/multicellular-configurator/{session}/configs/{capture_id}"
 
 
-def dispatch_design(root, session=STAGE_A, rel=REL, approval="design-1", anchor=SESSION, agent="agent-1",
+def ensure_approval(root, stage, rel, session, outputs, record_id=None):
+    """The id of a `stage` stage_approval of the current bytes of `rel` (session_id `session`): an existing one, else
+    a new one (`record_id`, or <stage>-<sha256[:12]>), as the researcher records it before the dispatch."""
+    root = Path(root)
+    digest = state.digest(root / rel)
+    for record in state.records((root / "DECISIONS.md").read_text(encoding="utf-8")):
+        if record.get("kind") == "stage_approval" and record.get("stage") == stage and record.get("session_id") == session \
+                and record.get("artifact") == {"path": rel, "sha256": digest} and record_id in (None, record["id"]):
+            return record["id"]
+    record_id = record_id or f"{stage}-{digest[:12]}"
+    state.update(root, "record", {
+        "id": record_id, "kind": "stage_approval", "session_id": session, "stage": stage, "outputs": list(outputs),
+        "approved_by": "researcher", "authorization": "approved", "artifact": {"path": rel, "sha256": digest}})
+    return record_id
+
+
+def dispatch_design(root, session=STAGE_A, rel=REL, approval=None, anchor=None, agent="agent-1",
                     digest=None):
     """The invocation task.txt of the configurator run (session `session`) dispatched with the design `rel`: line 2
-    is its DATA_INPUT line (the dispatch lineage that binds the stage-A capture to the design)."""
-    payload = {"design": rel, "sha256": digest or state.digest(Path(root) / rel), "approval": approval,
+    is its DATA_INPUT line (the dispatch lineage that binds the stage-A capture to the design). Its approval is a
+    physicell_design approval of the design's current bytes (recorded here when there is none, ensure_approval);
+    a `digest` other than those bytes names no approval. record_session_id is `anchor`, default the design's own."""
+    actual = state.digest(Path(root) / rel)
+    design = json.loads((Path(root) / rel).read_text())
+    anchor = design.get("session", SESSION) if anchor is None else anchor  # the design's anchor
+    if approval is None and digest in (None, actual):
+        names = [item["name"] for key in ("cell_definitions", "substrates") for item in design[key]]
+        approval = ensure_approval(root, "physicell_design", rel, anchor, names)
+    payload = {"design": rel, "sha256": digest or actual, "approval": approval or "design-unrecorded",
                "record_session_id": anchor}
     path = Path(root) / f"runs/multicellular-configurator/{session}/invocation/{agent}/task.txt"
     path.parent.mkdir(parents=True, exist_ok=True)

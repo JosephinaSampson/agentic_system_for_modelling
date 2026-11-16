@@ -14,7 +14,7 @@ from scripts.capture.record_physicell_config import record_physicell
 from scripts.physicell import physicell_projection as pp
 from scripts.physicell import settings_xml as sx
 from scripts.physicell import verify_export as ve
-from tests.data.test_physicell_design import STAGE_A
+from tests.data.test_physicell_design import STAGE_A, ensure_approval
 from tests.data.test_physicell_projection import APOPTOSIS, PROJ, SRC, ProjectionBase, q, sha
 
 AFTER = "mc-session-2"
@@ -158,11 +158,18 @@ class VerifyBase(ProjectionBase):
             self.invocation(session, digest=digest)
         return f"runs/multicellular-configurator/{session}/configs/{capture_id}"
 
-    def invocation(self, session=AFTER, agent="agent-1", digest=None, projection=PROJ):
+    def invocation(self, session=AFTER, agent="agent-1", digest=None, projection=PROJ, approval=None,
+                   record_session_id=STAGE_A):
+        """The stage-B run's task.txt: line 2 names the projection with a physicell_projection approval of its
+        current bytes (recorded when there is none, as the researcher does before the dispatch)."""
         path = self.root / f"runs/multicellular-configurator/{session}/invocation/{agent}/task.txt"
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"projection": projection, "sha256": digest or sha(self.root / PROJ), "approval": "proj-1",
-                   "record_session_id": STAGE_A}
+        actual = sha(self.root / projection) if (self.root / projection).is_file() else None
+        if approval is None and digest in (None, actual) and actual is not None:
+            ids = [e["entry_id"] for e in json.loads((self.root / projection).read_text())["entries"]]
+            approval = ensure_approval(self.root, "physicell_projection", projection, STAGE_A, ids)
+        payload = {"projection": projection, "sha256": digest or actual, "approval": approval or "proj-unrecorded",
+                   "record_session_id": record_session_id}
         path.write_text('STAGE_GATE {"upstream_session_id": "maboss-session", "outputs": ["A", "B"]}\n'
                         f"DATA_INPUT {json.dumps(payload)}\nApply the approved projection.\n")
         return path
@@ -683,6 +690,27 @@ class CliTests(VerifyBase):
         code, text = self.run_cli(self.export(invocation=False))
         self.assertEqual(code, 2)
         self.assertIn("invocation", text)
+
+
+class ProjectionLineageTests(VerifyBase):
+    """PR #17 review 4586111748: the stage-B lineage needs a real physicell_projection approval of exactly this
+    projection, its record_session_id and a line-1 STAGE_GATE."""
+
+    def test_unverified_dispatch_is_not_lineage(self):
+        after = self.export(invocation=False)
+        for name, kw, first in (("bogus approval", {"approval": "bogus"}, None),
+                                ("design approval", {"approval": "design-1"}, None),
+                                ("wrong record_session_id", {"record_session_id": "x"}, None),
+                                ("no STAGE_GATE", {}, "Apply the approved projection.")):
+            with self.subTest(case=name):
+                path = self.invocation(**kw)
+                if first is not None:
+                    lines = path.read_text().splitlines()
+                    path.write_text("\n".join([first, *lines[1:]]) + "\n")
+                with self.assertRaisesRegex(ValueError, "lineage: no invocation record"):
+                    ve.compute(self.root, PROJ, after)
+        self.invocation()
+        self.assertTrue(ve.compute(self.root, PROJ, after)["passed"])
 
 
 if __name__ == "__main__":

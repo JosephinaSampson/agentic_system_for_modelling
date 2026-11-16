@@ -129,7 +129,11 @@ outline:
   approval's `session_id` and the `record_session_id`. A projection's anchor is its capture session.
 - **Dispatch lineage:** `lineage.dispatched_with` finds, in
   `runs/multicellular-configurator/<session>/invocation/*/task.txt`, a line 2 that is exactly the
-  design or projection `DATA_INPUT` form naming that path and sha256. `capture_dictionary.py`
+  design or projection `DATA_INPUT` form naming that path and sha256, under a well-formed line-1
+  `STAGE_GATE` (`gate.stage_gate_form`), whose `approval` is a real approval of the matching stage binding
+  exactly that path and sha256 (`approvals.require_physicell_design_approval` /
+  `require_physicell_projection_approval`) and whose `record_session_id` is that approval's `session_id`
+  (a run the hook never verified, e.g. under the Codex runtime, is no lineage). `capture_dictionary.py`
   requires it in the same invocation folder as the parsed `tool_calls.json`; the projection check
   binds its capture to the design; `verify_export.py` binds the stage-B capture (a session other
   than stage A's) to the projection.

@@ -292,6 +292,38 @@ class DictionaryTests(Base):
                     lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest)
                 self.refused(self.good(), "lineage: no invocation record")
 
+    def test_lineage_needs_a_stage_gate_a_real_approval_and_its_session(self):
+        # PR #17 review 4586111748: a line 2 with the right keys, path and sha256 is not enough
+        from scripts import state
+        from scripts.physicell import lineage
+        task = self.root / f"runs/multicellular-configurator/{STAGE_A}/invocation/agent-1/task.txt"
+        lines = task.read_text().splitlines()
+        payload = json.loads(lines[1][len("DATA_INPUT "):])
+        digest = state.digest(self.root / REL)
+        gate_line = lines[0]
+        other = "runs/orchestrator/p9/physicell_design.json"
+        self.write(self.design, other)
+        state.update(self.root, "record", {
+            "id": "proj-x", "kind": "stage_approval", "session_id": payload["record_session_id"],
+            "stage": "physicell_projection", "outputs": ["x"], "approved_by": "researcher", "authorization": "approved",
+            "artifact": {"path": REL, "sha256": digest}})
+        cases = {
+            "bogus approval": (gate_line, {**payload, "approval": "bogus"}, "decision_id not found"),
+            "projection-stage approval": (gate_line, {**payload, "approval": "proj-x"}, "physicell_design"),
+            "wrong record_session_id": (gate_line, {**payload, "record_session_id": "x"}, "record_session_id 'x'"),
+            "no STAGE_GATE line": ("Build the approved PhysiCell design.", payload, "STAGE_GATE"),
+            "STAGE_GATE with extra keys": (gate_line[:-1] + ', "x": 1}', payload, "STAGE_GATE"),
+            "STAGE_GATE not JSON": ("STAGE_GATE {", payload, "STAGE_GATE"),
+        }
+        for name, (first, value, reason) in cases.items():
+            with self.subTest(case=name):
+                task.write_text("\n".join([first, "DATA_INPUT " + json.dumps(value), *lines[2:]]) + "\n")
+                with self.assertRaisesRegex(ValueError, f"lineage: no invocation record.*{reason}"):
+                    lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest)
+                self.refused(self.good(), "lineage: no invocation record")
+        task.write_text("\n".join(lines) + "\n")
+        self.assertTrue(lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest).endswith("task.txt"))
+
     def test_lineage_session_must_be_an_identifier(self):
         # parked minor 1: the session is validated locally, never used as a path fragment
         from scripts.physicell import lineage
