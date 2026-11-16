@@ -1,0 +1,93 @@
+[
+ {
+  "type": "tool_use",
+  "id": "t1",
+  "name": "mcp__physicell-agent__list_all_available_signals",
+  "input": {
+   "session_id": "mc-session-1"
+  }
+ },
+ {
+  "type": "tool_result",
+  "tool_use_id": "t1",
+  "content": [
+   {
+    "type": "text",
+    "text": "### X\n- **oxygen**: o2\n- **pressure**: p\n"
+   },
+   {
+    "type": "text",
+    "text": "{\"server\": \"PhysiCell\", \"session_id\": \"mc-session-1\", \"signals\": [{\"name\": \"oxygen\", \"signal_type\": \"substrate\", \"description\": \"o2\", \"requires\": []}, {\"name\": \"pressure\", \"signal_type\": \"mechanics\", \"description\": \"p\", \"requires\": []}]}"
+   }
+  ]
+ },
+ {
+  "type": "tool_use",
+  "id": "t2",
+  "name": "mcp__physicell-agent__list_all_available_behaviors",
+  "input": {
+   "session_id": "mc-session-1",
+   "cell_type": "default"
+  }
+ },
+ {
+  "type": "tool_result",
+  "tool_use_id": "t2",
+  "content": [
+   {
+    "type": "text",
+    "text": "### X\n- **migration speed**: default speed\n- **exit from cycle phase 1**: x\n"
+   },
+   {
+    "type": "text",
+    "text": "{\"server\": \"PhysiCell\", \"session_id\": \"mc-session-1\", \"behaviors\": [{\"name\": \"migration speed\", \"behavior_type\": \"motility\", \"aliases\": [], \"description\": \"default speed\", \"requires\": []}, {\"name\": \"exit from cycle phase 1\", \"behavior_type\": \"cycle\", \"aliases\": [], \"description\": \"x\", \"requires\": []}]}"
+   }
+  ]
+ },
+ {
+  "type": "tool_use",
+  "id": "t3",
+  "name": "mcp__physicell-agent__list_all_available_behaviors",
+  "input": {
+   "session_id": "mc-session-1",
+   "cell_type": "tumor"
+  }
+ },
+ {
+  "type": "tool_result",
+  "tool_use_id": "t3",
+  "content": [
+   {
+    "type": "text",
+    "text": "### X\n- **migration speed**: tumor speed\n- **exit from cycle phase 1**: x\n"
+   },
+   {
+    "type": "text",
+    "text": "{\"server\": \"PhysiCell\", \"session_id\": \"mc-session-1\", \"behaviors\": [{\"name\": \"migration speed\", \"behavior_type\": \"motility\", \"aliases\": [], \"description\": \"tumor speed\", \"requires\": []}, {\"name\": \"exit from cycle phase 1\", \"behavior_type\": \"cycle\", \"aliases\": [], \"description\": \"x\", \"requires\": []}]}"
+   }
+  ]
+ },
+ {
+  "type": "tool_use",
+  "id": "t4",
+  "name": "mcp__physicell-agent__list_all_available_behaviors",
+  "input": {
+   "session_id": "mc-session-1",
+   "cell_type": "tumor_hypoxic"
+  }
+ },
+ {
+  "type": "tool_result",
+  "tool_use_id": "t4",
+  "content": [
+   {
+    "type": "text",
+    "text": "### X\n- **migration speed**: tumor_hypoxic speed\n- **exit from cycle phase 1**: x\n"
+   },
+   {
+    "type": "text",
+    "text": "{\"server\": \"PhysiCell\", \"session_id\": \"mc-session-1\", \"behaviors\": [{\"name\": \"migration speed\", \"behavior_type\": \"motility\", \"aliases\": [], \"description\": \"tumor_hypoxic speed\", \"requires\": []}, {\"name\": \"exit from cycle phase 1\", \"behavior_type\": \"cycle\", \"aliases\": [], \"description\": \"x\", \"requires\": []}]}"
+   }
+  ]
+ }
+]
