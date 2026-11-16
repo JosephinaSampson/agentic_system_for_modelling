@@ -71,6 +71,39 @@ class XmlHelperTests(unittest.TestCase):
         self.assertEqual(len(sx.diff(before, after)), 1)
 
 
+class ReviewFixTests(unittest.TestCase):
+    def setUp(self):
+        self.root = sx.load(FIXTURES / "PhysiCell_settings.xml")
+
+    def test_malformed_path_is_value_error(self):
+        for bad in ("domain[", "domain[@", "x[@a='"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                sx.resolve(self.root, bad)
+
+    def test_ancestor_and_absolute_paths_refused(self):
+        for bad in ("../domain", "domain/../overall", "/domain", "//domain", "domain/.."):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "not allowed"):
+                sx.resolve(self.root, bad)
+
+    def test_substrate_identity_order_independent(self):
+        before = parse("<PhysiCell_settings><s><c substrate='a'>1</c><c substrate='b'>2</c></s></PhysiCell_settings>")
+        after = parse("<PhysiCell_settings><s><c substrate='b'>2</c><c substrate='a'>1</c></s></PhysiCell_settings>")
+        self.assertEqual(sx.diff(before, after), [])
+        real = sx.resolve(self.root, "cell_definitions/cell_definition[@name='tumor']/phenotype/motility/"
+                          "advanced_chemotaxis/chemotactic_sensitivities/chemotactic_sensitivity[@substrate='drug']")
+        self.assertEqual(real.text, "0.0")
+
+    def test_quote_in_identity_falls_back_to_position(self):
+        root = parse("<PhysiCell_settings><v name=\"a'b\">1</v><v name='c'>2</v></PhysiCell_settings>")
+        for path, _, _ in sx.normalise(root):
+            self.assertEqual(sx.resolve(root, path).tag, "v")
+        self.assertEqual(len({p for p, _, _ in sx.normalise(root)}), 2)
+
+    def test_fixture_real_export_blocks_resolve(self):
+        sx.resolve(self.root, "microenvironment_setup/variable[@name='oxygen']/Dirichlet_options/boundary_value[@ID='xmin']")
+        sx.resolve(self.root, "cell_definitions/cell_definition[@name='tumor']/initial_parameter_distributions/distribution")
+
+
 class CaptureBindingTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=Path.home() / ".cache") if (Path.home() / ".cache").is_dir() else tempfile.TemporaryDirectory()
@@ -116,6 +149,13 @@ class CaptureBindingTests(unittest.TestCase):
         rules.write_text(rules.read_text() + "x\n")
         with self.assertRaisesRegex(ValueError, "changed"):
             sx.capture(self.project, self.rel)
+
+    def test_capture_ruleset_under_disabled_ancestor_is_disabled(self):
+        shutil.rmtree(self.project / "runs")
+        path = self.source / "config/PhysiCell_settings.xml"
+        path.write_text(path.read_text().replace("<rulesets>", '<rulesets enabled="false">'))
+        record_physicell(self.project, self.source, path, SESSION, CAPTURE)
+        self.assertIsNone(sx.capture(self.project, self.rel)["rules_path"])
 
     def test_capture_refuses_symlink(self):
         xml = self.folder / "package/config/PhysiCell_settings.xml"

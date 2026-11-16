@@ -2,26 +2,34 @@
 
 Stdlib only. XML is parsed with the same declaration-free builder as the
 capture recorder, so DTDs and entities are refused.
+
+diff() compares attribute values and element text as stripped strings: "1.0"
+and "1" differ. Callers that need numeric equality compare numbers explicitly.
 """
 from __future__ import annotations
 
+import hashlib
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+if __package__ in (None, ""):  # run as a script: make the repo importable
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.capture.record_physicell_config import DeclarationFreeTreeBuilder
-from scripts.data.common import reject_symlinks, sha256_file, strict_json
+from scripts.data.common import reject_symlinks, strict_json
 
 ROOT_TAG = "PhysiCell_settings"
 SPECIALIST = "multicellular-configurator"
 XML_NAME = "PhysiCell_settings.xml"
-_IDENTITY = (("name",), ("start_index", "end_index"), ("index",), ("code",), ("ID",))
+_IDENTITY = (("name",), ("substrate",), ("start_index", "end_index"), ("index",), ("code",), ("ID",))
 
 
 def load(path: Path) -> ET.Element:
     """Parse a settings XML, refusing DTD/entity declarations and other roots."""
-    data = Path(path).read_bytes()
+    return parse_bytes(Path(path).read_bytes())
+
+
+def parse_bytes(data: bytes) -> ET.Element:
     try:
         root = ET.fromstring(data, parser=ET.XMLParser(target=DeclarationFreeTreeBuilder()))
     except ET.ParseError as error:
@@ -33,9 +41,12 @@ def load(path: Path) -> ET.Element:
 
 def resolve(root: ET.Element, path: str) -> ET.Element:
     """Return the single element at an ElementTree XPath-subset path."""
+    if not isinstance(path, str) or not path or path.startswith(("/", "..")) \
+            or ".." in path.split("/"):
+        raise ValueError(f"path {path!r} is not allowed: absolute and ancestor steps are refused")
     try:
         found = root.findall(path)
-    except (SyntaxError, KeyError, ValueError) as error:
+    except Exception as error:
         raise ValueError(f"invalid path {path}: {error}") from error
     if len(found) != 1:
         raise ValueError(f"path {path} matches {len(found)} elements")
@@ -53,7 +64,8 @@ def _step(child: ET.Element, siblings: list[ET.Element]) -> str:
     for keys in _IDENTITY:
         if all(k in s.attrib for s in same for k in keys):
             tokens = [tuple(s.get(k) for k in keys) for s in same]
-            if len(set(tokens)) == len(tokens):
+            if len(set(tokens)) == len(tokens) and not any(
+                    q in v for t in tokens for v in t for q in "'\""):
                 return child.tag + "".join(f"[@{k}='{child.get(k)}']" for k in keys)
     return f"{child.tag}[{same.index(child) + 1}]"
 
@@ -104,13 +116,23 @@ def cycle_model(root: ET.Element, cell_definition: str) -> str:
     return cycle[0].get("name")
 
 
-def _check_hash(path: Path, expected, label: str) -> str:
+def _read_verified(path: Path, expected, label: str) -> tuple[bytes, str]:
+    """Read a file once; hash the same bytes that the caller then uses."""
     if not path.is_file():
         raise ValueError(f"{label} missing")
-    actual = sha256_file(path)
+    data = path.read_bytes()
+    actual = hashlib.sha256(data).hexdigest()
     if actual != expected:
         raise ValueError(f"{label} changed since capture")
-    return actual
+    return data, actual
+
+
+def _enabled(element: ET.Element, parents: dict) -> bool:
+    while element is not None:
+        if element.get("enabled", "").lower() in {"false", "0"}:
+            return False
+        element = parents.get(element)
+    return True
 
 
 def capture(root: Path, capture_rel: str) -> dict:
@@ -138,10 +160,10 @@ def capture(root: Path, capture_rel: str) -> dict:
 
     original = folder / "original.xml"
     reject_symlinks(original, root)
-    _check_hash(original, manifest.get("original_xml_sha256"), "original.xml")
+    _read_verified(original, manifest.get("original_xml_sha256"), "original.xml")
     xml = folder / "package/config" / XML_NAME
     reject_symlinks(xml, root)
-    xml_sha = _check_hash(xml, manifest.get("package_xml_sha256"), XML_NAME)
+    xml_bytes, xml_sha = _read_verified(xml, manifest.get("package_xml_sha256"), XML_NAME)
 
     deps = manifest.get("dependencies")
     if not isinstance(deps, list):
@@ -155,10 +177,11 @@ def capture(root: Path, capture_rel: str) -> dict:
             raise ValueError("dependency outside package/config")
         path = folder / parent
         reject_symlinks(path, root)
-        by_name[parent.name] = _check_hash(path, dep.get("sha256"), f"dependency {parent.name}")
+        by_name[parent.name] = _read_verified(path, dep.get("sha256"), f"dependency {parent.name}")[1]
 
-    rules = [e for e in load(xml).findall("cell_rules/rulesets/ruleset")
-             if e.get("enabled", "").lower() not in {"false", "0"}]
+    tree = parse_bytes(xml_bytes)
+    parents = {child: parent for parent in tree.iter() for child in parent}
+    rules = [e for e in tree.findall("cell_rules/rulesets/ruleset") if _enabled(e, parents)]
     rules_path = rules_sha = None
     if len(rules) > 1:
         raise ValueError("more than one enabled ruleset; only one rules CSV is supported")

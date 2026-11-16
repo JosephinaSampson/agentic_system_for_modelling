@@ -46,6 +46,10 @@
 			</physical_parameter_set>
 			<initial_condition units="mmHg">38.0</initial_condition>
 			<Dirichlet_boundary_condition units="mmHg" enabled="true">38.0</Dirichlet_boundary_condition>
+			<Dirichlet_options>
+				<boundary_value ID="xmin" enabled="false">0.0</boundary_value>
+				<boundary_value ID="xmax" enabled="false">0.0</boundary_value>
+			</Dirichlet_options>
 		</variable>
 		<variable name="drug" ID="1" units="dimensionless">
 			<physical_parameter_set>
@@ -65,7 +69,7 @@
 			<phenotype>
 				<cycle code="5" name="Live">
 					<phase_transition_rates units="1/min">
-						<rate start_index="0" end_index="0" fixed_duration="false">0.00072</rate>
+						<rate start_index="0" end_index="0" fixed_duration="true">0.00072</rate>
 					</phase_transition_rates>
 				</cycle>
 				<death>
@@ -136,6 +140,19 @@
 					<speed units="micron/min">0.5</speed>
 					<persistence_time units="min">5.0</persistence_time>
 					<migration_bias units="dimensionless">0.5</migration_bias>
+					<chemotaxis>
+						<enabled>false</enabled>
+						<substrate>oxygen</substrate>
+						<direction>1</direction>
+					</chemotaxis>
+					<advanced_chemotaxis>
+						<enabled>false</enabled>
+						<normalize_each_gradient>false</normalize_each_gradient>
+						<chemotactic_sensitivities>
+							<chemotactic_sensitivity substrate="oxygen">0.0</chemotactic_sensitivity>
+							<chemotactic_sensitivity substrate="drug">0.0</chemotactic_sensitivity>
+						</chemotactic_sensitivities>
+					</advanced_chemotaxis>
 					<options>
 						<enabled>true</enabled>
 						<use_2D>true</use_2D>
@@ -152,6 +169,13 @@
 					</substrate>
 				</secretion>
 			</phenotype>
+			<initial_parameter_distributions>
+				<distribution type="Uniform" enabled="false">
+					<behavior>cycle entry</behavior>
+					<min>0.0</min>
+					<max>0.001</max>
+				</distribution>
+			</initial_parameter_distributions>
 		</cell_definition>
 	</cell_definitions>
 	<initial_conditions>
@@ -162,13 +186,13 @@
 	</initial_conditions>
 	<cell_rules>
 		<rulesets>
-			<ruleset name="rules" protocol="CBHG" version="3.0" format="csv" enabled="true">
+			<ruleset protocol="CBHG" version="3.0" format="csv" enabled="true">
 				<folder>./config</folder>
 				<filename>cell_rules.csv</filename>
 			</ruleset>
 		</rulesets>
 	</cell_rules>
 	<user_parameters>
-		<random_seed type="int" units="dimensionless">0</random_seed>
+		<random_seed type="int" units="none" description="">0</random_seed>
 	</user_parameters>
 </PhysiCell_settings>
