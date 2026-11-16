@@ -89,13 +89,32 @@ Calibration is a portable job the researcher approves step by step; no specialis
 
 1. **Measurement table to mapping.** A measurement table (from an approved `ode_measurements` data
    proposal, or a CSV under `runs/orchestrator/`) is mapped onto a captured, accepted model revision
-   (`ode_mapping.py draft`, fill, `check`). The mapping fixes observables, condition overrides, comparison
-   rules, fitted parameters with bounds and justification, hold-out rows (`use=holdout`) and the reasons
-   for any unmapped row. `check` requires at least one `use=fit` row scored by a rule (a contrast
-   reference row is not scored), every endpoint-contrast row and every dose row measured at the rule's
-   time once converted (`time.factors`; compared with relative tolerance 1e-9: a rule `"time": 24` meant
-   as hours against a minute model is refused, not silently read as 24 min), and the rows of a
-   dose-response rule to have a readout mapped to `viability.observable`.
+   (`ode_mapping.py draft`, fill, `check`). `draft` derives `inputs.model.revision` from the export zip:
+   the captured revision folder (`rev_<32 hex>`, under `runs/ode-modeler/<session>/`) whose
+   `integrity.json` is byte-identical to the zip's `model/integrity.json`; `check` refuses any other
+   revision, so the revision the ode-modeler later compares is the one that was fitted. The mapping fixes
+   observables, condition overrides, comparison rules, fitted parameters with bounds and justification,
+   hold-out rows (`use=holdout`) and the reasons for any unmapped row. `check` requires at least one
+   `use=fit` row scored by a rule (a contrast reference row is not scored), every endpoint-contrast row and
+   every dose row measured at the rule's time once converted (`time.factors`; compared with relative
+   tolerance 1e-9: a rule `"time": 24` meant as hours against a minute model is refused, not silently read
+   as 24 min), and the rows of a dose-response rule to have a readout mapped to `viability.observable`.
+   **Values and units.** The table holds raw values with their `value_unit`; each rule normalises the data
+   exactly as it normalises the predictions. `fold_change_vs_t0` divides each row by the time-0 row(s) of
+   the same readout, condition and `use` (required, non-zero; t0 rows stay, target 1);
+   `relative_to_condition` divides by the reference-condition rows of the same readout and `use` at the
+   same converted time (required, in the rule, non-zero); `max_normalized` divides by the max of the
+   rule's rows of the same readout and `use` (positive), and the prediction by the simulated max at those
+   same rows, so hold-out rows never change fit targets or fit predictions; `endpoint_contrast` compares
+   the test row with the mean of the reference rows of the same readout and `use` (only the test and
+   reference conditions are allowed; a ratio needs a non-zero reference mean). Within one normalisation
+   group every row must have the same `value_unit` (it cancels). Absolute values need explicit factors in
+   the `values` block (never inferred): `values.readouts[readout] = {"model_unit": <the observable's unit
+   in the model>, "factors": {value_unit: factor}}` converts an `absolute` row to value x factor, and
+   `values.viability.factors` converts dose-response rows to a fraction (e.g. `{"%": 0.01, "fraction": 1}`).
+   `draft` lists every readout's value units and the viability units as TODO; fill them, or delete the
+   `values.readouts` entries no `absolute` rule needs. A fitted parameter or initial that a condition also
+   overrides (or an `inhibitor_species` dose sets) is refused: the override would mask it there.
 2. **Approval.** The researcher approves the mapping: `ode_mapping` `stage_approval` (`session_id` = the
    ODE session, `outputs` = measurement ids used plus fitted names, `artifact` = path and sha256).
    Keep the `ode_mapping` unchanged until its approved proposal has been applied; for a changed mapping use a new purpose (the earlier proposal stays scoreable but cannot be applied).
@@ -107,8 +126,14 @@ Calibration is a portable job the researcher approves step by step; no specialis
    researcher's authorization quote, logged to `dispatch.jsonl` before anything runs), or `slurm submit`
    on a login node. Only the bundle (model, the measurement rows the rules use, parameter bounds) leaves
    the machine. `fetch` places `results.tar.gz` under `inputs/calibration-results/<job-id>/`.
-   `workers: -1` (scipy uses every core inside one restart) makes an ssh host run one restart at a time
-   (K = 1); under SLURM it means the task's allocation (`slurm.cpus_per_task`).
+   One rule for every host type, local mode, `print` and `local.sh` (`run.py parallel`): whenever one
+   restart uses more than one scipy worker (`workers` -1 = every core, or > 1), restarts run one at a time
+   (K = 1); with `workers: 1`, K = `parallel` (capped at a configured host's `max_cores`). Under SLURM
+   `workers: -1` means the task's allocation (`slurm.cpus_per_task`); the selftest always uses 1 worker.
+   Ctrl-C (or `remote.sh cancel`) leaves no `failed` result: interrupted restarts are rerun from their seed
+   by the next `local.sh`/`start`, and a restart folder whose owner is still alive (same host, or a SLURM
+   task sacct reports active) is never deleted or started twice. `slurm submit --resubmit` is refused while
+   an earlier recorded array is active per sacct (or sacct cannot tell).
    **SLURM return path, end to end:** on the login node, `launch.py slurm submit <job-id>` (or the printed
    `sbatch` and `echo <id> > state/slurm_job` lines) from the unpacked job folder; follow it with
    `bash launch/remote.sh status` there; when status shows every restart done (or failed), run
@@ -127,6 +152,8 @@ Calibration is a portable job the researcher approves step by step; no specialis
    `~/.cache/agentic-jobs/<job-id>/` (uv, Python 3.12, the pinned packages; minutes the first time) even
    for ssh and slurm jobs, and also computes the nominal values (`start`) locally from that verified copy
    of the bundle; the remote `selftest/validate.json` is never used for them.
+   `predictions.json`, `simulations.json` and the data-vs-fit figure carry `use=fit` rows (and the
+   simulations they need) only: hold-out rows stay unseen until `score_holdout.py`.
    Nothing reaches the model. Partial results (failed or missing restarts) are flagged `partial`;
    parameters whose good restarts span more than a decade are flagged `poorly_constrained`; restart
    agreement is a heuristic, not an identifiability proof.

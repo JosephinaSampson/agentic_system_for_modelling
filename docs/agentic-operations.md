@@ -226,7 +226,7 @@ context and perturbation fix the same node, the perturbation overrides the conte
 ### ODE calibration jobs and applying their result
 
 ```
-python3 scripts/ode/ode_mapping.py draft --purpose P --ode-session S --revision R --bundle ZIP --measurements CSV [--source ID:PATH ...]
+python3 scripts/ode/ode_mapping.py draft --purpose P --ode-session S --bundle ZIP --measurements CSV [--revision R] [--source ID:PATH ...]   # revision derived from the bundle
 python3 scripts/ode/ode_mapping.py check runs/orchestrator/P/ode_mapping.json
 python3 scripts/jobs/build.py --mapping runs/orchestrator/P/ode_mapping.json --approval <ode_mapping record id> --settings SETTINGS.json
 python3 scripts/jobs/launch.py local start|status|fetch <job-id>

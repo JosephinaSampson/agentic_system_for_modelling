@@ -37,9 +37,11 @@ one-time hold-out scoring.
 | **Three launchers: local, ssh, slurm** | The main case is a lab machine with SSH and no scheduler. SSH prints the commands by default. After a host is configured, it runs them itself, and each submission needs the researcher's quoted authorization, logged to `dispatch.jsonl` first. SLURM submits an array with one restart per task. |
 | **Verified import; reproduce locally; start values computed locally** | The remote archive is untrusted. Import checks every member against `results.json`, the `job.json` hash, the environment pins, seeds and bounds. It re-runs the best fit in a local copy of the bundle and requires the same score within `reproduce_rtol`. Nominal start values come from that local run, never from the remote selftest. |
 | **Restart agreement as a heuristic** | BioMASS practice is many independent `x_id` restarts. Good restarts spanning more than one decade flag a parameter `poorly_constrained`. It is labelled a heuristic, not identifiability. |
-| **Fit/hold-out split; hold-out scored once (RD)** | Calibration sees only `use=fit` rows. Hold-out rows are scored once, on the bundled model with the accepted values. That model equals the applied one, so the score does not depend on when the modeler applies. `holdout_score.json` is never overwritten. |
-| **Explicit time and dose unit blocks (S2-ode)** | Units are never inferred. The mapping has `time` and `dose` blocks with a model unit and a factor per measurement unit. A missing factor fails `check`, and the runner raises rather than default. |
-| **Revision check before applying** | The modeler applies only when the session's current revision equals `proposal.model.revision`; otherwise it returns `blocked`. |
+| **Fit/hold-out split; hold-out scored once (RD)** | Calibration sees only `use=fit` rows: it simulates only what they need, and `collect` writes predictions, simulations and figures for them only, so the researcher does not see hold-out agreement before approving. Hold-out rows are scored once, on the bundled model with the accepted values. That model equals the applied one, so the score does not depend on when the modeler applies. `holdout_score.json` is never overwritten. |
+| **Explicit time, dose and value unit blocks (S2-ode, U)** | Units are never inferred. The mapping has `time` and `dose` blocks with a model unit and a factor per measurement unit, and a `values` block: per readout the observable's model unit and a factor per `value_unit` (for `absolute` rows), and the factors that turn viability into a fraction. A missing factor fails `check`, and the runner raises rather than default. |
+| **Data and predictions normalised the same way (N)** | Tables hold raw values. Each rule divides the data exactly as it divides the predictions: by the t0 row (`fold_change_vs_t0`), the reference condition at the same time (`relative_to_condition`), the max over the rows of the same `use` (`max_normalized`) or the reference mean (`endpoint_contrast`). `check` requires every divisor row, non-zero, and one `value_unit` per normalisation group. |
+| **Revision bound to the fitted export; checked before applying** | `inputs.model.revision` is the captured revision whose `integrity.json` equals the export zip's `model/integrity.json` (`draft` derives it, `check` refuses any other). The modeler applies only when the session's current revision equals `proposal.model.revision`; otherwise it returns `blocked`. |
+| **Restarts: no double runs, no oversubscription** | An interrupt writes no result, so a rerun resumes. A restart folder with a live owner (or an active SLURM task) is never deleted. More than one scipy worker per restart means one restart at a time, on every launcher. |
 | **Gate binds proposal, mapping, `job.json` and `record_session_id`** | The ode-modeler `DATA_INPUT` names the proposal. The gate checks the `ode_calibration` approval, the proposal hash, accepted outputs, the proposal's `mapping` approval, `job_sha256` against `job.json`, and that the brief carries the proposal's ODE session as `record_session_id` and no other value. |
 | **Job-folder and results mentions refused outside `DATA_INPUT`** | Job folders and returned results hold remote-derived values. They reach a specialist only as the approved proposal, so a brief naming them is refused. |
 
@@ -84,18 +86,24 @@ The procedure is in [ODE workflow](ode-workflow.md). In outline:
   `measurement_id`, `readout`, `condition`, `time`, `time_unit`, `dose`, `dose_unit`,
   `value`, `value_unit`, optional `error`, `error_kind`, `n`, then `use` (`fit` or
   `holdout`), `source`, `locator`. Each row cites a source or an approved proposal.
-- **`ode_mapping.json`** (`kind: ode_mapping`): model binding (session, revision, export
-  zip and table with sha256), `time` and `dose` unit blocks, readouts, conditions with
-  overrides, comparison rules, fitted parameters (positive bounds, lower below upper, unit,
-  justification) and `unmapped`. Every row is used once or listed in `unmapped` with a reason.
+- **`ode_mapping.json`** (`kind: ode_mapping`): model binding (session, revision = the
+  captured revision of the export zip, export zip and table with sha256), `time` and `dose`
+  unit blocks, the `values` block, readouts, conditions with overrides, comparison rules,
+  fitted parameters (positive bounds, lower below upper, unit, justification; never also a
+  condition override) and `unmapped`. Every row is used once or listed in `unmapped` with a reason.
+- **`values` block:** `{"readouts": {readout: {"model_unit": str, "factors": {value_unit:
+  positive factor}}}, "viability": {"factors": {value_unit: positive factor}}}`. An `absolute`
+  row's target is value x its readout factor (in the observable's model unit); a dose-response
+  row's target is value x its viability factor (a fraction, e.g. `"%": 0.01`).
 - **Comparison rules:** time course `fold_change_vs_t0`, `relative_to_condition`,
   `max_normalized`, `absolute`; endpoint `ratio` and `difference`; dose-response drug entry
-  `target_activity_scaling` or `inhibitor_species` with a viability readout. A contrast
-  reference uses rows with the same `use` as the test row.
+  `target_activity_scaling` or `inhibitor_species` with a viability readout. Data and
+  predictions are normalised the same way, per `use` (decision N); a contrast has only test and
+  reference rows, and its reference uses rows with the same `use` as the test row.
 - **Mapping approval:** `ode_mapping` `stage_approval`, `session_id` = the ODE session,
   `outputs` = measurement ids used plus fitted names, `artifact` = path and sha256.
 - **Settings:** restarts, seed per restart, `optimizer_options`, `workers`, parallel
-  restarts, SLURM limits, good-fit margin and `reproduce_rtol` (default 1e-3). BioMASS
+  restarts (forced to 1 whenever a restart uses more than one worker), SLURM limits, good-fit margin and `reproduce_rtol` (default 1e-3). BioMASS
   defaults: `best1bin`, `maxiter=50`, `popsize=3`, `tol=1e-4`, `mutation=0.1`,
   `recombination=0.5`, `polish=False`, `workers=1`.
 - **Objective:** the unweighted sum of squared differences over `use=fit` rows. `error` is

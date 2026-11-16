@@ -88,7 +88,9 @@ Enums: `use` is `fit` or `holdout`; `error_kind` is `sd`, `sem` or empty (empty 
 `error` is empty). On this route `source` is the literal `proposal` on every row and `locator`
 says where in the analyst's outputs or sources the value comes from (non-empty, no `|`, control
 or line-break character); `ode_mapping.py check` refuses any other `source`, a missing unit, or a
-bad locator. The table reaches a mapping as `inputs.measurements = {session, proposal, approval}`
+bad locator. Values are raw, with their `value_unit`: the mapping normalises them like the predictions
+(rows normalised together, e.g. a time course and its t0 row, must share one `value_unit`) and converts
+absolute values and viability only with the explicit factors of its `values` block. The table reaches a mapping as `inputs.measurements = {session, proposal, approval}`
 (see "Data to ODE: calibration").
 
 ## Handoff, report and receive procedure

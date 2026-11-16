@@ -333,7 +333,7 @@ calibrate). Units are never inferred: a missing unit is an error.
 | `dose` | number >= 0; may be empty (only dose-response rows have a dose) |
 | `dose_unit` | the unit of `dose`; empty exactly when `dose` is empty |
 | `value` | finite number |
-| `value_unit` | the unit of `value` (e.g. `a.u.`, `fraction`) |
+| `value_unit` | the unit of `value` (e.g. `a.u.`, `nM`, `%`, `fraction`); give raw values in their unit, never pre-normalised without saying so; rows that belong together (a time course and its t0 row, a test and its control) use one unit |
 | `error` | number >= 0; may be empty |
 | `error_kind` | `sd` or `sem` when `error` is set; empty when `error` is empty |
 | `n` | integer >= 1; may be empty |
