@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 from scripts import state
 from scripts.capture.record_physicell_config import record_physicell
@@ -404,6 +405,40 @@ class CaptureBoundOnceTests(ProjectionBase):
                          sha(self.root / self.capture / "capture.json"))
         self.assertEqual(binds[self.capture], 1)
         assert_read_only_by_bindings(self, binds, reads)
+
+
+class HandoffManifestTests(ProjectionBase):
+    """PR #17 review 4587428064: one helper, physicell_design.handoff_manifest, reads a design's MaBoSS handoff once,
+    checks the design's sha256 and parses it; the design check, conformance and the projection check all use it."""
+
+    def test_projection_check_reads_handoffs_through_the_helper(self):
+        from scripts.physicell import physicell_design as pd
+        self.write_projection(self.projection())
+        with mock.patch.object(pd, "handoff_manifest", wraps=pd.handoff_manifest) as helper:
+            self.assertEqual(pp.check(self.root, PROJ), [])
+        ref = self.design["intracellular"][0]["maboss"]
+        # maboss_handoff (the design re-check), conformance and design_section: each through the helper
+        self.assertEqual([c.args[1] for c in helper.call_args_list], [ref, ref, ref])
+
+    def test_helper_reads_once_checks_sha256_and_parses(self):
+        from scripts.physicell import physicell_design as pd
+        ref = self.design["intracellular"][0]["maboss"]
+        reads = []
+        original = Path.read_bytes
+
+        def counting(path):
+            if path.name == Path(ref["handoff"]).name:
+                reads.append(path)
+            return original(path)
+        with mock.patch.object(Path, "read_bytes", counting):
+            manifest = pd.handoff_manifest(self.root, ref)
+        self.assertEqual((len(reads), manifest), (1, json.loads((self.root / ref["handoff"]).read_text())))
+        with self.assertRaisesRegex(ValueError, "^it changed since the design check$"):
+            pd.handoff_manifest(self.root, {**ref, "sha256": "0" * 64})
+        path = self.root / ref["handoff"]
+        path.write_bytes(b"[1]")
+        with self.assertRaisesRegex(ValueError, "not a JSON object"):
+            pd.handoff_manifest(self.root, {**ref, "sha256": sha(path)})
 
 
 class NonDecimalLeafTests(ProjectionBase):

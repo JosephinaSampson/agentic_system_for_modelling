@@ -147,6 +147,19 @@ def _basis_input_files(bound: dict) -> list:
     return [dep["path"] for dep in bound["manifest"]["dependencies"]]
 
 
+def handoff_manifest(root: Path, ref: dict) -> dict:
+    """The MaBoSS handoff manifest a design pins (ref = its intracellular {handoff, sha256}): read once, its sha256
+    must be ref["sha256"] and the object is parsed (strict_json) from those very bytes; ValueError otherwise. The one
+    reader of a design handoff after gate.check: the design check, conformance and the projection check use it."""
+    raw = state.artifact(Path(root), ref["handoff"]).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+        raise ValueError("it changed since the design check")
+    manifest = strict_json(raw)
+    if not isinstance(manifest, dict):
+        raise ValueError("it is not a JSON object")
+    return manifest
+
+
 def write_new(root: Path, path: Path, text: str) -> None:
     reject_symlinks(path, root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -559,7 +572,7 @@ class _Checker(Citations):
             if result["artifact"] != {"path": rel, "sha256": digest}:
                 raise ValueError("the gate's approved handoff is a different artifact (superseded re-export?)")
             # The gate verified these exact bytes; import attaches the model to the manifest's target cell type.
-            manifest = json.loads((self.root / result["artifact"]["path"]).read_bytes())
+            manifest = handoff_manifest(self.root, maboss)
             target = (manifest.get("target") or {}).get("cell_type")
             if target != cell:
                 raise ValueError(f"its target cell_type is {target!r} but it is bound to cell definition {cell!r}; "

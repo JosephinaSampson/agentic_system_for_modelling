@@ -29,7 +29,6 @@ from pathlib import Path, PurePosixPath
 
 if __package__ in (None, ""):  # run as a script: make the repo importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts import state  # noqa: E402
 from scripts.capture.exports import _structured  # noqa: E402
 from scripts.data.common import project_root, reject_symlinks, strict_json  # noqa: E402
 from scripts.physicell import lineage  # noqa: E402
@@ -373,18 +372,15 @@ MODEL_FILES = (("bnd", "bnd_filename", "bnd_file"), ("cfg", "cfg_filename", "cfg
 
 def _handoff_models(root: Path, design: dict, problems: list) -> dict:
     """{carrier: {"bnd": sha256, "cfg": sha256}} from each design handoff manifest's bnd_file / cfg_file, read from
-    exactly the bytes the design pins (its maboss.sha256); an unreadable handoff is a problem."""
+    exactly the bytes the design pins (physicell_design.handoff_manifest); an unreadable handoff is a problem."""
     models = {}
     for item in design["intracellular"]:
         cell, ref = item["cell_definition"], item["maboss"]
         try:
-            raw = state.artifact(Path(root), ref["handoff"]).read_bytes()
-            if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
-                raise ValueError("it changed since the design check")
-            manifest = strict_json(raw)
+            manifest = pd.handoff_manifest(root, ref)
             models[cell] = {}
             for key, _, field in MODEL_FILES:
-                digest = (manifest.get(field) or {}).get("sha256") if isinstance(manifest, dict) else None
+                digest = (manifest.get(field) or {}).get("sha256")
                 if not isinstance(digest, str):
                     raise ValueError(f"it has no {field} sha256")
                 models[cell][key] = digest

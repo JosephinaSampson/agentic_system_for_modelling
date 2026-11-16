@@ -310,10 +310,7 @@ class _Checker(pd.Citations):
         for item in design["intracellular"]:
             handoff = item["maboss"]
             try:
-                raw = state.artifact(self.root, handoff["handoff"]).read_bytes()
-                if _sha(raw) != handoff["sha256"]:
-                    raise ValueError("it changed since the design check")
-                manifest = strict_json(raw)
+                manifest = pd.handoff_manifest(self.root, handoff)
                 network = manifest["network"]
                 readouts = list(manifest.get("readouts") or {})
                 self.maboss[item["cell_definition"]] = {
