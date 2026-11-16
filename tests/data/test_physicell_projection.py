@@ -256,6 +256,23 @@ class SettingTests(ProjectionBase):
         self.assertRefused(self.setting(path=f"{TUMOR}/death/model[@name='apoptosis']"), "leaf")
         self.assertRefused(self.setting(value="0.1"), "finite number")
 
+    def test_factor_one_target_unit_must_be_the_derived_unit(self):
+        # PR #17 review 4586110579: an identity "conversion" between different units is no conversion
+        data = self.setting(value=2e-5, value_unit="1/hour", target_unit="1/min",
+                            target_unit_justification="the XML's units")
+        self.assertRefused(data, "set1", "target_unit '1/min'", "derived unit '1/hour'")
+        for transform, unit, derived in (("reciprocal", "hour", "1/hour"), ("ln2_over", "1/hour", "hour")):
+            with self.subTest(transform=transform):
+                data = self.setting(value=2, value_unit=unit, transform=transform, target_unit="1/min")
+                self.assertRefused(data, "set1", f"derived unit {derived!r}")
+        # the same target_unit as the derived unit is fine (it states the unit, it converts nothing)
+        self.assertEqual(self.errors(self.setting(target_unit="1/min")), [])
+
+    def test_factor_one_compound_reciprocal_with_target_unit_refused(self):
+        data = self.setting(value=2, value_unit="min/cell", transform="reciprocal", target_unit="1/min",
+                            target_unit_justification="j")
+        self.assertRefused(data, "set1", "not derivable", "unit_factor", "justification")
+
     def test_tool_hint_required(self):
         self.assertRefused(self.setting(tool_hint=""), "tool_hint")
 
@@ -278,9 +295,36 @@ class TransformTests(unittest.TestCase):
         self.assertEqual(pp.converted_unit(q(1, "min", "reciprocal")), "1/min")
         self.assertEqual(pp.converted_unit(q(1, "1/min", "ln2_over")), "min")
         self.assertEqual(pp.converted_unit(q(1, "h", factor=60, target_unit="min")), "min")
+        self.assertEqual(pp.converted_unit(q(1, "1/h", "unit_factor", target_unit="1/min")), "1/min")
+        self.assertEqual(pp.converted_unit(q(1, "min", target_unit="min")), "min")
+        self.assertEqual(pp.converted_unit(q(1, "min", "reciprocal", target_unit="1/min")), "1/min")
+        for bad in (q(1, "1/hour", target_unit="1/min"), q(1, "hour", "reciprocal", target_unit="1/min"),
+                    q(1, "1/hour", "ln2_over", target_unit="min"), q(1, "min/cell", "reciprocal", target_unit="x")):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "target_unit"):
+                pp.converted_unit(bad)
         for bad in (q(1, "h", factor=60), q(1, "h", "unit_factor"), q(1, "micron/min", "reciprocal")):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "target_unit"):
                 pp.converted_unit(bad)
+
+
+class QuantityTargetUnitTests(ProjectionBase):
+    """PR #17 review 4586110579: rule and link quantities follow the setting's target_unit rules."""
+
+    def test_rule_quantity_identity_target_unit_refused(self):
+        data, entry = self.entry("rule1")
+        entry["half_max"] = q(5, "hour", target_unit="furlong")
+        self.assertRefused(data, "rule1", "half_max", "target_unit 'furlong'", "derived unit 'hour'")
+
+    def test_link_quantity_identity_target_unit_refused(self):
+        data, entry = self.entry("in1")
+        entry["threshold"] = q(10, "mmHg", target_unit="kPa")
+        self.assertRefused(data, "in1", "threshold", "target_unit 'kPa'")
+
+    def test_factor_or_unit_factor_conversion_keeps_its_target_unit(self):
+        data, entry = self.entry("rule1")
+        entry["half_max"] = q(2, "dimensionless", factor=0.5, target_unit="dimensionless")
+        entry["saturation_value"] = q(0.6, "1/h", "unit_factor", 1 / 60, target_unit="1/min")
+        self.assertEqual(self.errors(data), [])
 
 
 class ModelValueTests(ProjectionBase):

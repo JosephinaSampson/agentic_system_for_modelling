@@ -411,8 +411,12 @@ carries these keys itself). The model value is `value*factor`
 (`identity`, `unit_factor`), `factor/value` (`reciprocal`) or `factor*ln(2)/value` (`ln2_over`). `model_value` is that
 number, pasted by the orchestrator from the check's message (the check refuses a missing, `TODO` or different
 `model_value`, relative 1e-12, and prints the value); the configurator applies it verbatim and does no arithmetic. Units are never
-inferred: `target_unit` is required when the factor is not 1, for `unit_factor` and for compound units, and a
-setting's converted unit must equal the XML `units` attribute exactly. Names must match the captured dictionary
+inferred: `target_unit` is required for a conversion (factor not 1, or `unit_factor`), as the researcher's approved
+conversion explained in the entry's justification. With `identity`, `reciprocal` or `ln2_over` and factor 1 the unit
+is derived (the value unit, or its reciprocal) and a `target_unit`, if given, must equal it: a factor-1 "conversion"
+from `1/hour` to `1/min` is refused. Factor 1 with the reciprocal of a compound unit is refused: use a factor or
+`unit_factor`. These rules hold for setting entries and rule and link quantities alike, and a setting's converted
+unit must equal the XML `units` attribute exactly. Names must match the captured dictionary
 and, for PhysiBoSS links, the cell definition's MaBoSS handoff. One writer per (cell definition, behavior): one rule,
 or one output link, never both, counting what the capture already has.
 

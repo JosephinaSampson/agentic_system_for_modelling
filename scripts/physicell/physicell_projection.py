@@ -31,10 +31,14 @@ keys itself). model_value is the number the configurator applies verbatim (it do
 pastes the value the check computes and prints (a missing or "TODO" model_value is refused with it), and the check
 requires it to equal the model value within relative 1e-12. The model value is
   identity v*factor, unit_factor v*factor, reciprocal factor/v, ln2_over factor*ln(2)/v
-(value finite, factor finite and > 0, v != 0 for reciprocal/ln2_over). The converted unit is target_unit when given;
-otherwise it is derived only when factor == 1 and the transform is not unit_factor: identity keeps value_unit,
-reciprocal/ln2_over give "1/<u>" (or <rest> when u is "1/<rest>"); a compound unit (containing "/", "*", "(" or
-spaces) is never inverted. Units are never inferred: anything else needs target_unit.
+(value finite, factor finite and > 0, v != 0 for reciprocal/ln2_over). The converted unit (converted_unit):
+  - a conversion, factor != 1 or unit_factor: target_unit, required (the researcher's approved conversion; the
+    entry's justification explains it);
+  - identity, reciprocal or ln2_over with factor == 1: derived, never converted: identity keeps value_unit,
+    reciprocal/ln2_over give "1/<u>" (or <rest> when u is "1/<rest>"); a compound unit (containing "/", "*", "(" or
+    spaces) is never inverted, so that combination is refused (convert with a factor or unit_factor instead). A
+    target_unit given here must equal the derived unit exactly.
+Units are never inferred. This holds for setting entries and rule and link quantities alike.
 
 Checks: names exactly as in the captured dictionary (signals; behaviors per cell definition) and, for PhysiBoSS
 links, the cell definition's approved MaBoSS handoff (input links: its network nodes; output links: its declared
@@ -119,28 +123,41 @@ def model_value(q: dict) -> float:
 
 
 def converted_unit(q: dict) -> str:
-    """The unit of model_value(q): target_unit, else derived as the module docstring says; ValueError otherwise."""
+    """The unit of model_value(q), as the module docstring says; ValueError otherwise.
+
+    A conversion (factor != 1, or unit_factor) needs target_unit, the researcher's approved converted unit. Without
+    one (identity, reciprocal or ln2_over with factor 1) the unit is derived, and a given target_unit must be exactly
+    that derived unit: a factor-1 "conversion" between different units converts nothing."""
     if not isinstance(q, dict):
         raise ValueError("a quantity must be an object")
     unit = q.get("value_unit")
     if not pd.real_text(unit):
         raise ValueError(f"value_unit must be stated (never inferred), not {unit!r}")
-    if "target_unit" in q:
-        if not pd.real_text(q["target_unit"]):
-            raise ValueError(f"target_unit must be a non-empty unit, not {q['target_unit']!r}")
-        return q["target_unit"]
+    target = q.get("target_unit")
+    if "target_unit" in q and not pd.real_text(target):
+        raise ValueError(f"target_unit must be a non-empty unit, not {target!r}")
     transform, factor = q.get("transform"), q.get("factor")
-    why = "give target_unit (units are never inferred)"
+    if transform not in TRANSFORMS:
+        raise ValueError(f"transform must be one of {', '.join(TRANSFORMS)}, not {transform!r}")
     if transform == "unit_factor" or not finite_number(factor) or factor != 1:
-        raise ValueError(f"the converted unit of {transform} with factor {factor!r} is not derivable: {why}")
-    if transform == "identity":
-        return unit
+        if "target_unit" not in q:
+            raise ValueError(f"the converted unit of {transform} with factor {factor!r} is not derivable: give "
+                             "target_unit (units are never inferred)")
+        return target
+    convert = ("convert with a factor != 1 or with unit_factor, giving target_unit and an explicit justification of "
+               "the conversion")
+    derived = unit
     if transform in ("reciprocal", "ln2_over"):
         inner = unit[2:] if unit.startswith("1/") else unit
         if not inner or any(c in inner for c in COMPOUND):
-            raise ValueError(f"the reciprocal of the compound unit {unit!r} is not derivable: {why}")
-        return inner if unit.startswith("1/") else f"1/{unit}"
-    raise ValueError(f"transform must be one of {', '.join(TRANSFORMS)}, not {transform!r}")
+            raise ValueError(f"the reciprocal of the compound unit {unit!r} is not derivable with factor 1"
+                             + (f" (target_unit {target!r} cannot be checked)" if "target_unit" in q else "")
+                             + f": {convert}")
+        derived = inner if unit.startswith("1/") else f"1/{unit}"
+    if "target_unit" in q and target != derived:
+        raise ValueError(f"target_unit {target!r} is not the derived unit {derived!r} of {transform} of {unit!r} "
+                         f"with factor 1 (a factor-1 transform converts no unit): {convert}")
+    return derived
 
 
 def _projection_path(root: Path, rel) -> Path:
