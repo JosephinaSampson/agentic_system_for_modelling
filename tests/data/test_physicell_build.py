@@ -266,6 +266,19 @@ else:
                 self.assertEqual(build.main(argv), 1)  # destination now exists
             self.assertIn("already exists", err.getvalue())
 
+    def test_zero_or_negative_jobs_refused(self):
+        # PR #17 review 4586112420: --jobs 0 is refused, never silently os.cpu_count()
+        for jobs in (0, -1):
+            with self.subTest(jobs=jobs), self.assertRaisesRegex(ValueError, "--jobs must be at least 1"):
+                build.build(self.root, "template", dest=self.dest, jobs=jobs, env=self.env)
+        self.assertFalse(self.dest.exists())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), mock.patch.object(build, "project_root", return_value=self.root):
+            self.assertEqual(build.main(["--template", "template", "--dest", str(self.dest), "--jobs", "0"]), 1)
+        self.assertIn("--jobs must be at least 1", err.getvalue())
+        _, report = build.build(self.root, "template", dest=self.dest, jobs=None, env=self.env)
+        self.assertEqual(report["jobs"], os.cpu_count() or 1)
+
     def test_extracted_tree_is_the_release(self):
         self.build()
         self.assertEqual((self.dest / "PhysiCell-1.14.2-template/README").read_text(), "physicell")

@@ -400,7 +400,7 @@ def build(root: Path, template: str, version: str = DEFAULT_VERSION, dest: str |
         raise ValueError(f"template must be one of {', '.join(TEMPLATES)}")
     if not VERSION_RE.fullmatch(version):
         raise ValueError(f"unsafe --version {version!r}")
-    jobs = jobs or os.cpu_count() or 1
+    jobs = (os.cpu_count() or 1) if jobs is None else jobs
     if jobs < 1:
         raise ValueError("--jobs must be at least 1")
     started, began = datetime.now(timezone.utc), time.monotonic()
