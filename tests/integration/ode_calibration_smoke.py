@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -31,6 +32,7 @@ sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parents[2]
 SESSION = "ode-smoke-1"
 PURPOSE = "smoke"
+REVISION = "rev_" + "5" * 32  # the captured revision the export is bound to (model/integrity.json)
 TRUE_KF2 = 0.5
 TRUE_KF3 = 0.05
 PROBES = ("https://github.com/astral-sh/uv/releases/download/0.13.4/uv-x86_64-unknown-linux-gnu.tar.gz.sha256",
@@ -174,25 +176,32 @@ def run(scratch: Path) -> None:
     assert (work / "tiny" / "name2idx" / "parameters.py").is_file()
     step("Text2Model generated the tiny model with biomass==0.14.0 (params kf1 kr1 kf2 kf3, observable pR)")
 
-    # 2. zipped like a captured export, with requirements.txt
+    # 2. zipped like a captured export, with requirements.txt and the revision's integrity.json, which is also
+    #    captured as runs/ode-modeler/<session>/captures/c1/<revision>/integrity.json (the revision binding)
     export_rel = f"runs/ode-modeler/{SESSION}/captures/c1/export.zip"
     export = root / export_rel
     export.parent.mkdir(parents=True)
+    files = sorted(path for path in (work / "tiny").rglob("*") if path.is_file() and "__pycache__" not in path.parts)
+    integrity = json.dumps({path.relative_to(work / "tiny").as_posix(): sha256(path) for path in files},
+                           indent=2) + "\n"
+    revision_dir = export.parent / REVISION
+    revision_dir.mkdir()
+    (revision_dir / "integrity.json").write_text(integrity, encoding="utf-8")
     with zipfile.ZipFile(export, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path in sorted((work / "tiny").rglob("*")):
-            if path.is_file() and "__pycache__" not in path.parts:
-                zf.write(path, "model/" + path.relative_to(work / "tiny").as_posix())
+        for path in files:
+            zf.write(path, "model/" + path.relative_to(work / "tiny").as_posix())
+        zf.writestr("model/integrity.json", integrity)
         zf.writestr("requirements.txt", "biomass==0.14.0\n")
-    step(f"export zipped as {export_rel}")
+    step(f"export zipped as {export_rel}; revision {REVISION} captured beside it")
 
     # 3. synthetic measurements generated with a known kf2 (including 7.5 min and one hold-out row)
     truth = json.loads(sh(venv_python, "-c", SIMULATE, str(TRUE_KF2), str(TRUE_KF3), cwd=work).stdout)
     header = "measurement_id,readout,condition,time,time_unit,dose,dose_unit,value,value_unit,error,error_kind,n,use,source,locator"
     rows, ids = [], []
     for i, (t, v) in enumerate(truth["control"].items(), start=1):
-        rows.append(f"M{i},pR,control,{float(t):g},min,,,{v:.6f},a.u.,,,,fit,s1,synthetic table row {i}")
+        rows.append(f"M{i},pR,control,{float(t):g},min,,,{v:.6f},molecule,,,,fit,s1,synthetic table row {i}")
         ids.append(f"M{i}")
-    rows.append(f"M{len(ids) + 1},pR,highE,30,min,,,{truth['highE']:.6f},a.u.,,,,holdout,s1,synthetic table hold-out")
+    rows.append(f"M{len(ids) + 1},pR,highE,30,min,,,{truth['highE']:.6f},molecule,,,,holdout,s1,synthetic table hold-out")
     ids.append(f"M{len(ids) + 1}")
     meas_rel = f"runs/orchestrator/{PURPOSE}/measurements.csv"
     (root / meas_rel).parent.mkdir(parents=True)
@@ -204,13 +213,19 @@ def run(scratch: Path) -> None:
 
     # 4. draft, fill, check and approve the mapping
     mapping_rel = f"runs/orchestrator/{PURPOSE}/ode_mapping.json"
-    py("scripts/ode/ode_mapping.py", "draft", "--purpose", PURPOSE, "--ode-session", SESSION, "--revision", "r1",
+    py("scripts/ode/ode_mapping.py", "draft", "--purpose", PURPOSE, "--ode-session", SESSION,
        "--bundle", export_rel, "--measurements", meas_rel, "--source", "s1:inputs/synthetic.txt")
     refused = py("scripts/ode/ode_mapping.py", "check", mapping_rel, check=False)
     assert refused.returncode == 1 and refused.stderr, "a draft must not pass check"
     mapping = json.loads((root / mapping_rel).read_text(encoding="utf-8"))
+    assert mapping["inputs"]["model"]["revision"] == REVISION, mapping["inputs"]["model"]
+    assert mapping["values"] == {"readouts": {"pR": {"model_unit": "TODO", "factors": {"molecule": None}}},
+                                 "viability": {"factors": {}}}, mapping["values"]
     mapping["time"] = {"model_unit": "min", "factors": {"min": 1.0}}
     mapping["dose"] = {"model_unit": "nM", "factors": {}}
+    # absolute values: an explicit factor from the table's value_unit into the observable's model unit
+    mapping["values"] = {"readouts": {"pR": {"model_unit": "molecule", "factors": {"molecule": 1.0}}},
+                         "viability": {"factors": {}}}
     mapping["readouts"] = [{"readout": "pR", "observable": "pR"}]
     mapping["conditions"] = [
         {"condition": "control", "parameters": [], "initials": []},
@@ -227,7 +242,7 @@ def run(scratch: Path) -> None:
     record({"id": "ode-map-1", "kind": "stage_approval", "stage": "ode_mapping", "session_id": SESSION,
             "outputs": sorted([*ids, "kf2", "kf3"]), "artifact": {"path": mapping_rel, "sha256": sha256(root / mapping_rel)},
             "approved_by": "researcher", "authorization": "researcher: smoke mapping ok"})
-    step("ode_mapping drafted (refused), filled, check passed, ode_mapping approval recorded")
+    step(f"ode_mapping drafted (revision {REVISION} derived; refused), filled, check passed, approval recorded")
 
     # 5. the portable bundle, 2 restarts and maxiter=3
     settings_rel = f"runs/orchestrator/{PURPOSE}/calibration-settings.json"
@@ -256,6 +271,10 @@ def run(scratch: Path) -> None:
     py("scripts/jobs/launch.py", "local", "fetch", job_id)
     fetched = root / "inputs" / "calibration-results" / job_id / "results.tar.gz"
     assert fetched.is_file()
+    with tarfile.open(fetched) as tf:  # the hold-out stays unseen until score_holdout
+        shown = json.loads(tf.extractfile("predictions.json").read())
+        simulated = json.loads(tf.extractfile("simulations.json").read())["conditions"]
+    assert set(shown["rows"]) == set(ids[:-1]) and "highE" not in simulated, (sorted(shown["rows"]), sorted(simulated))
     step(f"local run finished (bootstrap, selftest, 2 restarts, collect) and fetched; status ok={status['ok']}")
 
     # 7. import with the real reproduce; best score below the nominal-score validate

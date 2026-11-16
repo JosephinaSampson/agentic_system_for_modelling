@@ -133,12 +133,14 @@ def _pid(target: Path) -> int | None:
 
 
 def start(root: Path, job_id: str, parallel: int | None = None) -> dict:
+    if parallel is not None and parallel < 1:
+        raise ValueError("--parallel must be >= 1")
+    _, settings = _job_and_settings(root, job_id)
     target = unpack(root, job_id)
     if _pid(target):
         raise ValueError(f"job {job_id} is already running (pid {_pid(target)})")
-    if parallel is not None and parallel < 1:
-        raise ValueError("--parallel must be >= 1")
-    extra = f" --parallel {int(parallel)}" if parallel else ""
+    # local.sh applies the same rule; passing the effective value keeps the launch log honest
+    extra = f" --parallel {runtime.effective_parallel(settings, parallel)}" if parallel else ""
     command = f"bash env/bootstrap.sh && exec bash launch/local.sh{extra}"
     with (target / "launch.log").open("ab") as log:
         proc = subprocess.Popen(["bash", "-c", command], cwd=target, stdin=subprocess.DEVNULL, stdout=log,
@@ -198,6 +200,7 @@ def fetch(root: Path, job_id: str) -> Path:
         raise ValueError("results.json job_sha256 does not match this job's job.json")
     dest_dir = root.joinpath(*RESULTS, job_id)
     dest = dest_dir / "results.tar.gz"
+    reject_symlinks(dest_dir, root)  # before mkdir: never create folders through a symlinked inputs/ path
     dest_dir.mkdir(parents=True, exist_ok=True)
     reject_symlinks(dest_dir, root)
     try:
@@ -269,14 +272,9 @@ def load_hosts() -> dict:
 
 
 def cores_parallel(settings: dict, max_cores: int) -> int:
-    """K = min(parallel, max_cores // workers), at least 1.
-
-    workers -1 lets scipy use every core of the machine, so it counts as max_cores (K = 1). (Under SLURM,
-    -1 means the task's allocation, slurm.cpus_per_task: see run.effective_workers.)
-    """
-    workers = int(settings["workers"])
-    workers = int(max_cores) if workers == -1 else max(workers, 1)
-    return max(1, min(int(settings["parallel"]), int(max_cores) // workers))
+    """K restarts at a time on a host with max_cores: run.effective_parallel (1 whenever a restart uses more
+    than one scipy worker, e.g. workers -1 = every core), capped at max_cores."""
+    return max(1, min(runtime.effective_parallel(settings), int(max_cores)))
 
 
 def resolve_host(name: str, settings: dict, configured_only: bool) -> dict:
@@ -291,7 +289,8 @@ def resolve_host(name: str, settings: dict, configured_only: bool) -> dict:
                          f"add it there or use `launch.py print` and run the commands yourself")
     if not SSH_ALIAS.fullmatch(name):
         raise ValueError(f"host {name!r} is not a valid ssh alias")
-    return {"name": name, "ssh": name, "remote_dir": DEFAULT_REMOTE_DIR, "parallel": int(settings["parallel"])}
+    return {"name": name, "ssh": name, "remote_dir": DEFAULT_REMOTE_DIR,
+            "parallel": runtime.effective_parallel(settings)}
 
 
 def _shown(argv: list[str]) -> str:
@@ -444,10 +443,16 @@ def slurm_submit(root: Path, job_id: str, resubmit: bool = False) -> int:
         return 0
     target = unpack(root, job_id)
     record = target / "state" / "slurm_job"
+    earlier = record.read_text(encoding="utf-8").split() if record.exists() else []
     if record.exists() and not resubmit:
-        raise ValueError(f"job {job_id} was already submitted (array job {record.read_text().split()[-1]}); "
+        raise ValueError(f"job {job_id} was already submitted (array job {earlier[-1] if earlier else 'unknown'}); "
                          "cancel it with `bash launch/remote.sh cancel`, or pass --resubmit to run the "
                          "unfinished restarts again")
+    for array in earlier:  # a resubmit while an earlier array runs would start the same restarts twice
+        active = runtime.slurm_active(array)
+        if active is not False:
+            raise ValueError(f"array job {array} is still active per sacct, or sacct cannot tell; wait for it or "
+                             "cancel it (`bash launch/remote.sh cancel`) before --resubmit")
     slurm_setup(target)
     (target / "out").mkdir(exist_ok=True)  # sbatch does not create the --output folder
     (target / "state").mkdir(exist_ok=True)
@@ -460,8 +465,16 @@ def slurm_submit(root: Path, job_id: str, resubmit: bool = False) -> int:
     if not match:
         raise ValueError(f"could not read the array job id from sbatch output {done.stdout!r}; "
                          f"write it to {record} by hand")
-    with record.open("a", encoding="utf-8") as handle:  # one id per line; cancel stops every one
-        handle.write(match.group(1) + "\n")
+    # one id per line (cancel stops every one); written atomically (temp file + rename)
+    text = "".join(f"{array}\n" for array in [*earlier, match.group(1)])
+    fd, tmp = tempfile.mkstemp(prefix=".slurm_job.", dir=record.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, record)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     print(f"recorded array job {match.group(1)} in {record}")
     return 0
 

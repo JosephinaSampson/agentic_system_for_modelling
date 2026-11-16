@@ -15,8 +15,9 @@ Three commands, run inside this folder:
        "status": "ok".
 
   2. bash launch/local.sh            (or: bash launch/local.sh --parallel 8)
-       Runs all restarts (see "restarts" in job.json), several at a time, then collects.
-       Rerunning it resumes: finished restarts are kept.
+       Runs all restarts (see "restarts" in job.json), several at a time (one at a time when
+       job.json "workers" is not 1), then collects. Ctrl-C is safe and rerunning it resumes:
+       finished restarts are kept, interrupted ones start again, running ones are never touched.
        Success: the last line is "results.tar.gz written: N/N restarts (... ok)".
 
   3. Send back results.tar.gz (it contains the fitted values, scores, traces, figures, logs

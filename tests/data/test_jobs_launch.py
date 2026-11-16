@@ -56,9 +56,7 @@ class FakeTools:
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         for name in names:
-            path = self.bin / name
-            path.write_text(FAKE, encoding="utf-8")
-            path.chmod(0o755)
+            self.make_tool(name)
         self.log = self.tmp / "calls.log"
         self.log.touch()
         env = {"PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "FAKE_LOG": str(self.log),
@@ -67,6 +65,11 @@ class FakeTools:
         patcher.start()
         testcase.addCleanup(patcher.stop)
         return self
+
+    def make_tool(self, name):
+        path = self.bin / name
+        path.write_text(FAKE, encoding="utf-8")
+        path.chmod(0o755)
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
@@ -129,11 +132,96 @@ class HostsTests(LauncherFixture):
         s = self.job_settings()
         self.assertEqual(launch.cores_parallel(s, 10 ** 6), 1 if s["workers"] == -1 else
                          max(1, min(s["parallel"], 10 ** 6 // s["workers"])))
-        self.assertEqual(launch.cores_parallel({"parallel": 8, "workers": 4}, 8), 2)
+        # central rule (review launch.py:294): more than one worker per restart means one restart at a time
+        self.assertEqual(launch.cores_parallel({"parallel": 8, "workers": 4}, 8), 1)
         self.assertEqual(launch.cores_parallel({"parallel": 8, "workers": 4}, 2), 1)
+        self.assertEqual(launch.cores_parallel({"parallel": 8, "workers": 1}, 2), 2)
         self.assertEqual(launch.cores_parallel({"parallel": 3, "workers": 1}, 64), 3)
         # workers -1 lets scipy use every core of the machine: one restart at a time
         self.assertEqual(launch.cores_parallel({"parallel": 3, "workers": -1}, 64), 1)
+
+
+class ParallelRuleTests(LauncherFixture):
+    """review launch.py:294: workers != 1 means one restart at a time for every host type and local mode."""
+
+    def set_workers(self, workers):
+        job = json.loads((self.job_dir / "job.json").read_text())
+        job["settings"]["workers"] = workers
+        return job["settings"]
+
+    def test_unconfigured_host_and_print_use_the_rule(self):
+        settings = self.set_workers(-1)
+        self.assertEqual(launch.resolve_host("somebox", settings, configured_only=False)["parallel"], 1)
+        settings = self.set_workers(1)
+        self.assertEqual(launch.resolve_host("somebox", settings, configured_only=False)["parallel"],
+                         settings["parallel"])
+
+    def test_local_start_passes_the_effective_parallel(self):
+        settings = self.set_workers(-1)
+        with mock.patch.object(launch, "_job_and_settings", return_value=(self.job_dir, settings)), \
+                mock.patch.object(launch, "unpack", return_value=self.fake.tmp), \
+                mock.patch.object(launch.subprocess, "Popen") as popen:
+            popen.return_value.pid = 12345
+            launch.start(self.root, self.job_id, 4)
+        self.assertIn("--parallel 1", popen.call_args.args[0][-1])
+
+
+class SlurmReviewTests(LauncherFixture):
+    names = ("ssh", "scp", "sbatch", "sacct")
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(launch, "slurm_setup")
+        p.start()
+        self.addCleanup(p.stop)
+        self.record = launch.unpack(self.root, self.job_id) / "state" / "slurm_job"
+
+    def test_empty_slurm_job_record_is_a_clear_error(self):
+        # review launch.py:448: an empty state/slurm_job (an interrupted earlier submit) crashed with IndexError
+        self.record.parent.mkdir(parents=True)
+        self.record.write_text("")
+        code, _, err = self.run_main("slurm", "submit", self.job_id)
+        self.assertEqual(code, 1, err)
+        self.assertIn("already submitted", err)
+
+    def test_record_is_written_atomically(self):
+        self.assertEqual(self.run_main("slurm", "submit", self.job_id)[0], 0)
+        self.assertEqual(self.record.read_text(), "4242\n")
+        self.assertEqual(sorted(p.name for p in self.record.parent.iterdir()), ["slurm_job"])
+
+    def test_resubmit_refused_while_the_earlier_array_is_active(self):
+        # review run.py:424: a resubmit while the first array runs would start the same seeds twice
+        self.assertEqual(self.run_main("slurm", "submit", self.job_id)[0], 0)
+        with mock.patch.dict(os.environ, {"FAKE_SACCT": "4242_1|RUNNING\n4242_[2-10]|PENDING\n"}):
+            code, _, err = self.run_main("slurm", "submit", self.job_id, "--resubmit")
+        self.assertEqual(code, 1)
+        self.assertIn("4242", err)
+        self.assertIn("active", err)
+        with mock.patch.dict(os.environ, {"FAKE_SACCT": ""}):  # sacct cannot tell: refused too
+            self.assertEqual(self.run_main("slurm", "submit", self.job_id, "--resubmit")[0], 1)
+        with mock.patch.dict(os.environ, {"FAKE_SACCT": "4242_1|COMPLETED\n4242_2|CANCELLED by 1\n"}):
+            code, _, err = self.run_main("slurm", "submit", self.job_id, "--resubmit")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.record.read_text().split(), ["4242", "4242"])
+
+
+class LocalFetchSymlinkTests(LauncherFixture):
+    def test_fetch_creates_nothing_through_a_symlinked_inputs_folder(self):
+        # review launch.py:201: mkdir ran before reject_symlinks and created folders at the symlink target
+        cache_job = launch.unpack(self.root, self.job_id)
+        payload = json.dumps({"job_sha256": sha((self.job_dir / "job.json").read_bytes())}).encode()
+        import tarfile
+        with tarfile.open(cache_job / "results.tar.gz", "w:gz") as tf:
+            info = tarfile.TarInfo("results.json")
+            info.size = len(payload)
+            tf.addfile(info, io.BytesIO(payload))
+        outside = self.fake.tmp / "outside"
+        outside.mkdir()
+        shutil.rmtree(self.root / "inputs", ignore_errors=True)
+        (self.root / "inputs").symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            launch.fetch(self.root, self.job_id)
+        self.assertEqual(list(outside.iterdir()), [])
 
 
 class PrintTests(LauncherFixture):
@@ -312,9 +400,11 @@ class SlurmTests(LauncherFixture):
         self.assertEqual(code, 1)
         self.assertIn("already", err)
         self.assertEqual(len(self.fake.calls()), 1)
-        self.assertEqual(self.run_main("slurm", "submit", self.job_id, "--resubmit")[0], 0)
+        self.fake.make_tool("sacct")  # --resubmit asks sacct that the earlier array has ended
+        with mock.patch.dict(os.environ, {"FAKE_SACCT": "4242_1|COMPLETED\n"}):
+            self.assertEqual(self.run_main("slurm", "submit", self.job_id, "--resubmit")[0], 0)
         self.assertEqual((job / "state" / "slurm_job").read_text().split(), ["4242", "4242"])  # appended
-        self.assertEqual(len(self.fake.calls()), 2)
+        self.assertEqual(len([c for c in self.fake.calls() if c[0] == "sbatch"]), 2)
 
     def test_slurm_prints_when_no_sbatch(self):
         s = self.job_settings()
@@ -631,6 +721,59 @@ class RemoteShTests(unittest.TestCase):
             self.assertEqual(done.returncode, 2, bad)
             self.assertNotIn("started", done.stdout)
         self.assertFalse((self.job / "state" / "pids").exists())
+
+    def marker_pids(self, marker):
+        found = []
+        for proc in Path("/proc").iterdir():
+            if proc.name.isdigit():
+                try:
+                    if marker.encode() in (proc / "cmdline").read_bytes():
+                        state = (proc / "stat").read_text().rsplit(")", 1)[1].split()[0]
+                        if state != "Z":
+                            found.append(int(proc.name))
+                except OSError:
+                    pass
+        return found
+
+    @unittest.skipUnless(Path("/proc").is_dir(), "needs /proc to find the calibration processes")
+    def test_cancel_stops_every_process_without_setsid(self):
+        # review remote.sh:155: without setsid (macOS) the supervisor led no process group, cancel killed only
+        # local.sh and reported `stopped` while the calibration processes kept running
+        farm = self.tmp / "nosetsid"
+        farm.mkdir()
+        for folder in os.environ["PATH"].split(os.pathsep):
+            if not os.path.isdir(folder):
+                continue
+            for entry in os.scandir(folder):
+                target = farm / entry.name
+                if entry.name != "setsid" and not target.exists() and entry.is_file() and os.access(entry.path, os.X_OK):
+                    target.symlink_to(entry.path)
+        marker = f"calib-marker-{os.getpid()}-{time.monotonic_ns()}"
+
+        def kill_markers():
+            for pid in self.marker_pids(marker):
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+        self.addCleanup(kill_markers)
+        (self.job / "launch" / "local.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            f"{sys.executable} -c 'import time; time.sleep(300)' {marker} &\n"
+            f"{sys.executable} -c 'import time; time.sleep(300)' {marker} &\nwait\n")
+        env = {"PATH": f"{self.bin}{os.pathsep}{farm}"}
+        self.assertEqual(self.remote("start", env=env).returncode, 0)
+        for _ in range(50):
+            if len(self.marker_pids(marker)) == 2:
+                break
+            time.sleep(0.1)
+        self.assertEqual(len(self.marker_pids(marker)), 2)
+        done = self.remote("cancel", env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("stopped", done.stdout)
+        for _ in range(20):
+            if not self.marker_pids(marker):
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.marker_pids(marker), [])
 
     def test_readme_states_data_minimisation(self):
         self.assertIn("leaves", (RUNTIME / "README.txt").read_text())

@@ -11,7 +11,9 @@
 # supervisor finishes and by `cancel`); state/status.json = progress, refreshed while it runs and by `status`;
 # state/slurm_job = the SLURM array job id (written when it was submitted). `start` is refused while any
 # restart is running. A recorded pid is acted on (by `start` and `cancel`) only while `ps -o args=` shows it
-# is a `remote.sh _supervise` process: a pid reused by an unrelated process is never signalled.
+# is a `remote.sh _supervise` process: a pid reused by an unrelated process is never signalled. The supervisor
+# leads its own process group (setsid, or bash job control `set -m` where setsid is missing, e.g. macOS);
+# `cancel` stops that group and every recorded descendant, and reports `stopped` only once all are gone.
 set -euo pipefail
 
 JOB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -113,7 +115,24 @@ for n in info["failed_restarts"]:
 PYEOF
 }
 
-alive() { kill -0 "$1" 2>/dev/null; }
+# A live (not zombie) process / process group.
+alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  case "$(ps -o stat= -p "$1" 2>/dev/null)" in Z*) return 1 ;; esac
+  return 0
+}
+group_alive() {
+  ps -A -o pgid= -o stat= 2>/dev/null | awk -v g="$1" '$1 == g && $2 !~ /^Z/ { found = 1 } END { exit !found }'
+}
+
+# The pid and all its descendants (pgrep -P walk; just the pid when pgrep is missing).
+descendants() {
+  local child
+  echo "$1"
+  if command -v pgrep >/dev/null 2>&1; then
+    for child in $(pgrep -P "$1" 2>/dev/null); do descendants "$child"; done
+  fi
+}
 
 # True when the pid is (still) a supervisor started by `start`, not a reused pid.
 is_supervisor() {
@@ -151,10 +170,14 @@ case "${1:-}" in
     mkdir -p state
     if command -v setsid >/dev/null 2>&1; then
       setsid nohup bash launch/remote.sh _supervise "$@" >launch.log 2>&1 </dev/null &
+      supervisor=$!
     else
+      # no setsid (macOS): with job control the background job gets its own process group (pgid = its pid)
+      set -m
       nohup bash launch/remote.sh _supervise "$@" >launch.log 2>&1 </dev/null &
+      supervisor=$!
+      set +m
     fi
-    supervisor=$!
     echo "$supervisor" >state/pids
     # a supervisor that already finished (and emptied state/pids) must not stay recorded
     if ! is_supervisor "$supervisor"; then : >state/pids; fi
@@ -178,9 +201,10 @@ case "${1:-}" in
     need_env
     "$PY" run.py collect ;;
   cancel)
+    unstopped=""
     if [ -f state/pids ]; then
       pids=""
-      left=""
+      members=""
       while read -r pid _; do
         case "$pid" in '' | *[!0-9]*) continue ;; esac
         if ! is_supervisor "$pid"; then
@@ -188,22 +212,38 @@ case "${1:-}" in
           continue
         fi
         pids="$pids $pid"
-        # the recorded pid leads its own process group (setsid): stop the whole group, else the pid and its children
-        kill -TERM -- "-$pid" 2>/dev/null || {
-          command -v pkill >/dev/null 2>&1 && pkill -TERM -P "$pid" 2>/dev/null || true
-          kill -TERM "$pid" 2>/dev/null || true
-        }
+        tree="$(descendants "$pid" | tr '\n' ' ')"  # before any signal: orphans cannot be found afterwards
+        members="$members $tree"
+        # the recorded pid leads its own process group: stop the whole group, else every recorded descendant
+        if ! kill -TERM -- "-$pid" 2>/dev/null; then
+          for member in $tree; do kill -TERM "$member" 2>/dev/null || true; done
+        fi
       done <state/pids
-      group_alive() { kill -0 -- "-$1" 2>/dev/null || alive "$1"; }
+      remaining() {
+        local p
+        for p in $pids; do group_alive "$p" && echo "$p"; done
+        for p in $members; do alive "$p" && echo "$p"; done
+        return 0
+      }
+      left=""
       for _ in 1 2 3 4 5 6 7 8 9 10; do
-        left=""
-        for pid in $pids; do group_alive "$pid" && left="$left $pid"; done
-        [ -z "$left" ] && break
+        left="$(remaining | sort -u | tr '\n' ' ')"
+        [ -z "${left// /}" ] && break
         sleep 0.5
       done
-      for pid in $left; do kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; done
+      for p in $left; do kill -KILL -- "-$p" 2>/dev/null || true; kill -KILL "$p" 2>/dev/null || true; done
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        left="$(remaining | sort -u | tr '\n' ' ')"
+        [ -z "${left// /}" ] && break
+        sleep 0.2
+      done
       : >state/pids
-      echo "remote.sh: stopped${pids:- nothing}"
+      if [ -n "${left// /}" ]; then
+        unstopped="$left"
+        echo "remote.sh: could not stop: $left" >&2
+      else
+        echo "remote.sh: stopped${pids:- nothing}"
+      fi
     else
       echo "remote.sh: no recorded processes (state/pids)"
     fi
@@ -220,7 +260,8 @@ case "${1:-}" in
         fi
       done
     fi
-    if [ -x "$PY" ]; then progress quiet || true; fi ;;
+    if [ -x "$PY" ]; then progress quiet || true; fi
+    if [ -n "$unstopped" ]; then exit 1; fi ;;
   *)
     echo "$USAGE" >&2
     exit 2 ;;

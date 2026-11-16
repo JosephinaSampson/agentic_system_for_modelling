@@ -389,6 +389,241 @@ class RuntimeConcurrencyTests(unittest.TestCase):
         self.assertFalse(issubclass(run.SelftestTimeout, Exception))
 
 
+FAKE_MODEL = {
+    "model/__init__.py": "",
+    "model/ode.py": "def param_values():\n    return [1.0, 3.0]\n\n\ndef initial_values():\n    return [2.0]\n",
+    "model/name2idx/__init__.py": "class C:\n    NAMES = ['k1', 'k2']\n\n\nclass V:\n    NAMES = ['S']\n",
+    "model/observable.py": "class Observable:\n    def __init__(self):\n        self.obs_names = ['obs']\n",
+}
+
+
+class RuntimeReviewTests(unittest.TestCase):
+    """PR 16 review (batch A): interrupts, live restart folders, the per-process cache, hold-out isolation,
+    worker/parallel rule and the selftest worker count."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def job(self, **settings):
+        base = {"restarts": 2, "seeds": [1, 2], "optimizer_options": {"maxiter": 1, "popsize": 1}, "workers": 1,
+                "parallel": 4}
+        (self.root / "job.json").write_text(json.dumps({"job_id": "job-000000000000",
+                                                        "settings": {**base, **settings}}))
+
+    def spec(self):
+        try:
+            from tests.data.test_jobs_compare import mapping, row, tc
+        except ImportError:  # discovered with -s tests/data
+            from test_jobs_compare import mapping, row, tc
+        from scripts.jobs.runtime import compare
+        rows = [row("m1", "ctrl", 10.0, 2.0), row("h1", "drug", 20.0, 5.0, use="holdout"),
+                row("h2", "ctrl", 30.0, 7.0, use="holdout")]
+        return compare.resolve(mapping([tc("absolute", ["m1", "h1", "h2"])]), rows)
+
+    def fake_numpy(self):
+        import types
+        numpy, scipy, optimize = (types.ModuleType(n) for n in ("numpy", "scipy", "scipy.optimize"))
+        optimize.differential_evolution = mock.Mock(side_effect=AssertionError("not reached"))
+        scipy.optimize = optimize
+        patcher = mock.patch.dict(sys.modules, {"numpy": numpy, "scipy": scipy, "scipy.optimize": optimize})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    # run.py:384
+    def test_interrupt_leaves_no_failed_result_and_the_rerun_resumes(self):
+        self.fake_numpy()
+        out = self.root / "out" / "restart-1"
+        for exc in (KeyboardInterrupt(), SystemExit(1)):
+            with mock.patch.object(run, "Problem", side_effect=exc):
+                with self.assertRaises(type(exc)):
+                    run.run_restart(self.root, 1, 1, {}, 1, out)
+            self.assertFalse((out / "result.json").exists(), exc)
+            self.assertIn("interrupted", (out / "log.txt").read_text())
+        with mock.patch.object(run, "Problem", side_effect=run.SelftestTimeout("cap")):
+            with self.assertRaises(run.SelftestTimeout):
+                run.run_restart(self.root, 1, 1, {}, 1, out)
+        self.assertEqual(json.loads((out / "result.json").read_text())["status"], "failed")
+        (out / "result.json").unlink()
+        with mock.patch.object(run, "Problem", side_effect=RuntimeError("boom")):
+            self.assertEqual(run.run_restart(self.root, 1, 1, {}, 1, out)["status"], "failed")
+        self.assertEqual(json.loads((out / "result.json").read_text())["status"], "failed")
+
+    # run.py:424
+    def calibrate(self, env=None, **owner):
+        folder = self.root / "out" / "restart-1"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "trace.csv").write_text("live\n")
+        (folder / "owner.json").write_text(json.dumps({"host": socket.gethostname(), "pid": os.getpid(),
+                                                       "started_at": "t", **owner}))
+        done = {"restart": 1, "seed": 1, "score": 1.0, "status": "ok", "params": {}, "wall_time_s": 0.0}
+        err = io.StringIO()
+        with mock.patch.object(run, "status"), mock.patch.object(run, "run_restart", return_value=done) as restart, \
+                mock.patch.dict(os.environ, env or {}), mock.patch("sys.stdout", io.StringIO()), \
+                mock.patch("sys.stderr", err):
+            code = run.cmd_calibrate(self.root, 1)
+        return code, restart.called, (folder / "trace.csv").exists(), err.getvalue()
+
+    def test_calibrate_never_deletes_a_restart_folder_whose_owner_is_alive(self):
+        self.job()
+        code, started, kept, err = self.calibrate()  # owner = this live process on this host
+        self.assertEqual((code, started, kept), (3, False, True))
+        self.assertIn("running", err)
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        code, started, kept, _ = self.calibrate(pid=dead.pid)  # stale: removed and run again
+        self.assertEqual((code, started, kept), (0, True, False))
+        code, started, kept, _ = self.calibrate(host="node-9", pid=1)  # another host, nothing to ask: kept
+        self.assertEqual((code, started, kept), (3, False, True))
+
+    def test_calibrate_asks_slurm_about_an_owner_on_another_node(self):
+        self.job()
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        sacct = bin_dir / "sacct"
+        sacct.write_text("#!/bin/sh\nprintf '%s' \"$FAKE_SACCT\"\n")
+        sacct.chmod(0o755)
+        path = {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+        owner = {"host": "node-9", "pid": 1, "slurm_job": "4242", "slurm_task": "1"}
+        code, started, kept, _ = self.calibrate({**path, "FAKE_SACCT": "4242_1|RUNNING\n"}, **owner)
+        self.assertEqual((code, started, kept), (3, False, True))
+        code, started, kept, _ = self.calibrate({**path, "FAKE_SACCT": "4242_1|CANCELLED by 1\n"}, **owner)
+        self.assertEqual((code, started, kept), (0, True, False))
+        # a requeued task finds its own earlier attempt: that is not a live owner
+        own = {**path, "FAKE_SACCT": "4242_1|RUNNING\n", "SLURM_ARRAY_JOB_ID": "4242", "SLURM_ARRAY_TASK_ID": "1"}
+        code, started, kept, _ = self.calibrate(own, **owner)
+        self.assertEqual((code, started, kept), (0, True, False))
+
+    def test_owner_records_the_slurm_task(self):
+        self.job()
+        done = {"restart": 1, "seed": 1, "score": 1.0, "status": "ok", "params": {}, "wall_time_s": 0.0}
+        with mock.patch.object(run, "status"), mock.patch.object(run, "run_restart", return_value=done), \
+                mock.patch.dict(os.environ, {"SLURM_ARRAY_JOB_ID": "77", "SLURM_ARRAY_TASK_ID": "1"}), \
+                mock.patch("sys.stdout", io.StringIO()):
+            run.cmd_calibrate(self.root, 1)
+        owner = json.loads((self.root / "out" / "restart-1" / "owner.json").read_text())
+        self.assertEqual((owner["slurm_job"], owner["slurm_task"]), ("77", "1"))
+
+    # run.py:193
+    def bundle(self):
+        for rel, text in FAKE_MODEL.items():
+            (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / rel).write_text(text)
+        (self.root / "calibration").mkdir()
+        shutil.copyfile(RUNTIME / "compare.py", self.root / "calibration" / "compare.py")
+        spec = self.spec()
+        spec["fit"] = [{"name": "k1", "kind": "parameter", "lower": 0.1, "upper": 10.0, "log10_lower": -1.0,
+                        "log10_upper": 1.0}]
+        (self.root / "calibration" / "spec.json").write_text(json.dumps(spec))
+
+        def forget():
+            for name in [m for m in sys.modules if m == "model" or m.startswith("model.")]:
+                del sys.modules[name]
+            if str(self.root) in sys.path:
+                sys.path.remove(str(self.root))
+        forget()
+        self.addCleanup(forget)
+
+    def test_problem_state_is_loaded_once_per_process(self):
+        import pickle
+        self.fake_numpy()
+        self.bundle()
+        with mock.patch.object(run, "load_compare", wraps=run.load_compare) as loads:
+            first = run.Problem(self.root)
+            self.assertEqual(first.nominal(), {"k1": 1.0})
+            second = pickle.loads(pickle.dumps(first))  # what a scipy pool worker receives per chunk
+            self.assertEqual(second.nominal(), {"k1": 1.0})
+            self.assertEqual(run.Problem(self.root).nominal(), {"k1": 1.0})
+        self.assertEqual(loads.call_count, 1)
+
+    # run.py:593, compare.py:197, compare.py:93
+    def fake_problem(self, spec):
+        from scripts.jobs.runtime import compare
+        simulated = []
+
+        class Fake(run.Problem):
+            def _load(self):
+                self.spec, self.compare, self.fit, self.names = spec, compare, spec["fit"], list(spec["times_model"])
+                self._ready = True
+
+            def simulate(self, name, fitted):
+                simulated.append(name)
+                return {"obs": {t: 1.0 + t for t in run.model_times(spec, name)}}
+        return Fake, simulated
+
+    def test_fit_evaluation_simulates_only_what_fit_rows_need(self):
+        Fake, simulated = self.fake_problem(self.spec())
+        score, predictions, sims = Fake(self.root).evaluate({"k1": 1.0}, "fit")
+        self.assertEqual(simulated, ["ctrl"])
+        self.assertEqual(score, (11.0 - 2.0) ** 2)
+        simulated.clear()
+        Fake(self.root).evaluate({"k1": 1.0}, "all")
+        self.assertEqual(sorted(simulated), ["ctrl", "drug"])
+
+    def test_collect_shows_no_hold_out_prediction(self):
+        self.job()
+        spec = self.spec()
+        Fake, _ = self.fake_problem(spec)
+        folder = self.root / "out" / "restart-1"
+        folder.mkdir(parents=True)
+        (folder / "result.json").write_text(json.dumps({"restart": 1, "seed": 1, "status": "ok", "score": 1.0,
+                                                        "params": {"k1": 1.0}, "wall_time_s": 0.0}))
+        shown = {}
+
+        def figures(folder_, rows, results, spec_, traces):
+            shown.update(rows)
+            return []
+        with mock.patch.object(run, "Problem", Fake), mock.patch.object(run, "_figures", figures), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(run.cmd_collect(self.root), 0)
+        stage = self.root / "out" / "collect"
+        predictions = json.loads((stage / "predictions.json").read_text())
+        self.assertEqual(sorted(predictions["rows"]), ["m1"])
+        self.assertEqual(sorted(shown), ["m1"])
+        sims = json.loads((stage / "simulations.json").read_text())["conditions"]
+        self.assertEqual(sims, {"ctrl": {"obs": [[0.0, 1.0], [10.0, 11.0]]}})  # not drug, not ctrl at t=30
+
+    def test_validate_reports_only_rows_of_the_requested_use(self):
+        Fake, _ = self.fake_problem(self.spec())
+        with mock.patch.object(run, "Problem", Fake):
+            self.assertEqual(sorted(run.validate(self.root, {"k1": 1.0}, "fit")["predictions"]), ["m1"])
+            self.assertEqual(sorted(run.validate(self.root, {"k1": 1.0}, "holdout")["predictions"]), ["h1", "h2"])
+            self.assertEqual(sorted(run.validate(self.root, {"k1": 1.0}, "all")["predictions"]), ["h1", "h2", "m1"])
+
+    # launch.py:294 + run.py:525
+    def test_parallel_is_one_whenever_a_restart_uses_more_than_one_worker(self):
+        self.assertEqual(run.effective_parallel({"workers": 1, "parallel": 4}), 4)
+        self.assertEqual(run.effective_parallel({"workers": 1, "parallel": 4}, 2), 2)
+        for workers in (-1, 2, 8):
+            self.assertEqual(run.effective_parallel({"workers": workers, "parallel": 4}, 3), 1, workers)
+        with mock.patch.dict(os.environ, {"SLURM_CPUS_PER_TASK": "1"}):  # -1 under a 1-cpu allocation is 1 worker
+            self.assertEqual(run.effective_parallel({"workers": -1, "parallel": 4}), 4)
+
+    def test_selftest_runs_one_worker(self):
+        self.job(workers=-1)
+        done = {"restart": 0, "seed": 1, "score": 1.0, "status": "ok", "params": {}, "wall_time_s": 0.0}
+        with mock.patch.object(run, "run_restart", return_value=done) as restart, \
+                mock.patch.object(run, "validate", return_value={"score": 1.0}), mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(run.cmd_selftest(self.root), 0)
+        self.assertEqual(restart.call_args.args[4], 1)
+
+    def test_local_sh_applies_the_parallel_rule(self):
+        self.job(workers=-1, restarts=0)
+        shutil.copytree(RUNTIME, self.root / "launch", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copyfile(RUNTIME / "run.py", self.root / "run.py")
+        (self.root / "env").mkdir()
+        (self.root / "env" / "bootstrap.sh").write_text("exit 0\n")
+        (self.root / ".venv" / "bin").mkdir(parents=True)
+        (self.root / ".venv" / "bin" / "python").symlink_to(sys.executable)
+        (self.root / "launch" / "local.sh").chmod(0o755)
+        with mock.patch.dict(os.environ, {"MPLCONFIGDIR": str(self.root / "mpl")}):
+            os.environ.pop("SLURM_CPUS_PER_TASK", None)
+            done = subprocess.run(["bash", str(self.root / "launch" / "local.sh"), "--parallel", "4"],
+                                  capture_output=True, text=True, timeout=60)
+        self.assertIn("1 at a time", done.stdout, done.stdout + done.stderr)
+
+
 class RuntimeFileTests(unittest.TestCase):
     def test_bootstrap_script_pins(self):
         path = RUNTIME / "bootstrap.sh"

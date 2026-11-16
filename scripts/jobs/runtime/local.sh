@@ -4,7 +4,8 @@
 #   bash launch/local.sh [--parallel K]
 #
 # Sets up the environment first if needed (env/bootstrap.sh). K restarts run at the same time
-# (default: "parallel" in job.json). Finished restarts are skipped, so rerunning resumes.
+# (default: "parallel" in job.json; always 1 when one restart uses more than one scipy worker, see
+# `run.py parallel`). Finished restarts are skipped and live ones are never touched, so rerunning resumes.
 # Ends by writing results.tar.gz in the job folder.
 set -euo pipefail
 
@@ -12,10 +13,11 @@ JOB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$JOB_DIR"
 
 PARALLEL=""
+GIVEN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --parallel)
-      PARALLEL="${2:-}"; shift 2 || { echo "usage: launch/local.sh [--parallel K]" >&2; exit 2; } ;;
+      PARALLEL="${2:-}"; GIVEN=1; shift 2 || { echo "usage: launch/local.sh [--parallel K]" >&2; exit 2; } ;;
     *)
       echo "usage: launch/local.sh [--parallel K]" >&2; exit 2 ;;
   esac
@@ -25,10 +27,14 @@ bash env/bootstrap.sh
 
 PY="$JOB_DIR/.venv/bin/python"
 setting() { "$PY" -c 'import json, sys; print(json.load(open("job.json"))["settings"][sys.argv[1]])' "$1"; }
-[ -n "$PARALLEL" ] || PARALLEL="$(setting parallel)"
-case "$PARALLEL" in
-  '' | *[!0-9]* | 0) echo "local.sh: --parallel must be a positive integer" >&2; exit 2 ;;
-esac
+if [ "$GIVEN" = 1 ]; then
+  case "$PARALLEL" in
+    '' | *[!0-9]* | 0*) echo "local.sh: --parallel must be a positive integer" >&2; exit 2 ;;
+  esac
+  PARALLEL="$("$PY" run.py parallel --requested "$PARALLEL")"
+else
+  PARALLEL="$("$PY" run.py parallel)"  # settings parallel; 1 when a restart uses more than one worker
+fi
 RESTARTS="$(setting restarts)"
 
 echo "local.sh: running $RESTARTS restarts, $PARALLEL at a time"

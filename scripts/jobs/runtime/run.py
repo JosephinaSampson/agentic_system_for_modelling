@@ -6,6 +6,7 @@
   python run.py calibrate --restart N
   python run.py collect
   python run.py status
+  python run.py parallel [--requested K]   the number of restarts to run at a time on this machine
   python run.py env-report --uv-version V --uv-platform T --uv-sha256 S --selftest-exit CODE
 
 Layout (the bundle root is this file's folder): job.json, model/ (the exported BioMASS Text2Model
@@ -22,8 +23,19 @@ How a parameter vector is scored (no biomass.optimize, no generated data files):
     so float times are used as is; a single-point grid [0.0] is padded with 1.0, which is then
     dropped) and simulations = an empty (n_obs, 1, n_t) array; simulate(x, y0) returning False or
     raising is a solver failure (that condition is then missing, so compare gives PENALTY);
+  * only the simulations the scored rows need are run (compare.needed(spec, use)): calibration never
+    simulates a hold-out-only condition;
   * predictions and the objective come from calibration/compare.py (unweighted SSE over use=fit rows,
     PENALTY 1e12 on any failure).
+
+Hold-out rows stay unseen until the hold-out is scored: `collect` writes predictions, simulations and figures
+for use=fit rows (and fit-needed times) only, and `validate --use U` reports only the rows of use U.
+
+A restart folder is deleted (and the restart run again) only when its owner (owner.json: host, pid, and the
+SLURM array job/task when run under SLURM) is gone. An interrupted restart (Ctrl-C, SIGTERM, SystemExit)
+writes no result.json, so a rerun starts it again from its seed; only real errors and the selftest cap write
+a `failed` result. Whenever a restart uses more than one scipy worker (effective_workers != 1), restarts run
+one at a time (effective_parallel).
 
 Calibration follows BioMASS 0.14.0: scipy differential_evolution in gene space [0, 1]^n with the
 optimizer_options of job.json, gene -> value = 10 ** (log10(lb) + g * (log10(ub) - log10(lb))),
@@ -129,16 +141,60 @@ def load_compare(root: Path = ROOT):
     raise FileNotFoundError("calibration/compare.py is missing")
 
 
-def _owner_alive(folder: Path) -> bool:
+SLURM_ENDED = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED",
+               "BOOT_FAIL", "DEADLINE"}
+
+
+def _slurm_ids() -> tuple[str, str] | None:
+    """(array job id, task id) of this process when it runs as a SLURM array task (else the plain job id, "")."""
+    job = os.environ.get("SLURM_ARRAY_JOB_ID") or os.environ.get("SLURM_JOB_ID")
+    if not job:
+        return None
+    return job, os.environ.get("SLURM_ARRAY_TASK_ID", "") if os.environ.get("SLURM_ARRAY_JOB_ID") else ""
+
+
+def slurm_active(job: str, task: str = "") -> bool | None:
+    """True/False when sacct reports the job (array task) as still active/ended; None when it cannot tell."""
+    import re
+    import subprocess
+    target = f"{job}_{task}" if task else job
+    if not shutil.which("sacct"):
+        return None
+    try:
+        done = subprocess.run(["sacct", "-j", target, "--format=JobID,State", "--noheader", "-P", "-X"],
+                              capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    states = []
+    for line in done.stdout.splitlines() if done.returncode == 0 else []:
+        jid, _, state = line.partition("|")
+        if re.fullmatch(re.escape(job) + (r"_" + re.escape(task) if task else r"(_.*)?"), jid.strip()):
+            states.append(state.split()[0].upper() if state.split() else "")
+    if not states:
+        return None
+    return any(state not in SLURM_ENDED for state in states)
+
+
+def _owner_alive(folder: Path, ask_slurm: bool = False) -> bool:
     """A restart folder without result.json is running if its owner.json names a live process on this host,
-    or a process on another host (a SLURM compute node: it cannot be checked from here); otherwise stale."""
+    or a process on another host (a SLURM compute node: it cannot be checked from here); otherwise stale.
+
+    With ask_slurm (cmd_calibrate, before it deletes a folder), an owner on another host that recorded its
+    SLURM array task is asked about with sacct: an ended task (or this very task, requeued) is stale; when
+    sacct cannot tell, the owner counts as alive."""
     try:
         owner = read_json(folder / "owner.json")
         host, pid = owner["host"], int(owner["pid"])
     except (OSError, ValueError, KeyError, TypeError):
         return False
     if host != socket.gethostname():
-        return True
+        job, task = owner.get("slurm_job"), owner.get("slurm_task", "")
+        if not ask_slurm or not isinstance(job, str) or not job:
+            return True
+        task = task if isinstance(task, str) else ""
+        if _slurm_ids() == (job, task):
+            return False  # this task's own earlier attempt (a requeue): not a live owner
+        return slurm_active(job, task) is not False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -180,10 +236,14 @@ def status(root: Path = ROOT, write: bool = True) -> dict:
 
 # ---------------------------------------------------------------- model and objective
 
+_LOADED: dict = {}  # bundle root -> loaded Problem state, once per process (pool workers unpickle per chunk)
+
+
 class Problem:
     """The calibration problem of a bundle: simulate, predict and score fitted values.
 
-    Picklable (scipy workers != 1): only the bundle root is pickled; the model is re-imported lazily.
+    Picklable (scipy workers != 1): only the bundle root is pickled; the loaded state (spec, compare, model,
+    Observable) is cached per process in _LOADED, so a worker loads it once, not once per pool chunk.
     """
 
     def __init__(self, root: Path = ROOT):
@@ -199,6 +259,13 @@ class Problem:
     def _load(self) -> None:
         if self._ready:
             return
+        state = _LOADED.get(str(self.root))
+        if state is None:
+            state = _LOADED[str(self.root)] = self._load_state()
+        self.__dict__.update(state)
+        self._ready = True
+
+    def _load_state(self) -> dict:
         import numpy as np
         self.np = np
         self.spec = read_json(self.root / "calibration" / "spec.json")
@@ -221,7 +288,9 @@ class Problem:
             if f["name"] not in index:
                 raise ValueError(f"fitted {f['kind']} {f['name']!r} is not in the model")
         self.names = list(self.spec["times_model"])
-        self._ready = True
+        self.needed = {use: self.compare.needed(self.spec, use) for use in USES}
+        return {key: getattr(self, key) for key in ("np", "spec", "compare", "p_index", "s_index", "x_default",
+                                                    "y_default", "obs", "obs_names", "fit", "names", "needed")}
 
     # -- values
     def nominal(self) -> dict:
@@ -271,9 +340,9 @@ class Problem:
         return {obs_name: {t: float(obs.simulations[i, 0, j]) for j, t in enumerate(times)}
                 for i, obs_name in enumerate(self.obs_names)}
 
-    def simulate_all(self, fitted: dict) -> dict:
+    def simulate_all(self, fitted: dict, names=None) -> dict:
         sims = {}
-        for name in self.names:
+        for name in self.names if names is None else names:
             result = self.simulate(name, fitted)
             if result is not None:
                 sims[name] = result
@@ -282,7 +351,8 @@ class Problem:
     def evaluate(self, fitted: dict, use: str = "fit") -> tuple[float, dict, dict]:
         """(score, predictions, sims); use "all" sums the fit and hold-out scores (PENALTY if either is)."""
         self._load()
-        sims = self.simulate_all(fitted)
+        needed = getattr(self, "needed", None) or {u: self.compare.needed(self.spec, u) for u in USES}
+        sims = self.simulate_all(fitted, [name for name in self.names if name in needed[use]])
         predictions = self.compare.predict(self.spec, sims)
         if use == "all":
             scores = [self.compare.objective(self.spec, predictions, use=u) for u in ("fit", "holdout")]
@@ -341,6 +411,7 @@ def run_restart(root: Path, restart: int, seed: int, options: dict, workers: int
     deadline = start + cap_s if cap_s else None
     result = {"restart": restart, "seed": seed, "score": None, "status": "failed", "params": {},
               "wall_time_s": 0.0}
+    record = True  # False for an interrupt: no result.json, so the restart is rerun from its seed
     trace_path = out_dir / "trace.csv"
     try:
         import numpy as np
@@ -381,14 +452,17 @@ def run_restart(root: Path, restart: int, seed: int, options: dict, workers: int
         log(f"finished: {res.message} nit {res.nit} nfev {res.nfev}; score {score!r} status {result['status']}")
     except Exception as exc:  # noqa: BLE001 - recorded as a failed restart
         log(f"FAILED: {type(exc).__name__}: {exc}\n{traceback.format_exc()}")
-    except BaseException as exc:  # the selftest cap or an interrupt: record it, then let it propagate
-        log(f"STOPPED: {type(exc).__name__}: {exc}")
+    except BaseException as exc:  # the selftest cap (recorded as failed) or an interrupt (not recorded)
+        record = isinstance(exc, SelftestTimeout)
+        log(f"STOPPED: {type(exc).__name__}: {exc}" if record else
+            f"interrupted ({type(exc).__name__}): no result.json; a rerun starts this restart again")
         raise
     finally:
         result["wall_time_s"] = round(time.monotonic() - start, 3)
         if not trace_path.exists():
             trace_path.write_text("generation,best_score,elapsed_s\n", encoding="utf-8")
-        write_json(out_dir / "result.json", result)
+        if record:
+            write_json(out_dir / "result.json", result)
         log.close()
     return result
 
@@ -411,6 +485,13 @@ def effective_workers(workers: int) -> int:
     return workers
 
 
+def effective_parallel(settings: dict, requested: int | None = None) -> int:
+    """Restarts to run at a time: `requested` (or settings parallel), but 1 whenever one restart uses more
+    than one scipy worker (effective_workers != 1), so restarts never oversubscribe the cores."""
+    k = int(requested) if requested else int(settings["parallel"])
+    return 1 if effective_workers(int(settings["workers"])) != 1 else max(1, k)
+
+
 def cmd_calibrate(root: Path, restart: int) -> int:
     job = read_json(root / "job.json")
     settings = job["settings"]
@@ -422,9 +503,17 @@ def cmd_calibrate(root: Path, restart: int) -> int:
         print(f"restart {restart} already done (out/restart-{restart}/result.json); not rerun")
         return 0
     if out_dir.exists():
+        if _owner_alive(out_dir, ask_slurm=True):
+            print(f"error: restart {restart} is running (out/restart-{restart}/owner.json names a live owner); "
+                  "it is never deleted or started twice", file=sys.stderr)
+            return 3
         shutil.rmtree(out_dir)  # an interrupted (stale) attempt; start the restart again from its seed
     out_dir.mkdir(parents=True)
-    write_json(out_dir / "owner.json", {"host": socket.gethostname(), "pid": os.getpid(), "started_at": now()})
+    owner = {"host": socket.gethostname(), "pid": os.getpid(), "started_at": now()}
+    slurm = _slurm_ids()
+    if slurm:
+        owner.update(slurm_job=slurm[0], slurm_task=slurm[1])
+    write_json(out_dir / "owner.json", owner)
     _status_best_effort(root)
     result = run_restart(root, restart, settings["seeds"][restart - 1], settings["optimizer_options"],
                          effective_workers(settings["workers"]), out_dir)
@@ -448,9 +537,12 @@ def _read_params(path: Path, fit: list[dict]) -> dict:
     return {name: float(data[name]) for name in names}
 
 
-def prediction_rows(spec: dict, predictions: dict) -> dict:
+def prediction_rows(spec: dict, predictions: dict, use: str = "all") -> dict:
+    """The rows of `use` ("all": every row) with their data, target and prediction."""
     rows = {}
     for mid, m in sorted(spec["measurements"].items()):
+        if use != "all" and m["use"] != use:
+            continue
         rows[mid] = {"rule_id": m["rule_id"], "type": m["type"], "observable": m["observable"],
                      "condition": m["condition"], "time": m["time"], "dose": m["dose"], "use": m["use"],
                      "role": m["role"], "value": m["value"], "target": _finite_or_none(m["target"]),
@@ -464,7 +556,7 @@ def validate(root: Path, params: dict | None, use: str) -> dict:
     score, predictions, sims = problem.evaluate(fitted, use)
     return {"use": use, "params_source": "given" if params is not None else "nominal",
             "params": fitted, "score": float(score), "penalty": score >= problem.compare.PENALTY,
-            "predictions": prediction_rows(problem.spec, predictions)}
+            "predictions": prediction_rows(problem.spec, predictions, use)}
 
 
 def cmd_validate(root: Path, params_file: str | None, use: str, out: str | None) -> int:
@@ -522,7 +614,7 @@ def cmd_selftest(root: Path) -> int:
     start = time.monotonic()
     try:
         with _Cap(SELFTEST_CAP_S):
-            result = run_restart(root, 0, settings["seeds"][0], options, settings["workers"], out_dir,
+            result = run_restart(root, 0, settings["seeds"][0], options, 1, out_dir,  # checks the stack: 1 worker
                                  cap_s=SELFTEST_CAP_S)
             report["restart"] = result
             check = validate(root, None, "fit")
@@ -687,14 +779,17 @@ def cmd_collect(root: Path) -> int:
         best = min(ok, key=lambda r: (r["score"], r["restart"]))
         try:
             problem = Problem(root)
+            # use=fit only: hold-out rows (and hold-out-only times) stay unseen until score_holdout
             score, predictions, sims = problem.evaluate(best["params"], "fit")
-            rows = prediction_rows(problem.spec, predictions)
+            rows = prediction_rows(problem.spec, predictions, "fit")
+            keep = problem.compare.needed(problem.spec, "fit")
             write_json(stage / "predictions.json", {"best_restart": best["restart"], "params": best["params"],
                                                     "score_fit": _finite_or_none(score), "rows": rows})
             write_json(stage / "simulations.json", {
                 "best_restart": best["restart"], "time_model_unit": problem.spec["time_model_unit"],
-                "conditions": {name: {obs: [[t, _finite_or_none(v)] for t, v in values.items()]
-                                      for obs, values in by_obs.items()} for name, by_obs in sims.items()}})
+                "conditions": {name: {obs: [[t, _finite_or_none(v)] for t, v in values.items() if t in keep[name]]
+                                      for obs, values in by_obs.items()}
+                               for name, by_obs in sims.items() if name in keep}})
             log(f"best restart {best['restart']} score {score!r}")
         except Exception as exc:  # noqa: BLE001
             log(f"best-fit predictions failed: {type(exc).__name__}: {exc}")
@@ -740,6 +835,8 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--restart", type=int, required=True)
     sub.add_parser("collect")
     sub.add_parser("status")
+    k = sub.add_parser("parallel")
+    k.add_argument("--requested", type=int)
     e = sub.add_parser("env-report")
     e.add_argument("--uv-version", required=True)
     e.add_argument("--uv-platform", required=True)
@@ -756,6 +853,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_collect(ROOT)
     if args.command == "status":
         print(json.dumps(status(ROOT), indent=2))
+        return 0
+    if args.command == "parallel":
+        if args.requested is not None and args.requested < 1:
+            print("error: --requested must be >= 1", file=sys.stderr)
+            return 2
+        print(effective_parallel(read_json(ROOT / "job.json")["settings"], args.requested))
         return 0
     return cmd_env_report(ROOT, args)
 
