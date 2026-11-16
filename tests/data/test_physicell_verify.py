@@ -712,6 +712,23 @@ class ProjectionLineageTests(VerifyBase):
         self.invocation()
         self.assertTrue(ve.compute(self.root, PROJ, after)["passed"])
 
+    def test_stage_gate_bound_to_the_projection_design(self):
+        # PR #17 review 4587425869: the line-1 STAGE_GATE of a projection dispatch must name its design's MaBoSS
+        # upstream; standalone is refused for a design importing MaBoSS handoffs
+        after = self.export(invocation=False)
+        for first, reason in (('STAGE_GATE {"upstream_session_id": "maboss-unrelated", "outputs": ["A"]}',
+                               "upstream_session_id maboss-unrelated"),
+                              ('STAGE_GATE {"standalone_decision_id": "never-recorded", "outputs": ["zzz"]}',
+                               "may import no MaBoSS handoff")):
+            with self.subTest(gate=first):
+                path = self.invocation()
+                lines = path.read_text().splitlines()
+                path.write_text("\n".join([first, *lines[1:]]) + "\n")
+                with self.assertRaisesRegex(ValueError, f"lineage: no invocation record.*{reason}"):
+                    ve.compute(self.root, PROJ, after)
+        self.invocation()
+        self.assertTrue(ve.compute(self.root, PROJ, after)["passed"])
+
 
 if __name__ == "__main__":
     unittest.main()

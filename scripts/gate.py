@@ -577,29 +577,28 @@ PHYSICELL_FORMS = {"design": {"design", "sha256", "approval", "record_session_id
                    "projection": {"projection", "sha256", "approval", "record_session_id"}}
 
 
-def _maboss_sessions(design):
+def maboss_sessions(design):
     """The MaBoSS sessions (runs/boolean-dynamics-modeler/<session>/...) of a checked design's handoffs."""
     return sorted({PurePosixPath(item["maboss"]["handoff"]).parts[2] for item in design["intracellular"]})
 
 
-def _check_design_upstream(root, design, first_line):
-    """Bind a checked design's MaBoSS handoffs to the line-1 STAGE_GATE of the configurator brief.
+def design_upstream(design, stage_gate):
+    """Bind a checked design's MaBoSS handoffs to a STAGE_GATE (a stage_gate_form value or its check_task result).
 
     upstream_session_id: the design imports at least one handoff and every handoff lives under
     runs/boolean-dynamics-modeler/<that session>/ (the design check already proved each one an exported,
     reviewed and approved maboss-to-physicell handoff of its session, with gate.check). A design mixing several
     MaBoSS sessions is refused, naming them. standalone_decision_id: the design imports no MaBoSS handoff.
-    check_task resolves the STAGE_GATE; its result is returned (the dispatch hook reuses it).
+    The design alone decides (no record is read); ValueError otherwise.
     """
-    gate_result = check_task(root, "multicellular_configurator", first_line)
-    sessions = _maboss_sessions(design)
-    if "standalone_decision_id" in gate_result:
+    sessions = maboss_sessions(design)
+    if "standalone_decision_id" in stage_gate:
         if sessions:
-            raise ValueError(f"STAGE_GATE names standalone_decision_id {gate_result['standalone_decision_id']}, so the "
+            raise ValueError(f"STAGE_GATE names standalone_decision_id {stage_gate['standalone_decision_id']}, so the "
                              f"design may import no MaBoSS handoff, but it imports handoffs of MaBoSS session(s) "
                              f"{', '.join(sessions)}; dispatch it with that MaBoSS session's upstream_session_id STAGE_GATE")
-        return gate_result
-    anchor = gate_result["upstream_session_id"]
+        return
+    anchor = stage_gate["upstream_session_id"]
     if not sessions:
         raise ValueError(f"STAGE_GATE names MaBoSS upstream_session_id {anchor}, but the design imports no MaBoSS "
                          "handoff; a design without MaBoSS models is dispatched with a standalone_decision_id STAGE_GATE")
@@ -607,6 +606,13 @@ def _check_design_upstream(root, design, first_line):
         raise ValueError(f"design MaBoSS handoffs come from session(s) {', '.join(sessions)}, but STAGE_GATE names "
                          f"upstream_session_id {anchor}; every design handoff must be under "
                          f"runs/boolean-dynamics-modeler/{anchor}/")
+
+
+def _check_design_upstream(root, design, first_line):
+    """check_task resolves the line-1 STAGE_GATE of the configurator brief, then design_upstream binds the checked
+    design's MaBoSS handoffs to it; the check_task result is returned (the dispatch hook reuses it)."""
+    gate_result = check_task(root, "multicellular_configurator", first_line)
+    design_upstream(design, gate_result)
     return gate_result
 
 

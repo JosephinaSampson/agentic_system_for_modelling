@@ -284,12 +284,12 @@ class DictionaryTests(Base):
         lines = task.read_text().splitlines()
         payload = json.loads(lines[1][len("DATA_INPUT "):])
         digest = state.digest(self.root / REL)
-        self.assertTrue(lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest).endswith("task.txt"))
+        self.assertTrue(lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest, design=self.design).endswith("task.txt"))
         for bad in ({**payload, "extra": 1}, {k: v for k, v in payload.items() if k != "approval"}):
             with self.subTest(keys=sorted(bad)):
                 task.write_text("\n".join([lines[0], "DATA_INPUT " + json.dumps(bad), *lines[2:]]) + "\n")
                 with self.assertRaisesRegex(ValueError, "lineage: no invocation record"):
-                    lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest)
+                    lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest, design=self.design)
                 self.refused(self.good(), "lineage: no invocation record")
 
     def test_lineage_needs_a_stage_gate_a_real_approval_and_its_session(self):
@@ -319,10 +319,62 @@ class DictionaryTests(Base):
             with self.subTest(case=name):
                 task.write_text("\n".join([first, "DATA_INPUT " + json.dumps(value), *lines[2:]]) + "\n")
                 with self.assertRaisesRegex(ValueError, f"lineage: no invocation record.*{reason}"):
-                    lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest)
+                    lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest, design=self.design)
                 self.refused(self.good(), "lineage: no invocation record")
         task.write_text("\n".join(lines) + "\n")
-        self.assertTrue(lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest).endswith("task.txt"))
+        self.assertTrue(lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest, design=self.design).endswith("task.txt"))
+
+    def test_lineage_stage_gate_is_bound_to_the_design(self):
+        # PR #17 review 4587425869: a STAGE_GATE the hook would refuse for this design is not lineage
+        from scripts import state
+        from scripts.physicell import lineage
+        task = self.root / f"runs/multicellular-configurator/{STAGE_A}/invocation/agent-1/task.txt"
+        lines = task.read_text().splitlines()
+        digest = state.digest(self.root / REL)
+        cases = {"unrecorded standalone gate": ('STAGE_GATE {"standalone_decision_id": "never-recorded", '
+                                                '"outputs": ["zzz"]}', "standalone_decision_id never-recorded.*"
+                                                "may import no MaBoSS handoff"),
+                 "unrelated MaBoSS upstream": ('STAGE_GATE {"upstream_session_id": "maboss-unrelated", '
+                                               '"outputs": ["A"]}', "maboss-session.*upstream_session_id "
+                                               "maboss-unrelated")}
+        for name, (first, reason) in cases.items():
+            with self.subTest(case=name):
+                task.write_text("\n".join([first, *lines[1:]]) + "\n")
+                with self.assertRaisesRegex(ValueError, f"lineage: no invocation record.*{reason}"):
+                    lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest, design=self.design)
+                self.refused(self.good(), "lineage: no invocation record")
+        task.write_text("\n".join(lines) + "\n")
+        self.assertTrue(self.run_capture(self.good()).is_file())  # the design's own MaBoSS upstream passes
+
+    def test_standalone_lineage_needs_a_design_without_handoffs_and_the_record(self):
+        # PR #17 review 4587425869: standalone_decision_id only for a design importing no MaBoSS handoff, and only
+        # with a recorded standalone_approval (gate.standalone)
+        from scripts import state
+        from scripts.physicell import lineage
+        bare = copy.deepcopy(self.design)
+        bare["intracellular"] = []
+        if bare["basis"] is None:
+            bare["session"] = "p8"  # a new configuration's anchor is its purpose
+        rel = "runs/orchestrator/p8/physicell_design.json"
+        self.write(bare, rel)
+        task = dispatch_design(self.root, session="mc-stage-sa", rel=rel)
+        lines = task.read_text().splitlines()
+        digest = state.digest(self.root / rel)
+        with self.assertRaisesRegex(ValueError, "imports no MaBoSS handoff"):  # the fixture's upstream gate
+            lineage.dispatched_with(self.root, "mc-stage-sa", "design", rel, digest, design=bare)
+        gate_line = 'STAGE_GATE {"standalone_decision_id": "sa-mc", "outputs": ["tissue"]}'
+        task.write_text("\n".join([gate_line, *lines[1:]]) + "\n")
+        with self.assertRaisesRegex(ValueError, "missing explicit standalone authorization record"):
+            lineage.dispatched_with(self.root, "mc-stage-sa", "design", rel, digest, design=bare)
+        source = self.root / "inputs/tissue.txt"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("researcher tissue model\n")
+        state.update(self.root, "record", {
+            "id": "sa-mc", "kind": "standalone_approval", "stage": "multicellular", "outputs": ["tissue"],
+            "artifact": {"path": "inputs/tissue.txt", "sha256": state.digest(source)},
+            "approved_by": "researcher", "authorization": "researcher: build my tissue model"})
+        self.assertTrue(lineage.dispatched_with(self.root, "mc-stage-sa", "design", rel, digest,
+                                                design=bare).endswith("task.txt"))
 
     def test_lineage_forms_are_the_gate_forms(self):
         # PR #17 review 4586112855: one definition of the DATA_INPUT forms, shared with the gate
@@ -335,7 +387,7 @@ class DictionaryTests(Base):
         from scripts.physicell import lineage
         for bad in ("../mc-stage-a", "a/b", "", "..", None):
             with self.subTest(session=bad), self.assertRaisesRegex(ValueError, "identifier"):
-                lineage.dispatched_with(self.root, bad, "design", REL, "0" * 64)
+                lineage.dispatched_with(self.root, bad, "design", REL, "0" * 64, design=self.design)
 
     def test_tool_calls_must_sit_beside_the_dispatched_task(self):
         # review M2: the parsed tool_calls.json is in the invocation folder whose task.txt has the design line

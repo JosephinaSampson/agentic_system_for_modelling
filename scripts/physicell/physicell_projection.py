@@ -296,7 +296,7 @@ class _Checker(pd.Citations):
         self.design = design  # exactly the bytes the projection pins (digest == ref["sha256"]), checked and approved
         if self.session is not None:
             try:  # the design's session is a lineage anchor: the capture's session must have been built from it
-                lineage.dispatched_with(self.root, self.session, "design", ref["path"], digest)
+                lineage.dispatched_with(self.root, self.session, "design", ref["path"], digest, design=design)
             except (ValueError, OSError) as exc:
                 self.error(f"design {ref['path']}: the capture's session {self.session} was not dispatched with it: "
                            f"{exc}")

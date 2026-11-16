@@ -451,7 +451,8 @@ def capture_dictionary(root: Path, invocation_rel: str, capture_rel: str, design
     # parsed tool_calls.json is the record of that very dispatch (review M2: same invocation folder)
     folder = PurePosixPath(invocation).parent.as_posix()
     try:
-        lineage.dispatched_with(root, session, "design", design_rel, design_sha, PurePosixPath(invocation).parts[4])
+        lineage.dispatched_with(root, session, "design", design_rel, design_sha, PurePosixPath(invocation).parts[4],
+                                design=design)
     except ValueError as exc:
         raise ValueError(f"lineage: the invocation folder {folder} has no task.txt with the design's DATA_INPUT line "
                          f"(its tool_calls.json must be the record of the dispatched run): {exc}") from exc
