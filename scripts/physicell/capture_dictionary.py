@@ -9,8 +9,9 @@ physicell_dictionary.json next to the design (write-new, never overwrites):
 
 Server order is kept (nothing sorted); exact repeats are dropped. Only successful list calls count, and only
 those whose tool_use comes after the tool_result of the last successful structure-changing call of the session.
-A structure-changing tool_use without a result refuses the capture; one whose result is an error is ignored (the
-server rejected it, so the configuration is unchanged). Items are {name, type} from either result form. Per-cell behaviors come only from calls
+Structure-changing is every physicell-agent tool outside the explicit READ_ONLY set (fail closed: an unknown tool is a
+boundary). A structure-changing tool_use without a result refuses the capture; one whose result is an error is
+ignored (the server rejected it, so the configuration is unchanged). Items are {name, type} from either result form. Per-cell behaviors come only from calls
 whose cell_type equals that cell definition. Calls naming another session are ignored; calls without a session id
 belong to the invocation's session. The invocation session must be the capture's session and must have been
 dispatched with this design: the task.txt in the same invocation folder as the tool_calls.json has the design's
@@ -37,8 +38,35 @@ from scripts.physicell import settings_xml as sx  # noqa: E402
 
 PREFIX = "mcp__physicell-agent__"
 SIGNALS, BEHAVIORS = "list_all_available_signals", "list_all_available_behaviors"
-STRUCTURE = ("add_single_cell_type", "add_single_substrate", "import_maboss_handoff",
-             "load_xml_configuration", "add_physiboss_model")
+# The PhysiCell tools that never change the configuration the signal/behavior lists are derived from (its cell
+# types, substrates and custom variables). Every other physicell-agent tool, including any a later server adds, is a
+# structural boundary: list calls before its result do not count (fail closed). Derived from server 2.5.2
+# (mcp_biomodelling_servers/PhysiCell/server.py), never from a tool's name:
+#   - the tools annotated _READ_ONLY_TOOL (readOnlyHint): session and artifact listings, status, summaries, help,
+#     validate_xml_file (parses a file into a throwaway config), the MaBoSS context, the cycle models and the
+#     signal and behavior lists themselves;
+#   - the two exports (annotated idempotent, not read-only, because they write files):
+#     export_cell_rules_csv writes the CSV and registers its ruleset (rules are not in the lists);
+#     export_xml_configuration runs generate_xml, which can add the library default substrate only to a
+#     configuration with no substrate at all, and after create_simulation_domain (which materialises it) or
+#     add_single_substrate there always is one; a basis without substrates gets the design's substrates before
+#     any list call, and conformance refuses any substrate the design does not declare.
+# Every other idempotent tool stays a boundary: set_default_session (moves calls without a session id to another
+# session), set_maboss_context, analyze_loaded_configuration, analyze_biological_scenario, configure_* and
+# set_substrate_interaction; so do the destructive ones (create_session, create_simulation_domain,
+# load_xml_configuration, add_*, import_maboss_handoff, apply_physiboss_mutation, delete_session,
+# clean_generated_files).
+READ_ONLY = frozenset({
+    "list_sessions", "list_artifact_sessions", "get_workflow_status", "get_maboss_context", "validate_xml_file",
+    "list_loaded_components", "get_available_cycle_models", SIGNALS, BEHAVIORS, "get_simulation_summary",
+    "list_generated_files", "get_help",
+    "export_xml_configuration", "export_cell_rules_csv",
+})
+
+
+def structural(tool: str) -> bool:
+    """A boundary: any physicell-agent tool outside READ_ONLY (unknown tools included)."""
+    return tool not in READ_ONLY
 ITEM = re.compile(r"^- \*\*(.+?)\*\*: ?(.*)$")
 HEADING = re.compile(r"^###\s+(.+?)\s*$")
 
@@ -137,7 +165,7 @@ def _calls(blocks: list, session: str) -> list[dict]:
         tool = name[len(PREFIX):]
         given = use.get("input") if isinstance(use.get("input"), dict) else {}
         if not isinstance(use.get("id"), str) or use["id"] not in results:
-            if tool in STRUCTURE and given.get("session_id") in (None, session):
+            if structural(tool) and given.get("session_id") in (None, session):
                 raise ValueError(f"structure-changing call {tool} (id {use.get('id')}) has no result; "
                                  "the configuration state is unknown")
             continue
@@ -155,9 +183,9 @@ def _calls(blocks: list, session: str) -> list[dict]:
 
 def collect(blocks: list, session: str, cells: list[str]) -> tuple[list, dict]:
     calls = _calls(blocks, session)
-    boundary = max((c["result"] for c in calls if c["tool"] in STRUCTURE), default=-1)
+    boundary = max((c["result"] for c in calls if structural(c["tool"])), default=-1)
     live = [c for c in calls if c["use"] > boundary]
-    after = "after the last structure-changing call"
+    after = "after the last structure-changing call (any PhysiCell tool outside the read-only set)"
     errors, signals, behaviors = [], None, {}
     mine = [c for c in live if c["tool"] == SIGNALS]
     if mine:

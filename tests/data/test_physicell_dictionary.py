@@ -12,6 +12,7 @@ from scripts.capture.record_physicell_config import record_physicell
 from tests.data.test_physicell_design import REL, STAGE_A, Base, built_capture, dispatch_design
 
 P = "mcp__physicell-agent__"
+SIGNALS_TOOL, BEHAVIORS_TOOL = "list_all_available_signals", "list_all_available_behaviors"
 FIXTURE = Path(__file__).parent / "fixtures" / "physicell" / "tool_calls.json"
 INVOCATION = f"runs/multicellular-configurator/{STAGE_A}/invocation/agent-1/tool_calls.json"
 SIGNALS = [{"name": "oxygen", "signal_type": "substrate", "description": "o2", "requires": []},
@@ -147,6 +148,32 @@ class DictionaryTests(Base):
     def test_list_before_add_physiboss_model_refused(self):
         content = self.good() + blocks(call(30, "add_physiboss_model", {"session_id": STAGE_A}, "ok"))
         self.refused(content, "after the last structure-changing")
+
+    def test_list_before_create_simulation_domain_refused(self):
+        # PR #17 review 4586111592: (re)creating the domain inserts the library default substrate
+        content = self.good() + blocks(call(30, "create_simulation_domain", {"domain_x": 200, "domain_y": 200}, "ok"))
+        self.refused(content, "after the last structure-changing")
+
+    def test_unknown_tool_is_a_boundary(self):
+        # fail closed: a tool outside the read-only set (e.g. one a later server adds) is a structural boundary
+        for tool in ("add_custom_variable", "set_default_session", "analyze_biological_scenario"):
+            with self.subTest(tool=tool):
+                self.refused(self.good() + blocks(call(30, tool, {}, "ok")), "after the last structure-changing")
+        dangling = [{"type": "tool_use", "id": "x9", "name": P + "add_custom_variable", "input": {}}]
+        self.refused(self.good() + dangling, "no result")
+
+    def test_read_only_and_export_tools_are_not_boundaries(self):
+        tools = sorted(cd.READ_ONLY - {SIGNALS_TOOL, BEHAVIORS_TOOL})  # a later list call would replace the lists
+        after = blocks(*[call(30 + n, tool, {}, "ok") for n, tool in enumerate(tools)])
+        self.assertTrue(self.run_capture(self.good() + after).is_file())
+
+    def test_read_only_set_is_explicit(self):
+        # server 2.5.2: the readOnlyHint tools, plus the two exports (they write files, never the lists' structure)
+        self.assertEqual(cd.READ_ONLY, frozenset({
+            "list_sessions", "list_artifact_sessions", "get_workflow_status", "get_maboss_context",
+            "validate_xml_file", "list_loaded_components", "get_available_cycle_models", SIGNALS_TOOL, BEHAVIORS_TOOL,
+            "get_simulation_summary", "list_generated_files", "get_help", "export_xml_configuration",
+            "export_cell_rules_csv"}))
 
     def test_failed_structure_change_does_not_count(self):
         content = self.good() + blocks(call(30, "add_physiboss_model", {}, "nope", error=True))

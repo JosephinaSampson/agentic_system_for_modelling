@@ -104,7 +104,8 @@ projection, its capture's session).
 Pass every tool argument explicitly from the design: domain, substrate parameters and Dirichlet settings, cycle models. Never use a tool default or a typical value. If the design lacks a value a tool requires, return blocked. Add no rule, link or other value.
 The orchestrator compares the stage-A capture with the design before anything else uses it.
 
-- **Design.** Apply exactly the approved design: build it as above. Then, after the last structural call, call the
+- **Design.** Apply exactly the approved design: build it as above. Then, after the last structural call (any tool
+  other than the read-only listings, status and help tools and the exports), call the
   discovery tools for the signal list (`list_all_available_signals()`) and for every cell definition's behavior
   list (`list_all_available_behaviors(cell_type=...)`), so the invocation record holds them: the orchestrator
   records the dictionary from that record, not from your report. Then export.
