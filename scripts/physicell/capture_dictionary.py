@@ -45,12 +45,16 @@ SIGNALS, BEHAVIORS = "list_all_available_signals", "list_all_available_behaviors
 #   - the tools annotated _READ_ONLY_TOOL (readOnlyHint): session and artifact listings, status, summaries, help,
 #     validate_xml_file (parses a file into a throwaway config), the MaBoSS context, the cycle models and the
 #     signal and behavior lists themselves;
-#   - the two exports (annotated idempotent, not read-only, because they write files):
+#   - the three exports (not annotated read-only, because they write files):
 #     export_cell_rules_csv writes the CSV and registers its ruleset (rules are not in the lists);
 #     export_xml_configuration runs generate_xml, which can add the library default substrate only to a
 #     configuration with no substrate at all, and after create_simulation_domain (which materialises it) or
 #     add_single_substrate there always is one; a basis without substrates gets the design's substrates before
-#     any list call, and conformance refuses any substrate the design does not declare.
+#     any list call, and conformance refuses any substrate the design does not declare;
+#     export_configuration_bundle (tools/bundle.py -> services/bundle.export_bundle, NON_IDEMPOTENT because each
+#     call writes a new ZIP) works on deepcopy(session.config): it serialises the copy, adds the generated ruleset to
+#     the copy only, reads the input files and the MaBoSS handoff manifests, and writes the ZIP under the session's
+#     artifact directory; the session's configuration is never assigned or mutated.
 # Every other idempotent tool stays a boundary: set_default_session (moves calls without a session id to another
 # session), set_maboss_context, analyze_loaded_configuration, analyze_biological_scenario, configure_* and
 # set_substrate_interaction; so do the destructive ones (create_session, create_simulation_domain,
@@ -60,7 +64,7 @@ READ_ONLY = frozenset({
     "list_sessions", "list_artifact_sessions", "get_workflow_status", "get_maboss_context", "validate_xml_file",
     "list_loaded_components", "get_available_cycle_models", SIGNALS, BEHAVIORS, "get_simulation_summary",
     "list_generated_files", "get_help",
-    "export_xml_configuration", "export_cell_rules_csv",
+    "export_xml_configuration", "export_cell_rules_csv", "export_configuration_bundle",
 })
 
 

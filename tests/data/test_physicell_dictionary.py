@@ -173,7 +173,17 @@ class DictionaryTests(Base):
             "list_sessions", "list_artifact_sessions", "get_workflow_status", "get_maboss_context",
             "validate_xml_file", "list_loaded_components", "get_available_cycle_models", SIGNALS_TOOL, BEHAVIORS_TOOL,
             "get_simulation_summary", "list_generated_files", "get_help", "export_xml_configuration",
-            "export_cell_rules_csv"}))
+            "export_cell_rules_csv", "export_configuration_bundle"}))
+
+    def test_lists_then_bundle_export_record_the_dictionary(self):
+        # PR #17 review 4587426219: export_configuration_bundle (server 2.5.2) packages a deep copy of the
+        # configuration into a ZIP; it changes nothing the lists are derived from
+        content = self.good() + blocks(call(30, "export_xml_configuration", {"filename": "PhysiCell_settings.xml"},
+                                            "ok"),
+                                       call(31, "export_configuration_bundle", {"working_directory": "/w"},
+                                            "bundle_0.zip"))
+        out = json.loads(self.run_capture(content).read_text())
+        self.assertEqual([s["name"] for s in out["signals"]], ["oxygen", "pressure"])
 
     def test_failed_structure_change_does_not_count(self):
         content = self.good() + blocks(call(30, "add_physiboss_model", {}, "nope", error=True))

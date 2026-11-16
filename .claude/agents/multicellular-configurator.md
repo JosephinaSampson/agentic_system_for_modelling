@@ -105,7 +105,8 @@ Pass every tool argument explicitly from the design: domain, substrate parameter
 The orchestrator compares the stage-A capture with the design before anything else uses it.
 
 - **Design.** Apply exactly the approved design: build it as above. Then, after the last structural call (any tool
-  other than the read-only listings, status and help tools and the exports), call the
+  other than the read-only listings, status and help tools and the three exports: `export_xml_configuration`,
+  `export_cell_rules_csv` and `export_configuration_bundle`), call the
   discovery tools for the signal list (`list_all_available_signals()`) and for every cell definition's behavior
   list (`list_all_available_behaviors(cell_type=...)`), so the invocation record holds them: the orchestrator
   records the dictionary from that record, not from your report. Then export.

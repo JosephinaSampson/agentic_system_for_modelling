@@ -100,7 +100,8 @@ outline:
   capture and design bindings, signals, per-cell behaviors, `source_sha256` of `tool_calls.json`.
   Only list calls after the last structure-changing call's result count. Structure-changing is every
   PhysiCell tool outside an explicit read-only set (`capture_dictionary.READ_ONLY`, from server 2.5.2:
-  the `readOnlyHint` tools plus `export_xml_configuration` and `export_cell_rules_csv`), so an unknown or
+  the `readOnlyHint` tools plus the exports `export_xml_configuration`, `export_cell_rules_csv` and
+  `export_configuration_bundle`, which packages a copy of the configuration), so an unknown or
   newly added tool is a boundary (fail closed).
 - **Projection** (`kind: physicell_projection`): `capture`, `dictionary`, `design` (with its
   approval), `sources`, `data`, `entries`, `unmapped`. Entry kinds: `physiboss_input`,
