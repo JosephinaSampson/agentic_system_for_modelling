@@ -297,12 +297,8 @@ def require_proposal_job(root: Path, rel: str, proposal: dict) -> dict:
     return job
 
 
-def _physicell_design_facts(root: Path, rel: str, sha256: str) -> tuple[str | None, list]:
-    """(session anchor, cell definition and substrate names) of a physicell_design.json, tolerant of shape: the
-    basis capture's session, else the purpose <p> of runs/orchestrator/<p>/... (a lineage anchor).
-
-    The bytes are read once; their digest must equal `sha256` and the facts come from those same bytes.
-    """
+def _read_bound_json(root: Path, rel: str, sha256: str) -> dict:
+    """The JSON object of `rel`, read once: its digest must equal `sha256` and the object comes from those bytes."""
     from scripts.data.common import strict_json
     raw = _state().artifact(Path(root), rel).read_bytes()
     if hashlib.sha256(raw).hexdigest() != sha256:
@@ -313,6 +309,12 @@ def _physicell_design_facts(root: Path, rel: str, sha256: str) -> tuple[str | No
         raise ValueError(f"cannot read {rel}: {exc}") from None
     if not isinstance(data, dict):
         raise ValueError(f"{rel} must be a JSON object")
+    return data
+
+
+def _physicell_design_facts(rel: str, data: dict) -> tuple[str | None, list]:
+    """(session anchor, cell definition and substrate names) of a physicell_design.json, tolerant of shape: the
+    basis capture's session, else the purpose <p> of runs/orchestrator/<p>/... (a lineage anchor)."""
     basis = data.get("basis")
     capture = basis.get("capture") if isinstance(basis, dict) else None
     parts = capture.split("/") if isinstance(capture, str) else []
@@ -327,43 +329,9 @@ def _physicell_design_facts(root: Path, rel: str, sha256: str) -> tuple[str | No
     return session, names
 
 
-def require_physicell_design_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
-    """The physicell_design stage_approval of exactly this physicell_design.json path and sha256.
-
-    The record must pass `state.validate_record`; session_id is the PhysiCell session of the design's basis
-    capture (for a new configuration, the design's purpose <p>: a lineage anchor) and outputs are exactly the cell
-    definition and substrate names. This binds the approval to the bytes; run
-    `scripts/physicell/physicell_design.py check` and have it pass before the researcher approves.
-    """
-    record = _require_artifact_approval(root, record_id, "physicell_design", rel, sha256)
-    _state().validate_record(Path(root), record)
-    session, names = _physicell_design_facts(root, rel, sha256)
-    if record.get("session_id") != session:
-        raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
-                         f"but the design's session anchor is {session!r}")
-    outputs = record.get("outputs")
-    if not isinstance(outputs, list) or len(outputs) != len(set(outputs)) or set(outputs) != set(names) \
-            or len(names) != len(set(names)):
-        raise ValueError(f"decision {record_id} outputs must equal the cell definition and substrate names "
-                         f"of the design: {sorted(set(names))}")
-    return record
-
-
-def _physicell_projection_facts(root: Path, rel: str, sha256: str) -> tuple[str | None, list]:
-    """(PhysiCell session of the projection's capture, entry ids) of a physicell_projection.json, tolerant of shape.
-
-    The bytes are read once; their digest must equal `sha256` and the facts come from those same bytes.
-    """
-    from scripts.data.common import strict_json
-    raw = _state().artifact(Path(root), rel).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != sha256:
-        raise ValueError(f"{rel} changed during approval check (sha256 mismatch)")
-    try:
-        data = strict_json(raw)
-    except (ValueError, RecursionError) as exc:
-        raise ValueError(f"cannot read {rel}: {exc}") from None
-    if not isinstance(data, dict):
-        raise ValueError(f"{rel} must be a JSON object")
+def _physicell_projection_facts(rel: str, data: dict) -> tuple[str | None, list]:
+    """(PhysiCell session of the projection's capture, entry ids) of a physicell_projection.json, tolerant of
+    shape."""
     capture = data.get("capture")
     path = capture.get("path") if isinstance(capture, dict) else None
     parts = path.split("/") if isinstance(path, str) else []
@@ -373,6 +341,47 @@ def _physicell_projection_facts(root: Path, rel: str, sha256: str) -> tuple[str 
     return session, ids
 
 
+def _require_physicell_approval(stage: str, facts_fn, what: tuple[str, str]):
+    """The require_<stage>_approval check: the `stage` stage_approval of exactly this path and sha256, validated
+    (state.validate_record), whose session_id is the file's session and whose outputs are exactly its names.
+    `facts_fn(rel, data)` gives (session, names) from the bytes read once (_read_bound_json); `what` words the
+    refusals: (how the file's session is named, what the outputs must equal)."""
+    session_words, outputs_words = what
+
+    def require(root: Path, record_id: str, rel: str, sha256: str) -> dict:
+        record = _require_artifact_approval(root, record_id, stage, rel, sha256)
+        _state().validate_record(Path(root), record)
+        session, names = facts_fn(rel, _read_bound_json(root, rel, sha256))
+        if record.get("session_id") != session:
+            raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
+                             f"but {session_words} {session!r}")
+        outputs = record.get("outputs")
+        if not isinstance(outputs, list) or len(outputs) != len(set(outputs)) or set(outputs) != set(names) \
+                or len(names) != len(set(names)):
+            raise ValueError(f"decision {record_id} outputs must equal {outputs_words}: {sorted(set(names))}")
+        return record
+    return require
+
+
+_require_physicell_design = _require_physicell_approval(
+    "physicell_design", _physicell_design_facts,
+    ("the design's session anchor is", "the cell definition and substrate names of the design"))
+_require_physicell_projection = _require_physicell_approval(
+    "physicell_projection", _physicell_projection_facts,
+    ("the projection's capture is of PhysiCell session", "the entry ids of the projection"))
+
+
+def require_physicell_design_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
+    """The physicell_design stage_approval of exactly this physicell_design.json path and sha256.
+
+    The record must pass `state.validate_record`; session_id is the PhysiCell session of the design's basis
+    capture (for a new configuration, the design's purpose <p>: a lineage anchor) and outputs are exactly the cell
+    definition and substrate names. This binds the approval to the bytes; run
+    `scripts/physicell/physicell_design.py check` and have it pass before the researcher approves.
+    """
+    return _require_physicell_design(root, record_id, rel, sha256)
+
+
 def require_physicell_projection_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
     """The physicell_projection stage_approval of exactly this physicell_projection.json path and sha256.
 
@@ -380,14 +389,4 @@ def require_physicell_projection_approval(root: Path, record_id: str, rel: str, 
     and outputs are exactly the entry ids. This binds the approval to the bytes; run
     `scripts/physicell/physicell_projection.py check` and have it pass before the researcher approves.
     """
-    record = _require_artifact_approval(root, record_id, "physicell_projection", rel, sha256)
-    _state().validate_record(Path(root), record)
-    session, ids = _physicell_projection_facts(root, rel, sha256)
-    if record.get("session_id") != session:
-        raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
-                         f"but the projection's capture is of PhysiCell session {session!r}")
-    outputs = record.get("outputs")
-    if not isinstance(outputs, list) or len(outputs) != len(set(outputs)) or set(outputs) != set(ids) \
-            or len(ids) != len(set(ids)):
-        raise ValueError(f"decision {record_id} outputs must equal the entry ids of the projection: {sorted(set(ids))}")
-    return record
+    return _require_physicell_projection(root, record_id, rel, sha256)

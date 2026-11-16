@@ -197,6 +197,41 @@ class NonTextJsonTests(ProjectionBase):
         self.assertIn("variant_of ['tumor']", err.getvalue())
 
 
+class PhysiCellApprovalMessageTests(ProjectionBase):
+    """The physicell_design / physicell_projection approval refusals (pinned across the PR #17 review 4586113631
+    refactor of approvals.py)."""
+
+    def approve(self, record_id, stage, rel, session, outputs):
+        state.update(self.root, "record", {
+            "id": record_id, "kind": "stage_approval", "session_id": session, "stage": stage, "outputs": outputs,
+            "approved_by": "researcher", "authorization": "approved",
+            "artifact": {"path": rel, "sha256": sha(self.root / rel)}})
+
+    def test_design_approval_refusals(self):
+        names = ["default", "tumor", "tumor_hypoxic", "oxygen", "drug"]
+        self.approve("d-session", "physicell_design", REL, "other", names)
+        with self.assertRaisesRegex(ValueError, "^decision d-session approves session 'other', but the design's "
+                                                "session anchor is 'mc-session-1'$"):
+            approvals.require_physicell_design_approval(self.root, "d-session", REL, self.design_sha)
+        self.approve("d-outputs", "physicell_design", REL, SESSION, names[:2])
+        with self.assertRaisesRegex(ValueError, "^decision d-outputs outputs must equal the cell definition and "
+                                                r"substrate names of the design: \['default', 'drug', "):
+            approvals.require_physicell_design_approval(self.root, "d-outputs", REL, self.design_sha)
+        self.assertEqual(approvals.require_physicell_design_approval(self.root, "design-1", REL,
+                                                                     self.design_sha)["id"], "design-1")
+
+    def test_projection_approval_refusals(self):
+        path = self.write_projection(self.projection())
+        self.approve("p-session", "physicell_projection", PROJ, "other", ["in1", "out1", "rule1", "set1"])
+        with self.assertRaisesRegex(ValueError, "^decision p-session approves session 'other', but the projection's "
+                                                "capture is of PhysiCell session 'mc-stage-a'$"):
+            approvals.require_physicell_projection_approval(self.root, "p-session", PROJ, sha(path))
+        self.approve("p-outputs", "physicell_projection", PROJ, STAGE_A, ["in1"])
+        with self.assertRaisesRegex(ValueError, "^decision p-outputs outputs must equal the entry ids of the "
+                                                r"projection: \['in1', 'out1', 'rule1', 'set1'\]$"):
+            approvals.require_physicell_projection_approval(self.root, "p-outputs", PROJ, sha(path))
+
+
 class NameTests(ProjectionBase):
     def test_unknown_signal_lists_close_matches(self):
         data, entry = self.entry("in1")
