@@ -198,9 +198,13 @@ PHYSICELL_DATA_RULES = (
     "the orchestrator registers it with `Derived from` = `record_session_id`", "Never infer units",
     "take names and values only from the verified files named on the `DATA_INPUT` line",
     "Never re-add a captured configuration's rules by hand; if the captured configuration has a rules CSV, return blocked.",
+    "for a projection, also the design its `design.path` names and the MaBoSS handoff manifests that design lists",
+    "Return `blocked` if a MaBoSS handoff manifest the design names is missing or fails `import_maboss_handoff`'s "
+    "verification.",
 )
 # Ruling T5-e: a projection is applied by replaying its design in a new session, never by loading its capture.
-PHYSICELL_STALE = ("for every projection", "projection's `capture.path`", "On the loaded capture", "on the loaded capture")
+PHYSICELL_STALE = ("for every projection", "projection's `capture.path`", "On the loaded capture", "on the loaded capture",
+                   "load the captured configuration's packaged XML")
 REVISION_RULE = "return `blocked` unless the session's current revision equals `proposal.model.revision`"
 
 

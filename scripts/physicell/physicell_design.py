@@ -89,9 +89,15 @@ def _basis_facts(root: Path, capture_rel: str) -> dict:
 
 
 def _basis_input_files(root: Path, capture_rel: str) -> list:
-    """The dependency paths (package/config/...) of a capture already verified by settings_xml.capture."""
+    """The dependency paths (package/config/...) of a capture already verified by settings_xml.capture.
+
+    settings_xml.capture refuses a capture.json whose `dependencies` is not a list of {path, sha256, ...}; the file
+    is read again here, so a missing or malformed list is refused again as a ValueError (the basis error path)."""
     manifest = strict_json((Path(root) / capture_rel / "capture.json").read_bytes())
-    return [dep["path"] for dep in manifest["dependencies"]]
+    deps = manifest.get("dependencies") if isinstance(manifest, dict) else None
+    if not isinstance(deps, list) or not all(isinstance(d, dict) and isinstance(d.get("path"), str) for d in deps):
+        raise ValueError("capture manifest dependencies must be a list of {path, ...}")
+    return [dep["path"] for dep in deps]
 
 
 def write_new(root: Path, path: Path, text: str) -> None:

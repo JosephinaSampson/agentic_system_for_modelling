@@ -61,8 +61,9 @@ after `STAGE_GATE`, names an approved `physicell_design.json` (stage A) or
 - `record_session_id` is a lineage anchor, never a live session (MCP sessions end with each run).
   Create a new PhysiCell session for either form. Never pass `record_session_id` to any tool.
   Report the new full session ID; the orchestrator registers it with `Derived from` = `record_session_id`.
-- Read only the verified file; for a projection, also the design its `design.path` names;
-  for a design, also the handoff manifests it lists.
+- Read only the verified file; for a design, also the MaBoSS handoff manifests it lists;
+  for a projection, also the design its `design.path` names and the MaBoSS handoff manifests that design lists.
+  Return `blocked` if a MaBoSS handoff manifest the design names is missing or fails `import_maboss_handoff`'s verification.
   Never infer units; take names and values only from the verified files named on the `DATA_INPUT` line.
 - The server (2.5.2) cannot reload a captured rules CSV or other input files into a new session.
   Never re-add a captured configuration's rules by hand; if the captured configuration has a rules CSV, return blocked.

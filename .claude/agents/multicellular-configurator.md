@@ -73,8 +73,9 @@ approval's PhysiCell session.
 - MCP sessions end with each run: `record_session_id` is a lineage anchor, never a live session.
   Create a new PhysiCell session for either form. Never pass `record_session_id` to any tool.
   Report the new full session ID; the orchestrator registers it with `Derived from` = `record_session_id`.
-- Read only the file that line names; for a projection, also the design its `design.path` names; for a design,
-  also the MaBoSS handoff manifests it lists.
+- Read only the file that line names; for a design, also the MaBoSS handoff manifests it lists;
+  for a projection, also the design its `design.path` names and the MaBoSS handoff manifests that design lists.
+  Return `blocked` if a MaBoSS handoff manifest the design names is missing or fails `import_maboss_handoff`'s verification.
 - Never infer units; take names and values only from the verified files named on the `DATA_INPUT` line,
   never from prose elsewhere in the brief.
 - The PhysiCell server (2.5.2) cannot reload a captured rules CSV or other input files into a new session, so the

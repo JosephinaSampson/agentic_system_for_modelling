@@ -276,6 +276,18 @@ class CheckTests(Base):
         self.assertRefused(data, INPUT_FILES_REFUSAL)
         self.assertRefused(data, "package/config/tumor.bnd")
 
+    def test_basis_input_files_refuses_a_missing_dependency_list(self):
+        self.assertEqual(pd._basis_input_files(self.root, self.capture), [])
+        design = self.complete()
+        manifest = self.root / self.capture / "capture.json"
+        data = json.loads(manifest.read_text())
+        for broken in ({k: v for k, v in data.items() if k != "dependencies"}, {**data, "dependencies": [1]}):
+            with self.subTest(broken=sorted(broken)):
+                manifest.write_text(json.dumps(broken))
+                with self.assertRaisesRegex(ValueError, "dependencies"):
+                    pd._basis_input_files(self.root, self.capture)
+                self.assertRefused(design, "basis: ")  # settings_xml.capture refuses it first
+
     def test_load_and_check_returns_hash_of_bytes_read(self):
         path = self.write(self.complete())
         data, digest, errors = pd.load_and_check(self.root, REL)
