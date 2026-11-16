@@ -52,16 +52,67 @@ def link_element(entry):
     return element
 
 
+def placeholder_rules(xml_root):
+    """The server's stage-A cell_rules (probe, server 2.5.2): a disabled placeholder ruleset and empty settings."""
+    rules = ET.SubElement(xml_root, "cell_rules")
+    rulesets = ET.SubElement(rules, "rulesets")
+    placeholder = ET.SubElement(rulesets, "ruleset", {"protocol": "CBHG", "version": "3.0", "format": "csv",
+                                                      "enabled": "false"})
+    ET.SubElement(placeholder, "folder").text = "./config"
+    ET.SubElement(placeholder, "filename").text = "cell_rules.csv"
+    ET.SubElement(rules, "settings")
+
+
 class VerifyBase(ProjectionBase):
-    """The stage-A capture (cap-2 of mc-session-1, no rules) and an approved-shape projection over it; `export`
-    simulates the stage-B configurator run: a new session's capture with the applied entries and its invocation."""
+    """The stage-A capture (cap-2 of mc-session-1, the server's placeholder cell_rules, no enabled rules) and an
+    approved-shape projection over it; `export` simulates the stage-B configurator run: a new session's capture with
+    the applied entries and its invocation."""
+
+    def edit_capture(self, xml_root):
+        placeholder_rules(xml_root)
 
     def setUp(self):
         super().setUp()
         self.write_projection(self.projection())
 
     def link_cell(self, xml_root, cell):
-        return xml_root.find(f"cell_definitions/cell_definition[@name='{cell}']/phenotype/intracellular/mapping")
+        intracellular = xml_root.find(f"cell_definitions/cell_definition[@name='{cell}']/phenotype/intracellular")
+        mapping = intracellular.find("mapping")
+        return ET.SubElement(intracellular, "mapping") if mapping is None else mapping
+
+    def tamper(self, after, change):
+        """Change the recorded package XML of capture `after` and re-hash it in its capture.json (a forged
+        capture: the recorder relocates folders, so some server outputs cannot be produced through it)."""
+        folder = self.root / after
+        xml = folder / "package/config" / sx.XML_NAME
+        tree = ET.parse(xml)
+        change(tree.getroot())
+        tree.write(xml, encoding="utf-8", xml_declaration=True)
+        manifest = json.loads((folder / "capture.json").read_text())
+        manifest["package_xml_sha256"] = sha(xml)
+        (folder / "capture.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        return after
+
+    def link(self, xml_root, tag="input", name="oxygen"):
+        return self.link_cell(xml_root, "tumor").find(f"{tag}[@physicell_name='{name}']")
+
+    def enabled_ruleset(self, xml_root):
+        return next(r for r in xml_root.findall("cell_rules/rulesets/ruleset") if r.get("enabled") == "true")
+
+    def assertEntryFails(self, result, entry_id, *patterns):
+        entry = self.by_id(result)[entry_id]
+        self.assertFalse(result["passed"])
+        self.assertFalse(entry["ok"], entry)
+        for pattern in patterns:
+            self.assertIn(pattern, entry["problem"])
+        return entry
+
+    def assertCellRulesChange(self, result, *patterns):
+        self.assertFalse(result["passed"])
+        self.assertTrue(all(e["ok"] for e in result["entries"]), result["entries"])
+        text = json.dumps(result["unexpected_changes"])
+        for pattern in patterns:
+            self.assertIn(pattern, text)
 
     def export(self, applied=None, *, mutate=None, rows=None, session=AFTER, capture_id=CAPTURE_ID,
                invocation=True, digest=None, ruleset=None):
@@ -133,11 +184,11 @@ class BriefTests(VerifyBase):
         self.assertEqual(result["kind"], "physicell_verification")
         self.assertEqual(result["schema_version"], 1)
         self.assertEqual(result["projection"], {"path": PROJ, "sha256": sha(self.root / PROJ)})
-        self.assertEqual(result["before"]["path"], self.capture)
+        # before/after are the settings_xml.capture bindings verbatim (build.py re-binds `after` and compares)
+        self.assertEqual(result["before"], sx.capture(self.root, self.capture))
         self.assertEqual(result["before"]["session"], SESSION)
-        self.assertEqual(result["after"]["path"], after)
+        self.assertEqual(result["after"], sx.capture(self.root, after))
         self.assertEqual(result["after"]["session"], AFTER)
-        self.assertEqual(result["after"]["sha256"], sha(self.root / after / "capture.json"))
         self.assertEqual(result["lineage"], {"invocation": INVOCATION})
         self.assertEqual(result["unexpected_changes"], [])
         self.assertEqual([e["entry_id"] for e in result["entries"]], ["in1", "out1", "rule1", "set1"])
@@ -355,14 +406,7 @@ class RulingTests(VerifyBase):
 
 
 class PlaceholderTests(VerifyBase):
-    """The server's stage-A XML carries a disabled placeholder ruleset; the enabled one is added before it."""
-
-    def edit_capture(self, xml_root):
-        rulesets = ET.SubElement(ET.SubElement(xml_root, "cell_rules"), "rulesets")
-        placeholder = ET.SubElement(rulesets, "ruleset", {"protocol": "CBHG", "version": "3.0", "format": "csv",
-                                                          "enabled": "false"})
-        ET.SubElement(placeholder, "folder").text = "./config"
-        ET.SubElement(placeholder, "filename").text = "cell_rules.csv"
+    """The server's stage-A XML carries a disabled placeholder ruleset; the enabled one is added after it."""
 
     def test_ruleset_positional_shift_not_reported(self):
         after = self.export()
@@ -381,6 +425,172 @@ class PlaceholderTests(VerifyBase):
         _, result = self.verify(self.export(mutate=mutate))
         self.assertFalse(result["passed"])
         self.assertEqual([c["kind"] for c in result["unexpected_changes"]], ["cell_rules"])
+
+
+class LinkStructureTests(VerifyBase):
+    """Ruling T6-e (I-1, M-4): an added link is exactly {physicell_name, intracellular_name} with one settings child,
+    and nothing under it carries attributes; a mapping the entries create carries none either."""
+
+    def test_extra_attribute_on_input_fails(self):
+        _, result = self.verify(self.export(mutate=lambda x, c: self.link(x).set("extra", "y")))
+        self.assertEntryFails(result, "in1", "attributes", "extra")
+
+    def test_extra_child_beside_settings_fails(self):
+        _, result = self.verify(self.export(mutate=lambda x, c: ET.SubElement(self.link(x), "foo")))
+        self.assertEntryFails(result, "in1", "children", "foo")
+
+    def test_units_on_threshold_fails(self):
+        _, result = self.verify(self.export(
+            mutate=lambda x, c: self.link(x).find("settings/threshold").set("units", "mmHg")))
+        self.assertEntryFails(result, "in1", "threshold", "units")
+
+    def test_attribute_on_settings_fails(self):
+        _, result = self.verify(self.export(
+            mutate=lambda x, c: self.link(x).find("settings").set("enabled", "false")))
+        self.assertEntryFails(result, "in1", "settings", "enabled")
+
+    def test_attribute_on_output_value_fails(self):
+        _, result = self.verify(self.export(
+            mutate=lambda x, c: self.link(x, "output", "migration speed").find("settings/value").set("units", "x")))
+        self.assertEntryFails(result, "out1", "value", "units")
+
+    def test_duplicate_link_fails(self):
+        def mutate(xml_root, config):
+            self.link_cell(xml_root, "tumor").append(copy.deepcopy(self.link(xml_root)))
+        _, result = self.verify(self.export(mutate=mutate))
+        entry = self.assertEntryFails(result, "in1", "2 matching")
+        self.assertEqual(len(entry["found"]), 2)
+
+    def test_link_on_wrong_cell_fails(self):
+        def mutate(xml_root, config):
+            link = self.link(xml_root)
+            self.link_cell(xml_root, "tumor").remove(link)
+            phenotype = xml_root.find("cell_definitions/cell_definition[@name='default']/phenotype")
+            ET.SubElement(ET.SubElement(phenotype, "intracellular", {"type": "maboss"}), "mapping").append(link)
+        _, result = self.verify(self.export(mutate=mutate))
+        entry = self.assertEntryFails(result, "in1", "0 matching")
+        self.assertIsNone(entry["found"])
+        self.assertTrue(any("name='default'" in c["path"] for c in result["unexpected_changes"]))
+
+
+class CreatedMappingTests(VerifyBase):
+    """The stage-A tumor has a MaBoSS model but no mapping block (the probe's capA): the entries create it."""
+
+    def edit_capture(self, xml_root):
+        super().edit_capture(xml_root)
+        intracellular = xml_root.find("cell_definitions/cell_definition[@name='tumor']/phenotype/intracellular")
+        intracellular.remove(intracellular.find("mapping"))
+
+    def test_created_mapping_passes(self):
+        _, result = self.verify(self.export())
+        self.assertTrue(result["passed"], result)
+
+    def test_created_mapping_with_attribute_fails(self):
+        _, result = self.verify(self.export(mutate=lambda x, c: self.link_cell(x, "tumor").set("mode", "x")))
+        self.assertEntryFails(result, "in1", "mapping", "mode")
+        self.assertEntryFails(result, "out1", "mapping", "mode")
+
+
+class RulesetContentTests(VerifyBase):
+    """Ruling T6-e (I-2): only ruleset elements leave the XML diff; rulesets are compared by full content."""
+
+    def test_enabled_folder_elsewhere_fails(self):
+        after = self.tamper(self.export(), lambda x: setattr(self.enabled_ruleset(x).find("folder"), "text",
+                                                             "./elsewhere"))
+        _, result = self.verify(after)
+        self.assertCellRulesChange(result, "./elsewhere")
+
+    def test_enabled_version_fails(self):
+        _, result = self.verify(self.export(mutate=lambda x, c: self.enabled_ruleset(x).set("version", "2.0")))
+        self.assertCellRulesChange(result, "2.0")
+
+    def test_enabled_extra_attribute_fails(self):
+        _, result = self.verify(self.export(mutate=lambda x, c: self.enabled_ruleset(x).set("note", "n")))
+        self.assertCellRulesChange(result, "note")
+
+    def test_enabled_extra_child_fails(self):
+        _, result = self.verify(self.export(
+            mutate=lambda x, c: ET.SubElement(self.enabled_ruleset(x), "comment").__setattr__("text", "c")))
+        self.assertCellRulesChange(result, "comment")
+
+    def test_cell_rules_settings_child_fails(self):
+        def mutate(xml_root, config):
+            ET.SubElement(xml_root.find("cell_rules/settings"), "foo").text = "1"
+        _, result = self.verify(self.export(mutate=mutate))
+        self.assertCellRulesChange(result, "cell_rules/settings/foo")
+
+    def test_rulesets_attribute_fails(self):
+        _, result = self.verify(self.export(mutate=lambda x, c: x.find("cell_rules/rulesets").set("a", "b")))
+        self.assertCellRulesChange(result, "cell_rules/rulesets")
+
+    def test_disabled_protocol_changed_fails(self):
+        def mutate(xml_root, config):
+            next(r for r in xml_root.findall("cell_rules/rulesets/ruleset") if r.get("enabled") == "false") \
+                .set("protocol", "X")
+        _, result = self.verify(self.export(mutate=mutate))
+        self.assertCellRulesChange(result, "disabled")
+
+
+class NoStageACellRulesTests(VerifyBase):
+    """A stage-A capture without cell_rules (the server always writes one): the cell_rules the run adds are a
+    difference outside the ruleset elements, so the verification fails closed."""
+
+    def edit_capture(self, xml_root):
+        pass
+
+    def test_added_cell_rules_block_fails(self):
+        _, result = self.verify(self.export())
+        self.assertCellRulesChange(result, "cell_rules")
+
+
+class StrictNumberTests(VerifyBase):
+    """Ruling T6-e (M-1, M-5): numbers are ASCII decimals; NaN and infinities never match."""
+
+    def threshold(self, text):
+        def mutate(xml_root, config):
+            self.link(xml_root).find("settings/threshold").text = text
+        return mutate
+
+    def test_underscore_and_fullwidth_refused_in_xml(self):
+        for text in ("1_0", "\uff11\uff10", "nan", "inf", "-inf", "10e", ".", "0x0a"):
+            with self.subTest(text=text):
+                self.tearDown_and_setUp()
+                _, result = self.verify(self.export(mutate=self.threshold(text)))
+                self.assertEntryFails(result, "in1", "threshold")
+
+    def test_ascii_decimals_accepted(self):
+        for text in ("10", "10.", "10.0", "+10", "1e1", "1.0E+1", " 10 "):
+            with self.subTest(text=text):
+                self.tearDown_and_setUp()
+                _, result = self.verify(self.export(mutate=self.threshold(text)))
+                self.assertTrue(result["passed"], result)
+
+    def test_nan_inf_and_underscore_refused_in_csv(self):
+        data = json.loads((self.root / PROJ).read_text())
+        for text in ("nan", "inf", "1_0", "\uff11"):
+            with self.subTest(text=text):
+                self.tearDown_and_setUp()
+                row = rule_row(data["entries"][2])
+                row[6] = text  # hill_power 4
+                _, result = self.verify(self.export(rows=[row]))
+                self.assertEntryFails(result, "rule1")
+
+    def test_nan_setting_refused(self):
+        _, result = self.verify(self.export(mutate=lambda x, c: setattr(sx.resolve(x, APOPTOSIS), "text", "nan")))
+        self.assertEntryFails(result, "set1")
+
+    def tearDown_and_setUp(self):
+        """A fresh project per subtest: each export records a capture that can exist only once."""
+        self.doCleanups()
+        self.setUp()
+
+
+class BuildHandoffTests(VerifyBase):
+    def test_passed_verification_is_accepted_by_build(self):
+        from scripts.physicell import build
+        path, result = self.verify(self.export())
+        rel, data, raw = build._verification(self.root, OUTPUT)
+        self.assertEqual((rel, data), (OUTPUT, result))
 
 
 class CliTests(VerifyBase):

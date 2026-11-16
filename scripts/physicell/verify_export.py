@@ -9,7 +9,8 @@ settings_xml.capture; the after-capture is in the before-capture's session; no i
 runs/multicellular-configurator/<after session>/invocation/*/task.txt has, as its line 2, the DATA_INPUT line naming
 exactly this projection path and its sha256; the output file already exists.
 
-Expected changes (model values from physicell_projection.model_value; floats within relative 1e-9, ints exact):
+Expected changes (model values from physicell_projection.model_value; floats are ASCII decimals, no NaN, infinity
+or "_", within relative 1e-9; ints exact):
   setting           the resolved element of the after XML holds the model value.
   physiboss_input   exactly one cell_definition[@name=<cell>]/phenotype/intracellular/mapping/input with
                     physicell_name=<signal>, intracellular_name=<node>; its settings children are exactly action
@@ -17,19 +18,25 @@ Expected changes (model values from physicell_projection.model_value; floats wit
   physiboss_output  likewise mapping/output with physicell_name=<behavior>, intracellular_name=<node>; settings
                     exactly action, value, base_value, smoothing (int) and steepness (int), absent when the
                     entry's steepness is null.
+                    A link has exactly the attributes physicell_name and intracellular_name and one child, settings;
+                    neither settings nor its children carry attributes; a mapping the entries created (the
+                    before-capture has none on that cell) carries none either.
   rule              the after rules CSV (no header, CBHG v3 columns cell_type, signal, direction, behavior,
                     saturation_value, half_max, hill_power, apply_to_dead) holds exactly the rule entries as a
                     multiset, apply_to_dead 0; any other row is unexpected.
-cell_rules is compared by content, not position: exactly one enabled ruleset when rule entries exist, none
-otherwise; the disabled rulesets are equal as a multiset of (filename, folder). Everything else: with the cell_rules
-subtrees and the entries' mapping elements removed from both trees and each setting's element text taken from the
-after tree, settings_xml.diff must be empty. Dependencies other than the rules CSV are byte-identical (package path
-and sha256 from capture.json). Any other difference is listed in unexpected_changes and the verification fails.
+cell_rules/rulesets/ruleset elements are compared by content, not position: exactly one enabled ruleset when rule
+entries exist, none otherwise, protocol CBHG, version 3.0, format csv, with only folder ./config and filename = the
+after rules CSV; the disabled rulesets are equal as a multiset of their full content. Everything else: with the
+ruleset elements (only them) and the entries' mapping elements removed from both trees and each setting's element
+text taken from the after tree, settings_xml.diff must be empty. Dependencies other than the rules CSV are
+byte-identical (package path and sha256 from the capture.json settings_xml.capture verified). Any other difference
+is listed in unexpected_changes and the verification fails.
 
 Output (write-new, one file per attempt): runs/orchestrator/<p>/physicell_verification.<after session>.<after
 capture>.json beside the projection: {kind: "physicell_verification", schema_version: 1, projection: {path,
-sha256}, before: capture, after: capture, lineage: {invocation}, entries: [{entry_id, expected, found, ok}],
-unexpected_changes: [...], passed}. CLI exit 0 passed, 1 not passed, 2 refused.
+sha256}, before, after (the settings_xml.capture bindings, verbatim), lineage: {invocation}, entries: [{entry_id,
+expected, found, ok, problem (when not ok)}], unexpected_changes: [{kind, path, before, after, reason?}], passed}.
+CLI exit 0 passed, 1 not passed, 2 refused.
 """
 from __future__ import annotations
 
@@ -56,6 +63,10 @@ REL_TOL = 1e-9
 CSV_COLUMNS = ("cell_type", "signal", "direction", "behavior", "saturation_value", "half_max", "hill_power",
                "apply_to_dead")
 INTEGER = re.compile(r"[+-]?[0-9]+")
+DECIMAL = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")  # ASCII; no _, nan or inf
+LINK_ATTRIBUTES = {"physicell_name", "intracellular_name"}
+ENABLED_RULESET = {"protocol": "CBHG", "version": "3.0", "format": "csv"}
+RULES_FOLDER = "./config"
 LINKS = {"physiboss_input": ("input", "signal"), "physiboss_output": ("output", "behavior")}
 
 
@@ -64,10 +75,10 @@ def _sha(raw: bytes) -> str:
 
 
 def _close(found, expected: float) -> bool:
-    try:
-        value = float(str(found).strip())
-    except ValueError:
+    text = str(found).strip()
+    if not DECIMAL.fullmatch(text):
         return False
+    value = float(text)
     return math.isfinite(value) and math.isclose(value, expected, rel_tol=REL_TOL, abs_tol=0.0)
 
 
@@ -78,16 +89,13 @@ def _exact_int(found, expected: int) -> bool:
 
 # ---------------------------------------------------------------- bindings
 
-def _bind(root: Path, rel: str) -> tuple[dict, object, dict]:
-    """(capture record with path and capture.json sha256, parsed package XML, capture.json manifest)."""
+def _bind(root: Path, rel: str):
+    """(the settings_xml.capture binding, verbatim, with its verified manifest; the parsed package XML)."""
     bound = sx.capture(root, rel)
-    manifest_path = root / rel / "capture.json"
-    reject_symlinks(manifest_path, root)
-    raw = manifest_path.read_bytes()
     xml_raw = (root / bound["xml_path"]).read_bytes()
     if _sha(xml_raw) != bound["xml_sha256"]:
         raise ValueError(f"capture {rel}: its settings XML changed while being read")
-    return {"path": rel, "sha256": _sha(raw), **bound}, sx.parse_bytes(xml_raw), strict_json(raw)
+    return bound, sx.parse_bytes(xml_raw)
 
 
 def _lineage(root: Path, after_session: str, projection_rel: str, digest: str) -> str:
@@ -131,7 +139,8 @@ def _links(xml, entry: dict) -> list:
     return found
 
 
-def _link_check(xml, entry: dict) -> dict:
+def _link_check(xml, entry: dict, created_mapping: bool) -> dict:
+    """The entry's link in the after XML; `created_mapping`: the before-capture had no mapping on that cell."""
     if entry["kind"] == "physiboss_input":
         expected = {"action": entry["action"], "threshold": pp.model_value(entry["threshold"]),
                     "smoothing": entry["smoothing"]}
@@ -142,15 +151,65 @@ def _link_check(xml, entry: dict) -> dict:
         if entry["steepness"] is not None:
             expected["steepness"] = entry["steepness"]
         floats = ("value", "base_value")
+    tag, key = LINKS[entry["kind"]]
+    what = f"{tag} link {entry[key]!r} / {entry['node']!r} on {entry['cell_definition']}"
     links = _links(xml, entry)
     if len(links) != 1:
         found = [_settings(link) for link in links] or None
-        return {"expected": expected, "found": found, "ok": False}
-    found = _settings(links[0])
-    ok = isinstance(found, dict) and set(found) == set(expected) and found["action"].strip() == expected["action"] \
-        and all(_close(found[k], expected[k]) for k in floats) \
-        and all(_exact_int(found[k], expected[k]) for k in expected if k not in floats and k != "action")
-    return {"expected": expected, "found": found, "ok": bool(ok)}
+        return _result(expected, found, [f"{len(links)} matching {what} elements, expected exactly 1"])
+    link = links[0]
+    found = _settings(link)
+    problems = _link_structure(xml, link, created_mapping)
+    if isinstance(found, dict) and "children" not in found:
+        if set(found) != set(expected):
+            problems.append(f"settings children {sorted(found)} are not exactly {sorted(expected)}")
+        else:
+            for k, want in expected.items():
+                if k == "action":
+                    good = found[k] == want
+                elif k in floats:
+                    good = _close(found[k], want)
+                else:
+                    good = _exact_int(found[k], want)
+                if not good:
+                    problems.append(f"{k}: found {found[k]!r}, expected {want!r}")
+    return _result(expected, found, [f"{what}: {p}" for p in problems])
+
+
+def _result(expected, found, problems: list) -> dict:
+    result = {"expected": expected, "found": found, "ok": not problems}
+    if problems:
+        result["problem"] = "; ".join(problems)
+    return result
+
+
+def _link_structure(xml, link, created_mapping: bool) -> list:
+    """Ruling T6-e: exactly {physicell_name, intracellular_name}, one settings child, no attributes below it; a
+    mapping the entries created carries no attributes."""
+    problems = []
+    if set(link.attrib) != LINK_ATTRIBUTES:
+        problems.append(f"attributes {sorted(link.attrib)} are not exactly {sorted(LINK_ATTRIBUTES)}")
+    tags = [child.tag for child in link]
+    if tags != ["settings"]:
+        problems.append(f"children {tags} are not exactly one settings")
+    if (link.text or "").strip():
+        problems.append(f"text {link.text.strip()!r}")
+    for settings in link.findall("settings"):
+        if settings.attrib:
+            problems.append(f"settings carries attributes {dict(settings.attrib)}")
+        if (settings.text or "").strip():
+            problems.append(f"settings text {settings.text.strip()!r}")
+        for child in settings:
+            if child.attrib:
+                problems.append(f"<{child.tag}> carries attributes {dict(child.attrib)}")
+            if len(child):
+                problems.append(f"<{child.tag}> has children {[c.tag for c in child]}")
+    if created_mapping:
+        parents = {child: parent for parent in xml.iter() for child in parent}
+        mapping = parents.get(link)
+        if mapping is not None and mapping.attrib:
+            problems.append(f"the mapping element the entries created carries attributes {dict(mapping.attrib)}")
+    return problems
 
 
 def _settings(link):
@@ -158,7 +217,7 @@ def _settings(link):
     if len(settings) != 1:
         return None
     children = list(settings[0])
-    if len({c.tag for c in children}) != len(children) or any(len(c) for c in children):
+    if len({c.tag for c in children}) != len(children):
         return {"children": [c.tag for c in children]}
     return {c.tag: (c.text or "").strip() for c in children}
 
@@ -167,10 +226,14 @@ def _setting_check(xml, entry: dict) -> dict:
     expected = pp.model_value(entry)
     try:
         element = sx.resolve(xml, entry["path"])
-    except ValueError:
-        return {"expected": expected, "found": None, "ok": False}
+    except ValueError as exc:
+        return _result(expected, None, [str(exc)])
     text = (element.text or "").strip()
-    return {"expected": expected, "found": text, "ok": not len(element) and _close(text, expected)}
+    if len(element):
+        return _result(expected, text, [f"{entry['path']} is no longer a leaf element"])
+    if not _close(text, expected):
+        return _result(expected, text, [f"{entry['path']} holds {text!r}, expected {expected!r}"])
+    return _result(expected, text, [])
 
 
 def _rule_expected(entry: dict) -> dict:
@@ -202,7 +265,7 @@ def _rules_check(rules: list, rows: list) -> tuple[dict, list]:
         row = next((r for r in left if _row_matches(r, want)), None)
         if row is not None:
             left.remove(row)
-            matched[entry_id] = {"expected": want, "found": row, "ok": True}
+            matched[entry_id] = _result(want, row, [])
     for entry_id, want in expected.items():
         if entry_id in matched:
             continue
@@ -210,41 +273,93 @@ def _rules_check(rules: list, rows: list) -> tuple[dict, list]:
         row = next((r for r in left if r[:4] == key), None)
         if row is not None:
             left.remove(row)
-        matched[entry_id] = {"expected": want, "found": row, "ok": False}
+        problem = (f"rules CSV row {row} does not hold the model values (within relative {REL_TOL}) with "
+                   "apply_to_dead 0" if row is not None else f"no rules CSV row for {key}")
+        matched[entry_id] = _result(want, row, [problem])
     return matched, left
 
 
 # ---------------------------------------------------------------- everything else
 
+def _describe(element) -> dict:
+    """The full content of an element: tag, attributes, stripped text and children (sorted, so order is ignored)."""
+    children = sorted((_describe(child) for child in element), key=lambda d: json.dumps(d, sort_keys=True))
+    return {"tag": element.tag, "attributes": dict(sorted(element.attrib.items())),
+            "text": (element.text or "").strip(), "children": children}
+
+
 def _rulesets(xml) -> tuple[list, list]:
-    """(enabled, disabled) rulesets as (filename, folder) pairs."""
+    """(enabled, disabled) cell_rules/rulesets/ruleset elements."""
     parents = {child: parent for parent in xml.iter() for child in parent}
     enabled, disabled = [], []
     for ruleset in xml.findall("cell_rules/rulesets/ruleset"):
-        pair = ((ruleset.findtext("filename") or "").strip(), (ruleset.findtext("folder") or "").strip())
-        (enabled if sx._enabled(ruleset, parents) else disabled).append(pair)
+        (enabled if sx._enabled(ruleset, parents) else disabled).append(ruleset)
     return enabled, disabled
 
 
-def _cell_rules_changes(before, after, has_rules: bool) -> list:
+def _enabled_problems(ruleset, rules_name: str | None) -> list:
+    """Ruling T6-e: protocol CBHG, version 3.0, format csv, enabled at most "true"; children exactly folder
+    ./config and filename = the after capture's rules CSV, without attributes or children."""
+    problems = []
+    extra = sorted(set(ruleset.attrib) - set(ENABLED_RULESET) - {"enabled"})
+    if extra:
+        problems.append(f"attributes {extra} beyond {sorted(ENABLED_RULESET)} and enabled")
+    for key, want in ENABLED_RULESET.items():
+        if ruleset.get(key) != want:
+            problems.append(f"{key}={ruleset.get(key)!r}, expected {want!r}")
+    if ruleset.get("enabled", "true").lower() != "true":
+        problems.append(f"enabled={ruleset.get('enabled')!r}, expected 'true'")
+    if (ruleset.text or "").strip():
+        problems.append(f"text {ruleset.text.strip()!r}")
+    tags = sorted(child.tag for child in ruleset)
+    if tags != ["filename", "folder"]:
+        problems.append(f"children {tags} are not exactly folder and filename")
+    for child in ruleset:
+        if child.attrib or len(child):
+            problems.append(f"<{child.tag}> carries attributes or children")
+    for tag, want in (("folder", RULES_FOLDER), ("filename", rules_name)):
+        found = [(child.text or "").strip() for child in ruleset.findall(tag)]
+        if found != [want]:
+            problems.append(f"{tag} {found}, expected {want!r}")
+    return problems
+
+
+def _cell_rules_changes(before, after, has_rules: bool, rules_name: str | None) -> list:
+    """Compare the rulesets by content, then remove the ruleset elements (only them) from both trees."""
     changes = []
     before_enabled, before_disabled = _rulesets(before)
     after_enabled, after_disabled = _rulesets(after)
     want = 1 if has_rules else 0
+    path = "cell_rules/rulesets/ruleset"
     if len(after_enabled) != want:
-        changes.append({"kind": "cell_rules", "path": "cell_rules/rulesets/ruleset (enabled)",
-                        "before": [list(p) for p in before_enabled], "after": [list(p) for p in after_enabled],
+        changes.append({"kind": "cell_rules", "path": f"{path} (enabled)",
+                        "before": [_describe(r) for r in before_enabled],
+                        "after": [_describe(r) for r in after_enabled],
                         "reason": f"{want} enabled ruleset(s) expected "
                                   f"({'rule entries exist' if has_rules else 'no rule entries'})"})
-    if Counter(before_disabled) != Counter(after_disabled):
-        changes.append({"kind": "cell_rules", "path": "cell_rules/rulesets/ruleset (disabled)",
-                        "before": sorted(list(p) for p in before_disabled),
-                        "after": sorted(list(p) for p in after_disabled),
-                        "reason": "the disabled rulesets differ"})
-    for tree in (before, after):  # cell_rules is compared above, by content only
-        for element in tree.findall("cell_rules"):
-            tree.remove(element)
+    elif after_enabled:
+        problems = _enabled_problems(after_enabled[0], rules_name)
+        if problems:
+            changes.append({"kind": "cell_rules", "path": f"{path} (enabled)", "before": None,
+                            "after": _describe(after_enabled[0]), "reason": "; ".join(problems)})
+
+    def key(ruleset):
+        return json.dumps(_describe(ruleset), sort_keys=True)
+    if Counter(map(key, before_disabled)) != Counter(map(key, after_disabled)):
+        changes.append({"kind": "cell_rules", "path": f"{path} (disabled)",
+                        "before": sorted((_describe(r) for r in before_disabled), key=json.dumps),
+                        "after": sorted((_describe(r) for r in after_disabled), key=json.dumps),
+                        "reason": "the disabled rulesets differ in content"})
+    for tree in (before, after):  # the rest of cell_rules goes through settings_xml.diff
+        for rulesets in tree.findall("cell_rules/rulesets"):
+            for ruleset in rulesets.findall("ruleset"):
+                rulesets.remove(ruleset)
     return changes
+
+
+def _had_mapping(before_tree, cell: str) -> bool:
+    return any(d.findall("phenotype/intracellular/mapping")
+               for d in before_tree.findall("cell_definitions/cell_definition") if d.get("name") == cell)
 
 
 def _remove_links(tree, entries: list, before_tree) -> None:
@@ -257,14 +372,14 @@ def _remove_links(tree, entries: list, before_tree) -> None:
                     mapping.remove(link)
     if before_tree is None:
         return
-    # A mapping block the entries created (the before-capture had none on that cell) goes with them.
+    # A mapping block the entries created (the before-capture had none on that cell) goes with them when it is
+    # bare: no attributes, text or other children (anything else stays for settings_xml.diff).
     for definition in tree.findall("cell_definitions/cell_definition"):
-        name = definition.get("name")
-        had = [d for d in before_tree.findall("cell_definitions/cell_definition") if d.get("name") == name
-               and d.findall("phenotype/intracellular/mapping")]
+        if _had_mapping(before_tree, definition.get("name")):
+            continue
         for intracellular in definition.findall("phenotype/intracellular"):
             for mapping in intracellular.findall("mapping"):
-                if not had and not len(mapping) and not (mapping.text or "").strip():
+                if not len(mapping) and not mapping.attrib and not (mapping.text or "").strip():
                     intracellular.remove(mapping)
 
 
@@ -286,10 +401,13 @@ def verify(root: Path, projection_rel: str, new_capture_rel: str) -> Path:
     data, digest, errors = pp.load_and_check(root, projection_rel)
     if errors:
         raise ValueError(f"projection {projection_rel} fails its check: " + "; ".join(errors))
-    before, before_xml, before_manifest = _bind(root, data["capture"]["path"])
-    after, after_xml, after_manifest = _bind(root, new_capture_rel)
-    if before["sha256"] != data["capture"]["sha256"]:
-        raise ValueError(f"capture {before['path']} changed since the projection check")
+    before, before_xml = _bind(root, data["capture"]["path"])
+    after, after_xml = _bind(root, new_capture_rel)
+    manifest = root / data["capture"]["path"] / "capture.json"
+    reject_symlinks(manifest, root)
+    raw = manifest.read_bytes()
+    if _sha(raw) != data["capture"]["sha256"] or strict_json(raw) != before["manifest"]:
+        raise ValueError(f"capture {data['capture']['path']} changed since the projection check")
     if after["session"] == before["session"]:
         raise ValueError(f"lineage: the new capture {new_capture_rel} is in session {after['session']}, the "
                          f"projection's capture session; stage B runs in a new session")
@@ -302,6 +420,7 @@ def verify(root: Path, projection_rel: str, new_capture_rel: str) -> Path:
 
     entries = data["entries"]
     rules_raw = None
+    rules_name = PurePosixPath(after["rules_path"]).name if after["rules_path"] else None
     if after["rules_path"] is not None:
         rules_file = root / after["rules_path"]
         reject_symlinks(rules_file, root)
@@ -316,13 +435,13 @@ def verify(root: Path, projection_rel: str, new_capture_rel: str) -> Path:
         elif entry["kind"] == "rule":
             result = rule_results[entry["entry_id"]]
         else:
-            result = _link_check(after_xml, entry)
+            result = _link_check(after_xml, entry, not _had_mapping(before_xml, entry["cell_definition"]))
         results.append({"entry_id": entry["entry_id"], **result})
 
     unexpected = [{"kind": "rules_csv", "path": after["rules_path"], "before": None, "after": row}
                   for row in extra_rows]
     old, new = copy.deepcopy(before_xml), copy.deepcopy(after_xml)
-    unexpected += _cell_rules_changes(old, new, any(e["kind"] == "rule" for e in entries))
+    unexpected += _cell_rules_changes(old, new, any(e["kind"] == "rule" for e in entries), rules_name)
     _remove_links(new, entries, old)
     _remove_links(old, entries, None)
     for entry in entries:
@@ -333,8 +452,7 @@ def verify(root: Path, projection_rel: str, new_capture_rel: str) -> Path:
         except ValueError:
             pass  # the entry already fails; the diff shows the missing element
     unexpected += [{"kind": "xml", **change} for change in sx.diff(old, new)]
-    rules_name = PurePosixPath(after["rules_path"]).name if after["rules_path"] else None
-    unexpected += _dependency_changes(before_manifest, after_manifest, rules_name)
+    unexpected += _dependency_changes(before["manifest"], after["manifest"], rules_name)
 
     report = {"kind": "physicell_verification", "schema_version": 1,
               "projection": {"path": projection_rel, "sha256": digest}, "before": before, "after": after,
@@ -349,8 +467,8 @@ def verify(root: Path, projection_rel: str, new_capture_rel: str) -> Path:
 
 
 def _why(report: dict) -> list[str]:
-    lines = [f"entry {r['entry_id']}: expected {json.dumps(r['expected'])}, found {json.dumps(r['found'])}"
-             for r in report["entries"] if not r["ok"]]
+    lines = [f"entry {r['entry_id']}: {r.get('problem', 'failed')}; expected {json.dumps(r['expected'])}, "
+             f"found {json.dumps(r['found'])}" for r in report["entries"] if not r["ok"]]
     for change in report["unexpected_changes"]:
         reason = f" ({change['reason']})" if "reason" in change else ""
         lines.append(f"unexpected {change['kind']} change at {change['path']}: before {json.dumps(change['before'])}, "

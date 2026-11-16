@@ -146,7 +146,10 @@ INPUT_FILES_RELOAD = ("the PhysiCell server (2.5.2) cannot reload a captured con
                       "MaBoSS, initial cells) into a new session; use a basis without input files")
 
 def capture(root: Path, capture_rel: str) -> dict:
-    """Bind a captured configuration, verified against its capture.json manifest."""
+    """Bind a captured configuration, verified against its capture.json manifest.
+
+    Returns {session, capture, xml_path, xml_sha256, rules_path, rules_sha256, manifest}; `manifest` is the
+    capture.json parsed from the same bytes whose hashes were verified here."""
     root = Path(root)
     rel = PurePosixPath(capture_rel) if isinstance(capture_rel, str) else None
     if rel is None or rel.is_absolute() or "\\" in capture_rel or rel.as_posix() != capture_rel \
@@ -203,4 +206,4 @@ def capture(root: Path, capture_rel: str) -> dict:
         rules_sha = by_name[name]
     return {"session": session, "capture": capture_id,
             "xml_path": (rel / "package/config" / XML_NAME).as_posix(), "xml_sha256": xml_sha,
-            "rules_path": rules_path, "rules_sha256": rules_sha}
+            "rules_path": rules_path, "rules_sha256": rules_sha, "manifest": manifest}

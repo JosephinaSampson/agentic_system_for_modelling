@@ -4,6 +4,7 @@ import json
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -128,6 +129,26 @@ class CaptureBindingTests(unittest.TestCase):
         self.assertEqual(len(result["xml_sha256"]), 64)
         self.assertEqual(len(result["rules_sha256"]), 64)
         sx.load(self.project / result["xml_path"])
+
+    def test_capture_returns_the_verified_manifest(self):
+        result = sx.capture(self.project, self.rel)
+        manifest = json.loads((self.folder / "capture.json").read_text())
+        self.assertEqual(result["manifest"], manifest)
+        self.assertEqual(result["manifest"]["package_xml_sha256"], result["xml_sha256"])
+        self.assertIn({"path": "package/config/cell_rules.csv", "sha256": result["rules_sha256"]},
+                      [{k: d[k] for k in ("path", "sha256")} for d in result["manifest"]["dependencies"]])
+
+    def test_capture_manifest_parsed_from_the_bytes_read_once(self):
+        reads = []
+        original = Path.read_bytes
+
+        def counting(path):
+            if path.name == "capture.json":
+                reads.append(path)
+            return original(path)
+        with unittest.mock.patch.object(Path, "read_bytes", counting):
+            sx.capture(self.project, self.rel)
+        self.assertEqual(len(reads), 1)
 
     def test_capture_without_rules(self):
         shutil.rmtree(self.project / "runs")
