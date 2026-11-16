@@ -454,6 +454,32 @@ class LinkStructureTests(VerifyBase):
             mutate=lambda x, c: self.link(x, "output", "migration speed").find("settings/value").set("units", "x")))
         self.assertEntryFails(result, "out1", "value", "units")
 
+    def duplicate(self, tag, name, child):
+        def mutate(xml_root, config):
+            settings = self.link(xml_root, tag, name).find("settings")
+            settings.append(copy.deepcopy(settings.find(child)))
+        return mutate
+
+    def test_duplicate_threshold_fails(self):
+        _, result = self.verify(self.export(mutate=self.duplicate("input", "oxygen", "threshold")))
+        self.assertEntryFails(result, "in1", "duplicate", "threshold")
+
+    def test_duplicate_action_fails(self):
+        _, result = self.verify(self.export(mutate=self.duplicate("output", "migration speed", "action")))
+        self.assertEntryFails(result, "out1", "duplicate", "action")
+
+    def test_duplicate_steepness_fails(self):
+        _, result = self.verify(self.export(mutate=self.duplicate("output", "migration speed", "steepness")))
+        self.assertEntryFails(result, "out1", "duplicate", "steepness")
+
+    def test_link_without_settings_fails(self):
+        def mutate(xml_root, config):
+            link = self.link(xml_root)
+            link.remove(link.find("settings"))
+        _, result = self.verify(self.export(mutate=mutate))
+        entry = self.assertEntryFails(result, "in1", "cannot be compared")
+        self.assertIsNone(entry["found"])
+
     def test_duplicate_link_fails(self):
         def mutate(xml_root, config):
             self.link_cell(xml_root, "tumor").append(copy.deepcopy(self.link(xml_root)))

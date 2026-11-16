@@ -160,7 +160,10 @@ def _link_check(xml, entry: dict, created_mapping: bool) -> dict:
     link = links[0]
     found = _settings(link)
     problems = _link_structure(xml, link, created_mapping)
-    if isinstance(found, dict) and "children" not in found:
+    if not isinstance(found, dict) or not all(isinstance(v, str) for v in found.values()):
+        # fail closed: values that cannot be compared (no single settings, duplicate children) never pass
+        problems.append("the settings values cannot be compared")
+    else:
         if set(found) != set(expected):
             problems.append(f"settings children {sorted(found)} are not exactly {sorted(expected)}")
         else:
@@ -199,6 +202,9 @@ def _link_structure(xml, link, created_mapping: bool) -> list:
             problems.append(f"settings carries attributes {dict(settings.attrib)}")
         if (settings.text or "").strip():
             problems.append(f"settings text {settings.text.strip()!r}")
+        duplicates = sorted(tag for tag, count in Counter(c.tag for c in settings).items() if count > 1)
+        if duplicates:
+            problems.append(f"settings has duplicate children {duplicates}")
         for child in settings:
             if child.attrib:
                 problems.append(f"<{child.tag}> carries attributes {dict(child.attrib)}")
@@ -218,7 +224,7 @@ def _settings(link):
         return None
     children = list(settings[0])
     if len({c.tag for c in children}) != len(children):
-        return {"children": [c.tag for c in children]}
+        return [[c.tag, (c.text or "").strip()] for c in children]  # duplicate tags: a list, never compared
     return {c.tag: (c.text or "").strip() for c in children}
 
 
