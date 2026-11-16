@@ -98,6 +98,22 @@ class SettingsTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
                 self.load(bad)
         self.assertEqual(self.load({**good, "workers": -1})["workers"], -1)
+        # review 2 settings.py:48: 1e400 parses as inf and was accepted
+        for key in ("reproduce_rtol", "good_fit_margin"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
+                self.path.write_text(json.dumps({**good, key: 1.0}).replace(f'"{key}": 1.0', f'"{key}": 1e400'),
+                                     encoding="utf-8")
+                settings.load(self.path)
+        bad = copy.deepcopy(good)
+        bad["optimizer_options"]["tol"] = 1e400  # inf (json.dumps writes Infinity, which strict_json refuses)
+        with self.assertRaises(ValueError):
+            settings.check(bad)
+        # review 2 settings.py:97: workers >= 1 must fit in one SLURM task's CPUs; -1 means the allocation
+        slurm = {"time": "01:00:00", "cpus_per_task": 4}
+        with self.assertRaisesRegex(ValueError, "workers.*cpus_per_task"):
+            settings.check({**good, "workers": 16, "slurm": slurm})
+        self.assertEqual(settings.check({**good, "workers": 4, "slurm": slurm})["workers"], 4)
+        self.assertEqual(settings.check({**good, "workers": -1, "slurm": slurm})["workers"], -1)
         with self.assertRaisesRegex(ValueError, "duplicate"):
             self.path.write_text('{"restarts": 1, "restarts": 2}', encoding="utf-8")
             settings.load(self.path)
@@ -455,7 +471,7 @@ class RuntimeReviewTests(unittest.TestCase):
         self.assertEqual(json.loads((out / "result.json").read_text())["status"], "failed")
 
     # run.py:424
-    def calibrate(self, env=None, **owner):
+    def calibrate(self, env=None, takeover=False, **owner):
         folder = self.root / "out" / "restart-1"
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "trace.csv").write_text("live\n")
@@ -466,23 +482,142 @@ class RuntimeReviewTests(unittest.TestCase):
         with mock.patch.object(run, "status"), mock.patch.object(run, "run_restart", return_value=done) as restart, \
                 mock.patch.dict(os.environ, env or {}), mock.patch("sys.stdout", io.StringIO()), \
                 mock.patch("sys.stderr", err):
-            code = run.cmd_calibrate(self.root, 1)
+            code = run.cmd_calibrate(self.root, 1, takeover=takeover) if takeover else run.cmd_calibrate(self.root, 1)
         return code, restart.called, (folder / "trace.csv").exists(), err.getvalue()
+
+    def live_child(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        return child
 
     def test_calibrate_never_deletes_a_restart_folder_whose_owner_is_alive(self):
         self.job()
-        code, started, kept, err = self.calibrate()  # owner = this live process on this host
+        child = self.live_child()
+        code, started, kept, err = self.calibrate(pid=child.pid, started_at=run.now())  # a live owner here
         self.assertEqual((code, started, kept), (3, False, True))
         self.assertIn("running", err)
         # fix round 1 #4: the refusal names the owner and how to recover once it is confirmed gone
-        for needle in (socket.gethostname(), f"pid {os.getpid()}", "out/restart-1", "remove"):
+        for needle in (socket.gethostname(), f"pid {child.pid}", "out/restart-1", "remove"):
             self.assertIn(needle, err)
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
         code, started, kept, _ = self.calibrate(pid=dead.pid)  # stale: removed and run again
         self.assertEqual((code, started, kept), (0, True, False))
-        code, started, kept, _ = self.calibrate(host="node-9", pid=1)  # another host, nothing to ask: kept
+        code, started, kept, err = self.calibrate(host="node-9", pid=1)  # another host, nothing to ask: kept
         self.assertEqual((code, started, kept), (3, False, True))
+        self.assertIn("--takeover", err)  # review 2 launch.py:454: the documented escape hatch is named
+
+    def test_own_pid_or_a_reused_pid_is_not_a_live_owner(self):
+        # review 2 run.py:217: the current pid cannot be the owner (it has not created the folder yet), and a
+        # pid whose process started after owner.json was written has been reused
+        self.job()
+        code, started, kept, err = self.calibrate()  # owner pid = this process
+        self.assertEqual((code, started, kept), (0, True, False), err)
+        child = self.live_child()
+        code, started, kept, err = self.calibrate(pid=child.pid, started_at="2000-01-01T00:00:00+00:00")
+        self.assertEqual((code, started, kept), (0, True, False), err)
+        identity = run._process_start(child.pid)
+        self.assertIsNotNone(identity)
+        code, started, kept, _ = self.calibrate(pid=child.pid, started_at="2000-01-01T00:00:00+00:00",
+                                                process_start=identity[0])  # the recorded identity matches
+        self.assertEqual((code, started, kept), (3, False, True))
+        code, started, kept, _ = self.calibrate(pid=child.pid, started_at=run.now(), process_start="other")
+        self.assertEqual((code, started, kept), (0, True, False))
+
+    def test_takeover_overrides_only_an_owner_that_cannot_be_checked(self):
+        # review 2 launch.py:454 / run.py:216: an explicit, documented escape hatch for a foreign-host owner
+        self.job()
+        code, started, kept, _ = self.calibrate(takeover=True, host="node-9", pid=1)
+        self.assertEqual((code, started, kept), (0, True, False))
+        child = self.live_child()
+        code, started, kept, _ = self.calibrate(takeover=True, pid=child.pid, started_at=run.now())
+        self.assertEqual((code, started, kept), (3, False, True))  # a live owner here is never taken over
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "sacct").write_text("#!/bin/sh\nprintf '4242_1|RUNNING\\n'\n")
+        (bin_dir / "sacct").chmod(0o755)
+        code, started, kept, _ = self.calibrate({"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                                                takeover=True, host="node-9", pid=1, slurm_job="4242",
+                                                slurm_task="1")
+        self.assertEqual((code, started, kept), (3, False, True))  # sacct says it runs: not overridden
+        with mock.patch.object(run, "cmd_calibrate", return_value=0) as called:
+            run.main(["calibrate", "--restart", "1", "--takeover"])
+        self.assertEqual(called.call_args.kwargs, {"takeover": True})
+
+    def test_two_takeovers_of_one_stale_folder_never_both_run(self):
+        # review 2 run.py:551: B judges the folder stale and takes it over while A is still deciding; A must then
+        # not delete B's live folder (A's rename sees an owner.json other than the one it judged, puts it back)
+        self.job()
+        target = self.root / "out" / "restart-1"
+        target.mkdir(parents=True)
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        (target / "owner.json").write_text(json.dumps({"host": socket.gethostname(), "pid": dead.pid,
+                                                       "started_at": "2000-01-01T00:00:00+00:00"}))
+        real = run._owner_state
+        order = []
+
+        def judged(folder, claiming=False):
+            state = real(folder, claiming)
+            if not order:
+                order.append("B")
+                self.assertEqual(run.cmd_calibrate(self.root, 1), 0)  # B: judges stale, takes over, runs
+                order.append("A")
+            return state
+        runs = []
+        done = {"restart": 1, "seed": 1, "score": 1.0, "status": "ok", "params": {}, "wall_time_s": 0.0}
+
+        def restart(root, n, seed, options, workers, out_dir, cap_s=None):
+            runs.append(json.loads((out_dir / "owner.json").read_text()))
+            return done  # still "running": no result.json
+        err = io.StringIO()
+        with mock.patch.object(run, "_owner_state", judged), mock.patch.object(run, "status"), \
+                mock.patch.object(run, "run_restart", restart), mock.patch("sys.stdout", io.StringIO()), \
+                mock.patch("sys.stderr", err):
+            self.assertEqual(run.cmd_calibrate(self.root, 1), 3)  # A backs off
+        self.assertEqual((order, len(runs)), (["B", "A"], 1))
+        self.assertEqual(json.loads((target / "owner.json").read_text()), runs[0])  # B's folder, intact
+        self.assertEqual(sorted(p.name for p in (self.root / "out").iterdir()), ["restart-1"])  # no trash, no temp
+
+    def test_two_processes_racing_on_a_stale_folder(self):
+        # review 2 run.py:551: the reviewer's repro (a delay after the liveness check), with two real processes
+        self.job()
+        target = self.root / "out" / "restart-1"
+        target.mkdir(parents=True)
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        (target / "owner.json").write_text(json.dumps({"host": socket.gethostname(), "pid": dead.pid,
+                                                       "started_at": "2000-01-01T00:00:00+00:00"}))
+        (target / "log.txt").write_text("stale\n")
+        script = (
+            "import json, os, sys, time\n"
+            "from pathlib import Path\n"
+            f"sys.path.insert(0, {str(REPO)!r})\n"
+            "from scripts.jobs.runtime import run\n"
+            "real = run._owner_state\n"
+            "def slow(folder, claiming=False):\n"
+            "    state = real(folder, claiming)\n"
+            "    time.sleep(1.0)\n"
+            "    return state\n"
+            "def restart(root, n, seed, options, workers, out_dir, cap_s=None):\n"
+            "    (out_dir / f'ran-{os.getpid()}').write_text('x')\n"
+            "    time.sleep(1.5)\n"
+            "    return {'restart': n, 'seed': seed, 'score': 1.0, 'status': 'ok', 'params': {}, 'wall_time_s': 0}\n"
+            "run._owner_state, run.run_restart, run.status = slow, restart, lambda *a, **k: {}\n"
+            "sys.exit(run.cmd_calibrate(Path(sys.argv[1]), 1))\n")
+        procs = [subprocess.Popen([sys.executable, "-c", script, str(self.root)], stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True) for _ in range(2)]
+        codes = []
+        for proc in procs:
+            out, err = proc.communicate(timeout=60)
+            codes.append(proc.returncode)
+        self.assertEqual(sorted(codes), [0, 3], codes)
+        winner = procs[codes.index(0)].pid
+        self.assertEqual([p.name for p in target.glob("ran-*")], [f"ran-{winner}"])
+        self.assertEqual(json.loads((target / "owner.json").read_text())["pid"], winner)
+        self.assertFalse((target / "log.txt").exists())  # the stale folder is gone
+        self.assertEqual(sorted(p.name for p in (self.root / "out").iterdir()), ["restart-1"])
 
     def test_restart_folder_appears_with_its_owner_and_a_concurrent_twin_loses(self):
         # fix round 1 #3: the folder is created with owner.json inside (temp dir + rename), and a duplicate
@@ -529,9 +664,37 @@ class RuntimeReviewTests(unittest.TestCase):
         code, started, kept, _ = self.calibrate({**path, "FAKE_SACCT": "4242_1|CANCELLED by 1\n"}, **owner)
         self.assertEqual((code, started, kept), (0, True, False))
         # a requeued task finds its own earlier attempt: that is not a live owner
-        own = {**path, "FAKE_SACCT": "4242_1|RUNNING\n", "SLURM_ARRAY_JOB_ID": "4242", "SLURM_ARRAY_TASK_ID": "1"}
+        own = {**path, "FAKE_SACCT": "4242_1|RUNNING\n", "SLURM_ARRAY_JOB_ID": "4242", "SLURM_ARRAY_TASK_ID": "1",
+               "SLURM_RESTART_COUNT": "1"}
         code, started, kept, _ = self.calibrate(own, **owner)
         self.assertEqual((code, started, kept), (0, True, False))
+        # review 2 run.py:214: without a restart count >= 1 (and higher than the owner's) it is not a requeue
+        for env, extra in (({"SLURM_RESTART_COUNT": "0"}, {}), ({}, {}),
+                           ({"SLURM_RESTART_COUNT": "1"}, {"slurm_restart": "1"})):
+            with self.subTest(env=env, extra=extra):
+                bare = {k: v for k, v in own.items() if k != "SLURM_RESTART_COUNT"}
+                code, started, kept, _ = self.calibrate({**bare, **env}, **owner, **extra)
+                self.assertEqual((code, started, kept), (3, False, True))
+
+    def test_other_node_of_one_non_array_job_is_not_a_requeue(self):
+        # review 2 run.py:214: `srun -N2 local.sh` - every process of the allocation has the same job id and task ""
+        self.job()
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "sacct").write_text("#!/bin/sh\nprintf '%s' \"$FAKE_SACCT\"\n")
+        (bin_dir / "sacct").chmod(0o755)
+        env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_SACCT": "999|RUNNING\n",
+               "SLURM_JOB_ID": "999", "SLURM_PROCID": "1"}
+        owner = {"host": "node-1", "pid": 1, "slurm_job": "999", "slurm_task": "", "slurm_procid": "0"}
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SLURM_ARRAY_JOB_ID", None)
+            code, started, kept, _ = self.calibrate(env, **owner)
+            self.assertEqual((code, started, kept), (3, False, True))
+            code, started, kept, _ = self.calibrate({**env, "SLURM_RESTART_COUNT": "1"}, **owner)
+            self.assertEqual((code, started, kept), (3, False, True))  # another procid: alive
+            code, started, kept, _ = self.calibrate({**env, "SLURM_RESTART_COUNT": "1", "SLURM_PROCID": "0"},
+                                                    **owner)
+            self.assertEqual((code, started, kept), (0, True, False))  # the same task, requeued
 
     def test_owner_records_the_slurm_task(self):
         self.job()
@@ -542,6 +705,8 @@ class RuntimeReviewTests(unittest.TestCase):
             run.cmd_calibrate(self.root, 1)
         owner = json.loads((self.root / "out" / "restart-1" / "owner.json").read_text())
         self.assertEqual((owner["slurm_job"], owner["slurm_task"]), ("77", "1"))
+        self.assertEqual((owner["slurm_restart"], owner["slurm_procid"]), ("0", ""))
+        self.assertEqual(owner["process_start"], run._process_start(os.getpid())[0])
 
     # run.py:193
     def bundle(self):
@@ -579,6 +744,21 @@ class RuntimeReviewTests(unittest.TestCase):
         self.assertIn("generated_model.observable", sys.modules)
         self.assertNotIn("model", sys.modules)
 
+    def test_problem_cache_follows_spec_json(self):
+        # review 2 run.py:258: a rebuilt spec.json at the same root is loaded again (and clear_cache empties it)
+        self.fake_numpy()
+        self.bundle()
+        self.assertEqual(run.Problem(self.root).nominal(), {"k1": 1.0})
+        spec_path = self.root / "calibration" / "spec.json"
+        spec = json.loads(spec_path.read_text())
+        spec["fit"].append({"name": "k2", "kind": "parameter", "lower": 0.1, "upper": 10.0, "log10_lower": -1.0,
+                            "log10_upper": 1.0})
+        spec_path.write_text(json.dumps(spec, indent=1))
+        self.assertEqual(run.Problem(self.root).nominal(), {"k1": 1.0, "k2": 3.0})
+        self.assertTrue(run._LOADED)
+        run.clear_cache()
+        self.assertFalse(run._LOADED)
+
     def test_runner_refuses_zero_or_several_packages(self):
         self.fake_numpy()
         self.bundle()
@@ -586,7 +766,7 @@ class RuntimeReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "several"):
             run.Problem(self.root).nominal()
         shutil.rmtree(self.root / "model")
-        run._LOADED.clear()
+        run.clear_cache()
         with self.assertRaisesRegex(ValueError, "no Text2Model package"):
             run.Problem(self.root).nominal()
 
@@ -917,6 +1097,21 @@ class LaunchTests(JobFixture):
         command = called.call_args.args[0]
         self.assertIn("--partial", command)
         self.assertIn("--nominal", command)
+
+    def test_validate_refuses_a_bundle_built_before_partial_and_nominal(self):
+        # review 2 score_holdout.py:58: an older bundled run.py has no validate --partial/--nominal (argparse exit 2)
+        old = self.root / "old-bundle"
+        old.mkdir()
+        (old / "run.py").write_text((RUNTIME / "run.py").read_text().replace('"--partial"', '"--x1"')
+                                    .replace('"--nominal"', '"--x2"'))
+        with mock.patch.object(launch, "unpack", return_value=old), \
+                mock.patch.object(launch.subprocess, "run") as called:
+            for kwargs in ({"partial": True}, {"nominal": True}):
+                with self.subTest(**kwargs), self.assertRaisesRegex(ValueError, "built before.*rebuild"):
+                    launch.validate(self.root, self.job_id, "p.json", "holdout", "o.json", **kwargs)
+            called.assert_not_called()
+            called.return_value.returncode = 0
+            self.assertEqual(launch.validate(self.root, self.job_id, None, "fit", None), 0)  # plain validate works
 
 
 if __name__ == "__main__":

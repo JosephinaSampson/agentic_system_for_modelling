@@ -7,12 +7,14 @@ Exact keys (missing or extra keys are refused):
                      strategy "best1bin", maxiter 50, popsize 3, tol 1e-4, mutation 0.1,
                      recombination 0.5, polish false (values may be changed, keys may not)
   workers            int >= 1 or -1: scipy `workers` inside one restart (BioMASS default 1); -1 = every core,
-                     under SLURM the task's allocation (slurm.cpus_per_task, read from SLURM_CPUS_PER_TASK)
+                     under SLURM the task's allocation (slurm.cpus_per_task, read from SLURM_CPUS_PER_TASK);
+                     a count >= 1 must not exceed slurm.cpus_per_task
   parallel           int >= 1: restarts run at the same time by local.sh / remote.sh start, capped by
                      run.effective_parallel: min(parallel, cores // workers), 1 for workers -1
   slurm              {"time": "HH:MM:SS", "cpus_per_task": int >= 1}
-  good_fit_margin    float > 0: restarts within this fraction of the best score count as good fits (import)
-  reproduce_rtol     float > 0: relative tolerance of the import's score reproduction (default 1e-3)
+  good_fit_margin    finite float > 0: restarts within this fraction of the best score count as good fits (import)
+  reproduce_rtol     finite float > 0: relative tolerance of the import's score reproduction (default 1e-3)
+Every number must be finite (1e400 parses as inf and is refused).
 
 `workers` is the BioMASS `optimizer_options["workers"]`; it is kept at the top level so a single
 value governs it, and the runner passes it to differential_evolution.
@@ -30,7 +32,7 @@ import json
 import re
 from pathlib import Path
 
-from scripts.data.common import strict_json
+from scripts.data.common import finite_number, strict_json
 
 KEYS = ("restarts", "seeds", "optimizer_options", "workers", "parallel", "slurm", "good_fit_margin",
         "reproduce_rtol")
@@ -46,7 +48,8 @@ def _int(value) -> bool:
 
 
 def _number(value) -> bool:
-    return type(value) in (int, float)
+    """A finite int or float, never bool (common.finite_number: 1e400 parses as inf and is refused)."""
+    return finite_number(value)
 
 
 def _check_optimizer(opts) -> None:
@@ -96,6 +99,10 @@ def check(data) -> dict:
             or not isinstance(slurm["time"], str) or not SLURM_TIME.fullmatch(slurm["time"])
             or not _int(slurm["cpus_per_task"]) or slurm["cpus_per_task"] < 1):
         raise ValueError('slurm must be {"time": "HH:MM:SS", "cpus_per_task": int >= 1}')
+    if data["workers"] >= 1 and data["workers"] > slurm["cpus_per_task"]:
+        raise ValueError(f"workers ({data['workers']}) must not exceed slurm.cpus_per_task "
+                         f"({slurm['cpus_per_task']}): each SLURM array task would start more scipy workers than it "
+                         "has CPUs (use -1 for the task's allocation)")
     for key in ("good_fit_margin", "reproduce_rtol"):
         if not _number(data[key]) or not data[key] > 0:
             raise ValueError(f"{key} must be a number > 0")

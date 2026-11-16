@@ -3,7 +3,7 @@
 
   python run.py selftest
   python run.py validate [--params FILE [--partial]] [--nominal] [--use fit|holdout|all] [--out FILE]
-  python run.py calibrate --restart N
+  python run.py calibrate --restart N [--takeover]
   python run.py collect
   python run.py status
   python run.py parallel [--requested K]   restarts to run at a time here (effective_parallel, os.cpu_count())
@@ -34,8 +34,10 @@ How a parameter vector is scored (no biomass.optimize, no generated data files):
 Hold-out rows stay unseen until the hold-out is scored: `collect` writes predictions, simulations and figures
 for use=fit rows (and fit-needed times) only, and `validate --use U` reports only the rows of use U.
 
-A restart folder is deleted (and the restart run again) only when its owner (owner.json: host, pid, and the
-SLURM array job/task when run under SLURM) is gone. An interrupted restart (Ctrl-C, SIGTERM, SystemExit)
+A restart folder is deleted (and the restart run again) only when its owner (owner.json: host, pid, process start
+identity, and the SLURM job/task/restart count/procid when run under SLURM) is gone (_owner_state: this pid, a
+dead or reused pid, an ended SLURM task, or this task's own requeue), or with `calibrate --takeover` when it cannot
+be checked from here; the takeover is atomic (cmd_calibrate). An interrupted restart (Ctrl-C, SIGTERM, SystemExit)
 writes no result.json, so a rerun starts it again from its seed; only real errors and the selftest cap write
 a `failed` result. Restarts run K at a time with K = effective_parallel (workers -1: 1; otherwise
 min(parallel, cores // workers), locally cores = os.cpu_count()).
@@ -194,33 +196,112 @@ def slurm_active(job: str, task: str = "") -> bool | None:
     return any(state not in SLURM_ENDED for state in states)
 
 
-def _owner_alive(folder: Path, ask_slurm: bool = False) -> bool:
-    """A restart folder without result.json is running if its owner.json names a live process on this host,
-    or a process on another host (a SLURM compute node: it cannot be checked from here); otherwise stale.
+def _process_start(pid: int) -> tuple[str, float] | None:
+    """(identity, start time in epoch seconds) of a live process, or None when it cannot be read.
 
-    With ask_slurm (cmd_calibrate, before it deletes a folder), an owner on another host that recorded its
-    SLURM array task is asked about with sacct: an ended task (or this very task, requeued) is stale; when
-    sacct cannot tell, the owner counts as alive."""
+    Linux: /proc/<pid>/stat field 22 (start, in clock ticks since boot); identity = boot id + ticks (exact, immune
+    to wall-clock jumps), time = /proc/stat btime + ticks / CLK_TCK. Elsewhere: `ps -o lstart= -p PID`."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        ticks = int(stat[stat.rindex(")") + 2:].split()[19])
+        btime = next(int(line.split()[1]) for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines()
+                     if line.startswith("btime "))
+        try:
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        except OSError:
+            boot = f"btime-{btime}"
+        return f"linux:{boot}:{ticks}", btime + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration):
+        pass
+    import subprocess
+    try:
+        done = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True,
+                              timeout=10, env={**os.environ, "LC_ALL": "C"})
+        text = " ".join(done.stdout.split())
+        if done.returncode == 0 and text:
+            return f"ps:{text}", time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y"))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+PID_START_SLACK_S = 2.0  # started_at is truncated to seconds and btime is whole seconds
+
+
+def _epoch(text) -> float | None:
+    try:
+        stamp = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return stamp.timestamp() if stamp.tzinfo is not None else None
+
+
+def _own_requeue(owner: dict) -> bool:
+    """This process is SLURM's requeue of the owner's own task: the same job and the same non-empty array task
+    (a non-array job: the same SLURM_PROCID), with SLURM_RESTART_COUNT >= 1 and above the owner's recorded count.
+    Another node of the same allocation (`srun -N2`, a shared `salloc`) has the same job id but is not a requeue."""
+    ids = _slurm_ids()
+    if ids is None or ids[0] != owner.get("slurm_job"):
+        return False
+    count = os.environ.get("SLURM_RESTART_COUNT", "")
+    if not count.isdigit() or int(count) < 1:
+        return False
+    recorded = owner.get("slurm_restart")
+    if isinstance(recorded, str) and recorded.isdigit() and int(recorded) >= int(count):
+        return False
+    task = ids[1]
+    if task:
+        return owner.get("slurm_task") == task
+    procid = os.environ.get("SLURM_PROCID", "")
+    return owner.get("slurm_task", "") == "" and bool(procid) and owner.get("slurm_procid") == procid
+
+
+def _owner_state(folder: Path, claiming: bool = False) -> str:
+    """"alive", "stale" or "unknown" for a restart folder without result.json, from its owner.json.
+
+    `claiming`: cmd_calibrate, before it takes the folder over. Same host: stale when the pid is gone, reused (its
+    process started after owner.json was written: the recorded process_start identity differs, or, for an older
+    owner.json without it, its start time is later than started_at) or, when claiming, this very process (it has
+    not created the folder yet); otherwise alive. Another host (a SLURM compute node: it cannot be checked from
+    here): unknown, unless claiming and the owner recorded its SLURM job: this task's own requeue (_own_requeue)
+    is stale, otherwise sacct decides (ended: stale, active: alive, cannot tell: unknown)."""
     try:
         owner = read_json(folder / "owner.json")
         host, pid = owner["host"], int(owner["pid"])
     except (OSError, ValueError, KeyError, TypeError):
-        return False
+        return "stale"
     if host != socket.gethostname():
         job, task = owner.get("slurm_job"), owner.get("slurm_task", "")
-        if not ask_slurm or not isinstance(job, str) or not job:
-            return True
-        task = task if isinstance(task, str) else ""
-        if _slurm_ids() == (job, task):
-            return False  # this task's own earlier attempt (a requeue): not a live owner
-        return slurm_active(job, task) is not False
+        if not claiming or not isinstance(job, str) or not job:
+            return "unknown"
+        if _own_requeue(owner):
+            return "stale"  # this task's own earlier attempt (a requeue): not a live owner
+        active = slurm_active(job, task if isinstance(task, str) else "")
+        return "unknown" if active is None else ("alive" if active else "stale")
+    if claiming and pid == os.getpid():
+        return "stale"
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return "stale"
     except PermissionError:
-        return True
-    return True
+        pass  # a process of another user: exists
+    except (OverflowError, ValueError):
+        return "stale"
+    current = _process_start(pid)
+    if current is not None:
+        recorded = owner.get("process_start")
+        if isinstance(recorded, str) and recorded:
+            return "alive" if recorded == current[0] else "stale"  # another process now has that pid
+        started = _epoch(owner.get("started_at"))
+        if started is not None and current[1] > started + PID_START_SLACK_S:
+            return "stale"  # the process with that pid started after the owner wrote owner.json
+    return "alive"
+
+
+def _owner_alive(folder: Path, claiming: bool = False) -> bool:
+    """A restart folder without result.json is running unless its owner is known to be gone (_owner_state)."""
+    return _owner_state(folder, claiming) != "stale"
 
 
 def status(root: Path = ROOT, write: bool = True) -> dict:
@@ -255,7 +336,13 @@ def status(root: Path = ROOT, write: bool = True) -> dict:
 
 # ---------------------------------------------------------------- model and objective
 
-_LOADED: dict = {}  # bundle root -> loaded Problem state, once per process (pool workers unpickle per chunk)
+_LOADED: dict = {}  # (bundle root, spec.json mtime_ns, size) -> loaded Problem state, once per process (pool
+# workers unpickle per chunk); a rebuilt spec.json at the same root is loaded again
+
+
+def clear_cache() -> None:
+    """Forget every loaded Problem state of this process."""
+    _LOADED.clear()
 
 
 class Problem:
@@ -278,9 +365,13 @@ class Problem:
     def _load(self) -> None:
         if self._ready:
             return
-        state = _LOADED.get(str(self.root))
+        info = (self.root / "calibration" / "spec.json").stat()
+        key = (str(self.root), info.st_mtime_ns, info.st_size)
+        state = _LOADED.get(key)
         if state is None:
-            state = _LOADED[str(self.root)] = self._load_state()
+            for stale in [k for k in _LOADED if k[0] == key[0]]:
+                del _LOADED[stale]
+            state = _LOADED[key] = self._load_state()
         self.__dict__.update(state)
         self._ready = True
 
@@ -524,21 +615,43 @@ def effective_parallel(settings: dict, requested: int | None = None, max_cores: 
     return max(1, min(k, int(max_cores) // max(1, workers)))
 
 
-def _refuse_running(out_dir: Path, restart: int) -> int:
+def _refuse_running(out_dir: Path, restart: int, state: str = "alive") -> int:
     try:
         owner = read_json(out_dir / "owner.json")
     except (OSError, ValueError):
         owner = {}
     owner = owner if isinstance(owner, dict) else {}
     slurm = f", SLURM job {owner['slurm_job']} task {owner.get('slurm_task') or '-'}" if owner.get("slurm_job") else ""
+    why = ("its owner cannot be checked from here (another host without SLURM ids, or sacct cannot tell)"
+           if state == "unknown" else "it is never deleted or started twice")
     print(f"error: restart {restart} is running: owner host {owner.get('host', '?')} pid {owner.get('pid', '?')} "
-          f"(started {owner.get('started_at', '?')}{slurm}); it is never deleted or started twice. If that process "
-          f"is confirmed gone (e.g. on another host without SLURM ids, or the pid was reused), remove "
-          f"out/restart-{restart} by hand and run again.", file=sys.stderr)
+          f"(started {owner.get('started_at', '?')}{slurm}); {why}. If that process is confirmed gone (squeue, or "
+          f"ps on that host), run `python run.py calibrate --restart {restart} --takeover` in the bundle folder (it "
+          f"takes over only an owner that cannot be checked), or remove out/restart-{restart} by hand and run "
+          "again.", file=sys.stderr)
     return 3
 
 
-def cmd_calibrate(root: Path, restart: int) -> int:
+def _back_off(restart: int, why: str) -> int:
+    print(f"error: restart {restart}: {why}; not started here.", file=sys.stderr)
+    return 3
+
+
+def _owner_bytes(folder: Path) -> bytes | None:
+    try:
+        return (folder / "owner.json").read_bytes()
+    except OSError:
+        return None
+
+
+def cmd_calibrate(root: Path, restart: int, takeover: bool = False) -> int:
+    """Run one restart in out/restart-N/, created with owner.json inside (temp dir + rename).
+
+    An existing folder without result.json is taken over only when its owner is stale (or, with `takeover`,
+    cannot be checked): the folder is first renamed to a unique trash name (only one process can win that
+    rename), its owner.json re-read (other bytes than the ones judged stale: another process took it over
+    first, so it is renamed back and this one backs off), then the new folder is renamed into place and the
+    trash deleted. A loser of either rename backs off with exit 3."""
     job = read_json(root / "job.json")
     settings = job["settings"]
     if not 1 <= restart <= settings["restarts"]:
@@ -548,26 +661,55 @@ def cmd_calibrate(root: Path, restart: int) -> int:
     if (out_dir / "result.json").exists():
         print(f"restart {restart} already done (out/restart-{restart}/result.json); not rerun")
         return 0
-    if out_dir.exists():
-        if _owner_alive(out_dir, ask_slurm=True):
-            return _refuse_running(out_dir, restart)
-        shutil.rmtree(out_dir)  # an interrupted (stale) attempt; start the restart again from its seed
+    judged = None
+    stale = out_dir.exists()
+    if stale:
+        judged = _owner_bytes(out_dir)  # the owner.json bytes this decision is about
+        state = _owner_state(out_dir, claiming=True)
+        if state == "alive" or (state == "unknown" and not takeover):
+            return _refuse_running(out_dir, restart, state)
     owner = {"host": socket.gethostname(), "pid": os.getpid(), "started_at": now()}
+    identity = _process_start(os.getpid())
+    if identity is not None:
+        owner["process_start"] = identity[0]
     slurm = _slurm_ids()
     if slurm:
-        owner.update(slurm_job=slurm[0], slurm_task=slurm[1])
+        owner.update(slurm_job=slurm[0], slurm_task=slurm[1], slurm_restart=os.environ.get("SLURM_RESTART_COUNT")
+                     or "0", slurm_procid=os.environ.get("SLURM_PROCID", ""))
     # the folder appears with owner.json already inside (temp dir + rename): no ownerless window in which a
-    # concurrent duplicate could take it for stale; a duplicate that loses the rename backs off
+    # concurrent duplicate could take it for stale
     (root / OUT).mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=f".restart-{restart}.", dir=root / OUT))
+    trash = None
     try:
         write_json(tmp / "owner.json", owner)
-        os.rename(tmp, out_dir)
-    except OSError:
-        shutil.rmtree(tmp, ignore_errors=True)
-        if out_dir.exists():
-            return _refuse_running(out_dir, restart)
-        raise
+        if stale:
+            trash = root / OUT / f".stale-restart-{restart}.{os.getpid()}.{os.urandom(4).hex()}"
+            try:
+                os.rename(out_dir, trash)  # the exclusive claim: only one process can move this folder
+            except FileNotFoundError:
+                trash = None
+                return _back_off(restart, "another process took the stale folder over first")
+            if _owner_bytes(trash) != judged:  # out_dir was replaced since it was judged: not ours to delete
+                try:
+                    os.rename(trash, out_dir)
+                    trash = None
+                except OSError:
+                    print(f"warning: could not move {trash.name} back to out/restart-{restart}; it holds another "
+                          "process's restart folder", file=sys.stderr)
+                    trash = None
+                return _back_off(restart, "another process took the folder over while it was being checked")
+        try:
+            os.rename(tmp, out_dir)
+        except OSError:
+            if out_dir.exists():
+                return _back_off(restart, "another process created the folder first")
+            raise
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        if trash is not None:
+            shutil.rmtree(trash, ignore_errors=True)  # the verified stale attempt
     _status_best_effort(root)
     result = run_restart(root, restart, settings["seeds"][restart - 1], settings["optimizer_options"],
                          effective_workers(settings["workers"]), out_dir)
@@ -906,6 +1048,9 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--nominal", action="store_true", help="also report the model defaults of the fitted names")
     c = sub.add_parser("calibrate")
     c.add_argument("--restart", type=int, required=True)
+    c.add_argument("--takeover", action="store_true",
+                   help="take over a restart folder whose owner cannot be checked from here (another host without "
+                        "SLURM ids, or sacct cannot tell), after confirming that process is gone")
     sub.add_parser("collect")
     sub.add_parser("status")
     k = sub.add_parser("parallel")
@@ -923,7 +1068,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("validate --partial needs --params")
         return cmd_validate(ROOT, args.params, args.use, args.out, args.partial, args.nominal)
     if args.command == "calibrate":
-        return cmd_calibrate(ROOT, args.restart)
+        return cmd_calibrate(ROOT, args.restart, takeover=args.takeover)
     if args.command == "collect":
         return cmd_collect(ROOT)
     if args.command == "status":

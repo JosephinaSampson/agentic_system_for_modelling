@@ -16,6 +16,8 @@ the hold-out would no longer be a hold-out.
     runs `launch.py local validate <job-id> --use holdout --params <file> --partial --out <file>`: n_rows = the
     hold-out rows with a finite prediction, failed = the hold-out rows (other than contrast references, which
     get none) without one, params = the effective values (accepted + model defaults);
+  * holdout_score.json appears only complete (temp file, fsync, os.link, which fails if it exists): a failed
+    write leaves none, so the hold-out can still be scored once;
   * nothing is written when no row received a prediction (an objective over no rows is 0.0), when any
     hold-out prediction failed (solver failure, NaN) or when the score is the penalty value: a failure is
     never recorded as the one-time hold-out score, so the hold-out can still be scored once it is fixed.
@@ -24,6 +26,7 @@ the hold-out would no longer be a hold-out.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -119,13 +122,30 @@ def score_holdout(root, job_id: str, approval_id: str, *, runner=None) -> Path:
               "note": "Scored once on the held-out measurements; accepted parameters at their best values, every "
                       "other parameter at the bundled model default (effective_parameters)."}
     data = (json.dumps(result, indent=2, allow_nan=False) + "\n").encode()
-    try:
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError:
-        raise ValueError(f"{target.relative_to(root).as_posix()} exists; the hold-out is scored once") from None
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
+    _publish_once(root, target, data)
     return target
+
+
+def _publish_once(root: Path, target: Path, data: bytes) -> None:
+    """Write `data` to `target` only complete and only once: a temp file in the same folder is written and
+    fsynced, then hard-linked to `target` (os.link fails if it exists), then unlinked. A failed write (disk full,
+    I/O error, a kill) leaves no holdout_score.json, so the hold-out can still be scored once."""
+    fd, tmp = tempfile.mkstemp(prefix=".holdout_score.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        mask = os.umask(0)
+        os.umask(mask)
+        os.chmod(tmp, 0o666 & ~mask)  # mkstemp makes 0600
+        try:
+            os.link(tmp, target)
+        except FileExistsError:
+            raise ValueError(f"{target.relative_to(root).as_posix()} exists; the hold-out is scored once") from None
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
 
 
 def main(argv: list[str] | None = None) -> int:

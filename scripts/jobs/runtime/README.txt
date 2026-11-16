@@ -18,8 +18,12 @@ Three commands, run inside this folder:
        Runs all restarts (see "restarts" in job.json), several at a time (never more than this
        machine's cores divided by job.json "workers"; one at a time for workers -1), then collects. Ctrl-C is safe and rerunning it resumes:
        finished restarts are kept, interrupted ones start again, running ones are never touched.
-       A restart refused as "running" names its owner (host, pid); if that process is confirmed
-       gone (another machine, or a reused pid), remove out/restart-N by hand and rerun.
+       A restart refused as "running" names its owner (host, pid). A dead or reused pid on this
+       machine is detected and its folder taken over automatically. When the owner is on another
+       machine and cannot be checked from here (no SLURM ids, or sacct cannot tell), first confirm
+       that process is gone (ps on that machine, or squeue), then either run
+         .venv/bin/python run.py calibrate --restart N --takeover
+       for that restart and rerun this command, or remove out/restart-N by hand and rerun.
        Success: the last line is "results.tar.gz written: N/N restarts (... ok)".
 
   3. Send back results.tar.gz (it contains the fitted values, scores, traces, figures, logs
@@ -34,7 +38,10 @@ going after you log out:
   bash launch/remote.sh collect       (when status shows all restarts done; earlier = partial)
 
 On a SLURM cluster: bash launch/remote.sh setup on the login node, then see the header of
-launch/slurm.sbatch.
+launch/slurm.sbatch. To run unfinished restarts again, `scripts/jobs/launch.py slurm submit <job-id>
+--resubmit` waits until sacct reports every earlier array ended; on a cluster without accounting
+(sacct cannot tell) check `squeue -j <array id>` yourself and, if nothing of it is left, pass
+--resubmit --force (an array sacct reports as active is never resubmitted).
 
 When a job is sent to another machine with scripts/jobs/launch.py, only this bundle (the model, the
 measurement rows used by the mapping, the parameter bounds) leaves the researcher's machine; no

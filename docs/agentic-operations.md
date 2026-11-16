@@ -230,11 +230,11 @@ python3 scripts/ode/ode_mapping.py draft --purpose P --ode-session S --bundle ZI
 python3 scripts/ode/ode_mapping.py check runs/orchestrator/P/ode_mapping.json
 python3 scripts/jobs/build.py --mapping runs/orchestrator/P/ode_mapping.json --approval <ode_mapping record id> --settings SETTINGS.json
 python3 scripts/jobs/launch.py local start|status|fetch <job-id>
-python3 scripts/jobs/launch.py local validate <job-id> [--params FILE] [--use fit|holdout|all] [--out FILE]
+python3 scripts/jobs/launch.py local validate <job-id> [--params FILE [--partial]] [--nominal] [--use fit|holdout|all] [--out FILE]   # holdout|all: after the ode_calibration approval only
 python3 scripts/jobs/launch.py print <job-id> --host NAME                 # the scp/ssh commands, runs nothing
 python3 scripts/jobs/launch.py ssh submit <job-id> --host NAME --authorization "<researcher quote>"
 python3 scripts/jobs/launch.py ssh status|fetch|cancel <job-id> --host NAME
-python3 scripts/jobs/launch.py slurm submit <job-id> [--resubmit]
+python3 scripts/jobs/launch.py slurm submit <job-id> [--resubmit [--force]]   # --force: sacct cannot tell; check squeue first
 python3 scripts/jobs/import_results.py <job-id>
 python3 scripts/jobs/score_holdout.py <job-id> --approval <ode_calibration record id>
 ```
@@ -256,7 +256,8 @@ the same helper, so `score_holdout.py` refuses an unbound proposal too). For eve
 or `inputs/calibration-results/` except the ode-modeler's `DATA_INPUT` proposal and its own job folder.
 `import_results.py` computes `start` (nominal values) locally in the same `validate --nominal` run that
 reproduces the best score (needs internet; builds `~/.cache/agentic-jobs/<job-id>/`); the archive's selftest
-values are ignored. `score_holdout.py` writes `holdout_score.json` once with `n_rows` (only the accepted
+values are ignored. `score_holdout.py` writes `holdout_score.json` once, complete or not at all (temp file, fsync,
+`os.link`), with `n_rows` (only the accepted
 parameters are passed, at best; the others keep the model defaults); it writes nothing when no hold-out row
 was predicted, any hold-out prediction failed or the score is the penalty.
 

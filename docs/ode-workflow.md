@@ -148,16 +148,27 @@ Calibration is a portable job the researcher approves step by step; no specialis
    `run.py parallel`): `workers: -1` (every core) gives K = 1; otherwise K = min(`parallel`,
    cores // `workers`), with cores = a configured host's `max_cores`, or `os.cpu_count()` in local mode;
    `print` for an unconfigured host (cores unknown) uses `parallel` with `workers: 1` and K = 1 otherwise.
-   Under SLURM `workers: -1` means the task's allocation (`slurm.cpus_per_task`); the selftest always uses
-   1 worker.
+   Under SLURM `workers: -1` means the task's allocation (`slurm.cpus_per_task`); a `workers` count >= 1
+   must not exceed `slurm.cpus_per_task` (settings check), and every settings number must be finite; the
+   selftest always uses 1 worker.
    Ctrl-C (or `remote.sh cancel`) leaves no `failed` result: interrupted restarts are rerun from their seed
    by the next `local.sh`/`start`, and a restart folder whose owner is still alive (same host, or a SLURM
-   task sacct reports active) is never deleted or started twice; the refusal names the owner's host and pid,
-   and once that process is confirmed gone (another host without SLURM ids, a reused pid) remove
-   `out/restart-N` by hand and rerun. A restart folder appears with its `owner.json` already inside.
+   task sacct reports active) is never deleted or started twice. On the same host a dead pid, a reused pid
+   (its process start differs from `owner.json`'s `process_start`, or started after `started_at`) and the
+   calling process's own pid are stale. On another host the folder is this task's own SLURM requeue only
+   when job and array task (non-array: `SLURM_PROCID`) match and `SLURM_RESTART_COUNT` >= 1 exceeds the
+   owner's; otherwise sacct decides. A stale folder is taken over atomically (renamed to a unique trash name,
+   its `owner.json` re-checked, the new folder renamed in, the trash deleted; a loser backs off with exit
+   3). When the owner cannot be checked (another host without SLURM ids, or sacct cannot tell) the refusal
+   names its host and pid; once that process is confirmed gone, run `run.py calibrate --restart N
+   --takeover` in the job folder (or remove `out/restart-N` by hand) and rerun. A restart folder appears
+   with its `owner.json` already inside.
    Each simulation integrates only up to the times of the rows being scored, so a hold-out time never
    extends or fails a fit simulation. `slurm submit --resubmit` is refused while
-   an earlier recorded array is active per sacct (or sacct cannot tell).
+   an earlier recorded array is active per sacct; when sacct cannot tell (no accounting) it is refused
+   unless `--force` is added after checking `squeue` (an array sacct reports active is never forced).
+   `launch.py local validate --use holdout|all` is refused until an `ode_calibration` approval of the
+   job's proposal exists (the hold-out stays unseen before approval; `score_holdout.py` scores it once).
    **SLURM return path, end to end:** on the login node, `launch.py slurm submit <job-id>` (or the printed
    `sbatch` and `echo <id> > state/slurm_job` lines) from the unpacked job folder; follow it with
    `bash launch/remote.sh status` there; when status shows every restart done (or failed), run
@@ -198,7 +209,10 @@ Calibration is a portable job the researcher approves step by step; no specialis
    hook) scores the held-out rows once, passing only the
    accepted parameters at their best values (every other parameter keeps the bundled model's default,
    recorded as `effective_parameters`), and writes `holdout_score.json` with `n_rows`, the hold-out rows that
-   received a prediction. It never overwrites. It writes nothing (so the hold-out stays unscored) when no
+   received a prediction. It never overwrites, and the file appears only complete (temp file, fsync, then a
+   hard link that fails if it exists), so a failed write leaves the hold-out unscored. A job built before
+   commit 266511f (its `run.py` has no `validate --partial/--nominal`) is refused with "rebuild it" by
+   `score_holdout.py` and `import_results.py`. It writes nothing (so the hold-out stays unscored) when no
    hold-out row received a prediction (an objective over no rows is 0, not a score), when any hold-out
    prediction failed (solver failure, non-finite value; listed by row) or when the score is the penalty. It runs
    the bundled model with the accepted values, so it is independent of when the ode-modeler applies them:

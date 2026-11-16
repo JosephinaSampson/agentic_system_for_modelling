@@ -5,13 +5,18 @@
   launch.py local status <job-id>                 progress (JSON)
   launch.py local fetch <job-id>                  copy results.tar.gz to inputs/calibration-results/<job-id>/
   launch.py local validate <job-id> [--params FILE [--partial]] [--nominal] [--use fit|holdout|all]
-                           [--out FILE]           bootstrap if needed, then run.py validate (foreground)
+                           [--out FILE]           bootstrap if needed, then run.py validate (foreground);
+                                                  --use holdout|all needs an ode_calibration approval of the
+                                                  job's calibration_proposal.json
   launch.py print <job-id> --host NAME            the numbered scp/ssh commands to run by hand (runs nothing)
   launch.py ssh submit <job-id> --host NAME --authorization "<quote>"
                                                   mkdir, scp the bundle, set up, start (steps 1-4 of `print`); logs first
   launch.py ssh status|fetch|cancel <job-id> --host NAME
-  launch.py slurm submit <job-id> [--resubmit]    on a SLURM login node: setup, then sbatch the array
-                                                  (prints the commands when sbatch is not on PATH)
+  launch.py slurm submit <job-id> [--resubmit [--force]]
+                                                  on a SLURM login node: setup, then sbatch the array
+                                                  (prints the commands when sbatch is not on PATH); --resubmit
+                                                  needs every earlier array ended per sacct, --force proceeds
+                                                  when sacct cannot tell (after checking squeue)
 
 ssh mode: NAME is a host of <XDG_CONFIG_HOME or ~/.config>/agentic-modelling/hosts.json,
 {"hosts": {NAME: {"ssh": alias, "remote_dir": str, "max_cores": int}}} (strict JSON, unknown keys refused).
@@ -211,9 +216,60 @@ def fetch(root: Path, job_id: str) -> Path:
     return dest
 
 
+BUNDLE_FLAGS_COMMIT = "266511f"  # the commit that gave the bundled run.py `validate --partial` and `--nominal`
+
+
+def require_bundle_flags(target: Path, job_id: str, flags) -> None:
+    """ValueError when the job's bundled run.py has no `validate` option in `flags` (a job built by an older
+    runtime: its argparse would exit 2 with a bare usage message)."""
+    try:
+        text = (Path(target) / "run.py").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"cannot read the bundled run.py of job {job_id}: {exc}") from exc
+    missing = [flag for flag in flags if f'"{flag}"' not in text]
+    if missing:
+        raise ValueError(f"job {job_id} was built before commit {BUNDLE_FLAGS_COMMIT}: its run.py has no `validate "
+                         f"{' '.join(missing)}`, which import_results.py and score_holdout.py need; rebuild it with "
+                         "scripts/jobs/build.py (and run the new job) instead")
+
+
+def require_holdout_approval(root: Path, job_id: str) -> str:
+    """The id of an ode_calibration approval of this job's calibration_proposal.json (approvals.
+    require_calibration_approval passes for it); ValueError otherwise. Hold-out predictions are shown only after
+    the calibration is approved (score_holdout.py scores the hold-out once)."""
+    from scripts import state
+    from scripts.data import approvals
+    root = Path(root)
+    job_dir = find_job(root, job_id)
+    proposal = job_dir / "calibration_proposal.json"
+    rel = proposal.relative_to(root).as_posix()
+    rule = ("hold-out predictions (--use holdout|all) are shown only after the researcher approves the calibration "
+            "with an ode_calibration stage_approval of this job's calibration_proposal.json; then score the hold-out "
+            "once with scripts/jobs/score_holdout.py")
+    if not proposal.is_file() or proposal.is_symlink():
+        raise ValueError(f"{rel} does not exist: {rule}")
+    digest = sha256_file(proposal)
+    decisions = root / "DECISIONS.md"
+    text = decisions.read_text(encoding="utf-8") if decisions.is_file() else ""
+    problems = []
+    for record in state.records(text):
+        artifact = record.get("artifact")
+        if record.get("kind") != "stage_approval" or record.get("stage") != "ode_calibration" \
+                or not isinstance(artifact, dict) or artifact.get("path") != rel:
+            continue
+        try:
+            approvals.require_calibration_approval(root, record["id"], rel, digest)
+            return record["id"]
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            problems.append(f"{record['id']}: {exc}")
+    raise ValueError(f"no valid ode_calibration approval of {rel}" + (f" ({'; '.join(problems)})" if problems else "")
+                     + f"; {rule}")
+
+
 def validate(root: Path, job_id: str, params: str | None, use: str, out: str | None, *, partial: bool = False,
              nominal: bool = False) -> int:
     target = unpack(root, job_id)
+    require_bundle_flags(target, job_id, ["--partial"] * partial + ["--nominal"] * nominal)
     if _pid(target) and not _environment_ok(target):
         # a `start` is bootstrapping: a second bootstrap would rebuild .venv under it
         raise ValueError(f"job {job_id} is running (pid {_pid(target)}) and its environment is not ready yet; "
@@ -426,11 +482,23 @@ def ssh_fetch(root: Path, job_id: str, host_name: str) -> Path:
     return dest
 
 
+def _umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
 def slurm_setup(target: Path) -> None:
     subprocess.run(["bash", "launch/remote.sh", "setup"], cwd=target, check=True)
 
 
-def slurm_submit(root: Path, job_id: str, resubmit: bool = False) -> int:
+def slurm_submit(root: Path, job_id: str, resubmit: bool = False, force: bool = False) -> int:
+    """sbatch the job's array. --resubmit runs the unfinished restarts again once every earlier array has ended
+    per sacct; `force` (with resubmit) proceeds when sacct cannot tell (no accounting on the cluster), after the
+    researcher has checked with squeue that no earlier array is still queued or running. An array sacct reports
+    as active is never resubmitted."""
+    if force and not resubmit:
+        raise ValueError("--force only applies to --resubmit (when sacct cannot tell whether the earlier array ended)")
     job_dir, settings = _job_and_settings(root, job_id)
     sbatch = ["sbatch", f"--array=1-{settings['restarts']}", f"--time={settings['slurm']['time']}",
               f"--cpus-per-task={settings['slurm']['cpus_per_task']}", "launch/slurm.sbatch"]
@@ -452,9 +520,16 @@ def slurm_submit(root: Path, job_id: str, resubmit: bool = False) -> int:
                          "unfinished restarts again")
     for array in earlier:  # a resubmit while an earlier array runs would start the same restarts twice
         active = runtime.slurm_active(array)
-        if active is not False:
-            raise ValueError(f"array job {array} is still active per sacct, or sacct cannot tell; wait for it or "
-                             "cancel it (`bash launch/remote.sh cancel`) before --resubmit")
+        if active is True:
+            raise ValueError(f"array job {array} is still active per sacct; wait for it or cancel it "
+                             "(`bash launch/remote.sh cancel`) before --resubmit")
+        if active is None and not force:
+            raise ValueError(f"sacct cannot tell whether array job {array} has ended (no accounting, or sacct failed); "
+                             f"check with `squeue -j {array}` that nothing of it is queued or running (cancel it with "
+                             "`bash launch/remote.sh cancel` otherwise), then pass --resubmit --force")
+        if active is None:
+            print(f"warning: --force: sacct cannot tell whether array job {array} has ended; resubmitting on the "
+                  "researcher's word that squeue shows none of it", file=sys.stderr)
     slurm_setup(target)
     (target / "out").mkdir(exist_ok=True)  # sbatch does not create the --output folder
     (target / "state").mkdir(exist_ok=True)
@@ -473,6 +548,7 @@ def slurm_submit(root: Path, job_id: str, resubmit: bool = False) -> int:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
+        os.chmod(tmp, 0o666 & ~_umask())  # mkstemp makes 0600; collaborators read the record (status, cancel)
         os.replace(tmp, record)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -511,7 +587,10 @@ def main(argv: list[str] | None = None) -> int:
     slurm = modes.add_parser("slurm").add_subparsers(dest="command", required=True)
     sub = slurm.add_parser("submit")
     sub.add_argument("job_id")
-    sub.add_argument("--resubmit", action="store_true")
+    sub.add_argument("--resubmit", action="store_true",
+                     help="run the unfinished restarts again once every earlier array has ended per sacct")
+    sub.add_argument("--force", action="store_true",
+                     help="with --resubmit: proceed when sacct cannot tell (check squeue first)")
     args = parser.parse_args(argv)
     root = project_root().resolve()
     try:
@@ -525,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 return ssh_simple(root, args.job_id, args.host, args.command)
         elif args.mode == "slurm":
-            return slurm_submit(root, args.job_id, args.resubmit)
+            return slurm_submit(root, args.job_id, args.resubmit, args.force)
         elif args.command == "start":
             print(json.dumps(start(root, args.job_id, args.parallel), indent=2))
         elif args.command == "status":
@@ -533,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "fetch":
             print(f"fetched: {fetch(root, args.job_id).relative_to(root).as_posix()}")
         else:
+            if args.use != "fit":  # the hold-out stays unseen until the calibration is approved
+                require_holdout_approval(root, args.job_id)
             return validate(root, args.job_id, args.params, args.use, args.out, partial=args.partial,
                             nominal=args.nominal)
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:

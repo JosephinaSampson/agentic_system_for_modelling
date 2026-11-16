@@ -249,6 +249,66 @@ class HoldoutTests(HoldoutFixture):
         self.assertFalse(list(self.job_dir.glob(".holdout-*")))
 
 
+class ReviewRound2HoldoutTests(HoldoutFixture):
+    def test_failed_write_leaves_no_score_and_a_retry_succeeds(self):
+        # review 2 score_holdout.py:127: an ENOSPC during the write left a 0-byte holdout_score.json for ever
+        import errno
+        import os
+        self.make_proposal()
+        self.approve_calibration()
+        real = os.fdopen
+
+        class Full:
+            def __init__(self, handle):
+                self.handle = handle
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.handle.close()
+                return False
+
+            def write(self, data):
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+        with mock.patch.object(score_holdout.os, "fdopen", lambda fd, *a, **k: Full(real(fd, *a, **k))):
+            with self.assertRaises(OSError):
+                self.score()
+        self.assertFalse((self.job_dir / "holdout_score.json").exists())
+        self.assertEqual([p.name for p in self.job_dir.iterdir() if p.name.startswith(".")], [])
+        path = self.score()  # the hold-out was not scored: a retry is the first look
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["score"], 0.7)
+        with self.assertRaisesRegex(ValueError, "exists"):
+            self.score()
+
+    def test_cli_holdout_predictions_need_an_ode_calibration_approval(self):
+        # review 2 launch.py:496: `launch.py local validate --use holdout|all` showed the hold-out before approval
+        import contextlib
+        import os
+        from scripts.jobs import launch
+
+        def main(*argv):
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(self.root)}), \
+                    mock.patch.object(launch, "validate", return_value=0) as called, \
+                    contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                code = launch.main(["local", "validate", self.job_id, *argv])
+            return code, called.called, err.getvalue()
+        for use in ("holdout", "all"):
+            code, called, err = main("--use", use)
+            self.assertEqual((code, called), (1, False))
+            self.assertIn("ode_calibration", err)
+        self.assertEqual(main("--use", "fit")[:2], (0, True))
+        self.make_proposal()
+        self.assertEqual(main("--use", "holdout")[:2], (1, False))  # a proposal, but no approval yet
+        self.approve_calibration("cal-x", stage="ode_mapping")
+        self.assertEqual(main("--use", "holdout")[:2], (1, False))  # not an ode_calibration approval
+        self.approve_calibration()
+        for use in ("holdout", "all"):
+            self.assertEqual(main("--use", use)[:2], (0, True))
+
+
 class CalibrationApprovalTests(HoldoutFixture):
     """approvals.require_calibration_approval: every check of an ode_calibration approval, in one place."""
 

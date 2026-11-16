@@ -213,6 +213,36 @@ class SlurmReviewTests(LauncherFixture):
         self.assertEqual(self.record.read_text().split(), ["4242", "4242"])
 
 
+    def test_resubmit_force_when_sacct_cannot_tell(self):
+        # review 2 launch.py:454: on a cluster without accounting the documented recovery could never work
+        self.assertEqual(self.run_main("slurm", "submit", self.job_id)[0], 0)
+        with mock.patch.dict(os.environ, {"FAKE_SACCT": ""}):
+            code, _, err = self.run_main("slurm", "submit", self.job_id, "--resubmit")
+            self.assertEqual(code, 1)
+            self.assertIn("--force", err)
+            self.assertIn("squeue", err)
+            code, _, err = self.run_main("slurm", "submit", self.job_id, "--resubmit", "--force")
+            self.assertEqual(code, 0, err)
+            self.assertIn("--force", err)  # the override is reported
+        self.assertEqual(self.record.read_text().split(), ["4242", "4242"])
+        with mock.patch.dict(os.environ, {"FAKE_SACCT": "4242_1|RUNNING\n"}):  # an active array: never forced
+            code, _, err = self.run_main("slurm", "submit", self.job_id, "--resubmit", "--force")
+        self.assertEqual(code, 1)
+        self.assertIn("active", err)
+        code, _, err = self.run_main("slurm", "submit", self.job_id, "--force")
+        self.assertEqual(code, 1)
+        self.assertIn("--resubmit", err)
+
+    def test_record_follows_the_umask(self):
+        # review 2 launch.py:472: mkstemp made state/slurm_job 0600; collaborators must be able to read it
+        old = os.umask(0o022)
+        try:
+            self.assertEqual(self.run_main("slurm", "submit", self.job_id)[0], 0)
+        finally:
+            os.umask(old)
+        self.assertEqual(self.record.stat().st_mode & 0o777, 0o644)
+
+
 class LocalFetchSymlinkTests(LauncherFixture):
     def test_fetch_creates_nothing_through_a_symlinked_inputs_folder(self):
         # review launch.py:201: mkdir ran before reject_symlinks and created folders at the symlink target
