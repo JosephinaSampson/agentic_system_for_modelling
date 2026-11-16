@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import copy
 import io
 import json
 import os
@@ -456,20 +457,59 @@ class SettingsCopyTests(Base):
         edit(manifest)
         path.write_text(json.dumps(manifest))
 
+    def bound_manifest(self, edit):
+        """self.after with its bound (verified) manifest edited: what _package_files copies from."""
+        manifest = copy.deepcopy(self.after["manifest"])
+        edit(manifest)
+        return {**self.after, "manifest": manifest}
+
     def test_manifest_without_dependencies_is_a_failed_settings_report(self):
-        self.rewrite_manifest(lambda m: m.pop("dependencies"))
-        # the verification binds the old manifest, so a capture() re-bind would refuse first; call the copy directly
+        # sx.capture refuses such a manifest, so _verification never binds one; the copy refuses it too
+        after = self.bound_manifest(lambda m: m.pop("dependencies"))
         with self.assertRaisesRegex(ValueError, "no dependencies"):
-            build._package_files(self.root, self.after)
-        with mock.patch.object(build, "_verification", return_value=(VERIFICATION, {"after": self.after}, b"{}")):
+            build._package_files(self.root, after)
+        with mock.patch.object(build, "_verification", return_value=(VERIFICATION, {"after": after}, b"{}")):
             _, report = self.build(verification=VERIFICATION)
         self.assertEqual((report["status"], report["failed_step"]), ("failed", "settings"))
         self.assertIn("no dependencies", report["error"])
 
+    def tamper_during_make_template(self, tamper):
+        """Run `tamper` after _verification bound the capture, while `make template` runs (before the copy)."""
+        original = build._make
+
+        def make(step, *args, **kwargs):
+            if step == "make template":
+                tamper()
+            return original(step, *args, **kwargs)
+        return mock.patch.object(build, "_make", side_effect=make)
+
+    def test_capture_json_changed_after_verification_is_refused(self):
+        # PR #17 review 4586111204: the copy takes the dependency hashes _verification bound, never a re-read
+        def swap_rules():
+            (self.folder / "package/config/rules.csv").write_bytes(RULES + b"x\n")
+            self.rewrite_manifest(lambda m: m["dependencies"][0].update(sha256=sha(RULES + b"x\n")))
+        with self.tamper_during_make_template(swap_rules):
+            _, report = self.build(verification=VERIFICATION)
+        self.assertEqual((report["status"], report["failed_step"]), ("failed", "settings"), report)
+        self.assertIn("rules.csv changed while being copied", report["error"])
+        self.assertFalse((self.dest / "PhysiCell-1.14.2-template/config/rules.csv").exists())
+
+    def test_dependency_added_to_capture_json_after_verification_is_not_copied(self):
+        def add_dependency():
+            (self.folder / "package/config/extra.csv").write_bytes(b"extra\n")
+            self.rewrite_manifest(lambda m: m["dependencies"].append(
+                {"path": "package/config/extra.csv", "sha256": sha(b"extra\n")}))
+        with self.tamper_during_make_template(add_dependency):
+            _, report = self.build(verification=VERIFICATION)
+        self.assertEqual(report["status"], "ok", report)
+        self.assertEqual({f["name"] for f in report["settings"]["files"]},
+                         {"PhysiCell_settings.xml", "rules.csv", "model.bnd"})
+        self.assertFalse((self.dest / "PhysiCell-1.14.2-template/config/extra.csv").exists())
+
     def test_dependency_basename_collision_is_refused_naming_both_paths(self):
-        self.rewrite_manifest(lambda m: m["dependencies"].append(
+        after = self.bound_manifest(lambda m: m["dependencies"].append(
             {"path": "package/config/sub/rules.csv", "sha256": sha(RULES)}))
-        with mock.patch.object(build, "_verification", return_value=(VERIFICATION, {"after": self.after}, b"{}")):
+        with mock.patch.object(build, "_verification", return_value=(VERIFICATION, {"after": after}, b"{}")):
             _, report = self.build(verification=VERIFICATION)
         self.assertEqual(report["failed_step"], "settings")
         self.assertIn("package/config/rules.csv", report["error"])

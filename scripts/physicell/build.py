@@ -204,10 +204,13 @@ def _physiboss(root: Path, after: dict) -> bool:
 
 
 def _package_files(root: Path, after: dict) -> dict[str, bytes]:
-    """The XML and every dependency of the verified capture, re-verified byte by byte: {name: bytes}."""
-    parents = PurePosixPath(after["xml_path"]).parents  # <capture>/package/config, <capture>/package, <capture>
-    folder = root / parents[0]
-    manifest = strict_json((root / parents[2] / "capture.json").read_bytes())
+    """The XML and every dependency of the verified capture, re-verified byte by byte: {name: bytes}.
+
+    The dependency list and hashes are those of `after["manifest"]`, the capture.json that _verification bound
+    (sx.capture verified it, and it equals a fresh re-bind); capture.json is never re-read here, so a manifest
+    changed since then is not trusted, and a file changed since then is refused."""
+    folder = root / PurePosixPath(after["xml_path"]).parent  # <capture>/package/config
+    manifest = after.get("manifest")
     deps = manifest.get("dependencies") if isinstance(manifest, dict) else None
     if not isinstance(deps, list):
         raise ValueError("the capture manifest lists no dependencies array")
