@@ -201,10 +201,15 @@ PHYSICELL_DATA_RULES = (
     "for a projection, also the design its `design.path` names and the MaBoSS handoff manifests that design lists",
     "Return `blocked` if a MaBoSS handoff manifest the design names is missing or fails `import_maboss_handoff`'s "
     "verification.",
+    # ruling T9-c: every tool argument comes from the design
+    "Pass every tool argument explicitly from the design: domain, substrate parameters and Dirichlet settings, cycle "
+    "models. Never use a tool default or a typical value. If the design lacks a value a tool requires, return "
+    "blocked. Add no rule, link or other value.",
 )
 # Ruling T5-e: a projection is applied by replaying its design in a new session, never by loading its capture.
 PHYSICELL_STALE = ("for every projection", "projection's `capture.path`", "On the loaded capture", "on the loaded capture",
-                   "load the captured configuration's packaged XML")
+                   "load the captured configuration's packaged XML",
+                   "Add no rule, link, parameter or other value while building", "Add no rule, link or value while building")
 REVISION_RULE = "return `blocked` unless the session's current revision equals `proposal.model.revision`"
 
 

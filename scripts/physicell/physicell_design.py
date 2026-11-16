@@ -17,14 +17,31 @@ Schema (schema_version 1; every key below is required):
                                  (lineage.dispatched_with: its invocation task.txt line 2 is this design's
                                  DATA_INPUT line), not by session. The physicell_design approval's session_id and
                                  the DATA_INPUT record_session_id equal this anchor.
-  domain: null | {x_min,x_max,y_min,y_max,z_min,z_max,dx,dy,dz, units: "micron", max_time, time_units: "min"}
-                                 required (all numbers) when basis is null; must be null with a basis
-  cycle_models: [str] | null     the server's cycle models, copied VERBATIM from the configurator's
-                                 get_available_cycle_models discovery output (never typed from memory); required
-                                 when basis is null (check refuses: record the server's cycle models first);
-                                 with a basis the cycle models of the captured XML are also accepted
+  domain: null | {domain_x, domain_y, use_2d, domain_z, dx, max_time, from}
+                                 every argument of the server's create_simulation_domain, explicitly (ruling T9-a):
+                                 domain_x, domain_y, dx = {value > 0, unit: "micron"}, max_time = {value > 0, unit:
+                                 "min"} (the units the exported XML writes: overall/space_units and max_time@units),
+                                 use_2d a boolean, domain_z a {value > 0, unit: "micron"} without use_2d and null
+                                 with it (the server then makes z one voxel, dx, thick); `from` cites them.
+                                 Required when basis is null; must be null with a basis (the basis holds the domain)
+  cycle_models: [{key, name}] | null  the server's cycle models, copied VERBATIM from the configurator's discovery run
+                                 (get_available_cycle_models: key = the add_single_cell_type argument, name = the
+                                 <cycle name> the exported XML writes); never typed from memory. Required whenever a
+                                 cell definition is not from "basis" (check refuses: record the server's cycle models
+                                 first)
   cell_definitions: [{name, cycle_model, description, from, variant_of?}]
-  substrates: [{name, units, description, from}]
+                                 cycle_model: a cycle_models key, or for a "basis" cell its captured <cycle name>
+  substrates: [{name, units, description, from, diffusion_coefficient, decay_rate, initial_condition, dirichlet}]
+                                 every argument of add_single_substrate, explicitly: diffusion_coefficient,
+                                 decay_rate, initial_condition = {value, unit, from}; dirichlet = {enabled: bool,
+                                 value: {value, unit, from} | null (only when disabled)}; `units` is the concentration
+                                 label. The units must equal what the exported XML writes: diffusion "micron^2/min",
+                                 decay "1/min"; for an added substrate initial_condition and Dirichlet "mmHg" (server
+                                 2.5.2 writes mmHg there whatever the label, so the label must be "mmHg" too); for a
+                                 "basis" substrate the captured units and values, each value from "basis".
+                                 "substrate" is the library default the server inserts with the domain: a new
+                                 configuration cannot add it
+  Every basis cell definition and substrate is declared (from "basis").
   intracellular: [{cell_definition, maboss: {handoff, sha256}}]
                                  handoff = an exported, approved maboss-to-physicell manifest; it is validated
                                  with gate.check("multicellular", ...), the gate's own check
@@ -36,8 +53,9 @@ Schema (schema_version 1; every key below is required):
   this design, it is the later stage-B patches. variant_of chains must not form a cycle.
   `from` is "basis" (the name exists in the capture and keeps its cycle model/units), a citation
   {source, locator} or {data, locator} of a declared source / data proposal.
-A "TODO" in any reason, description, units or note is refused. Units are never inferred: substrate units are
-copied only from the captured XML, else TODO.
+A "TODO" in any reason, description, units, value or note is refused. Units are never inferred: substrate units are
+copied only from the captured XML, else TODO; a unit other than the one the exported XML writes is refused.
+The stage-A capture is compared with the design before its dictionary is recorded (capture_dictionary.conformance).
 """
 from __future__ import annotations
 
@@ -58,8 +76,17 @@ from scripts.physicell import settings_xml as sx  # noqa: E402
 KEYS = ("kind", "schema_version", "basis", "session", "domain", "cycle_models", "cell_definitions", "substrates",
         "intracellular", "coupling_plan", "sources", "data", "unmapped")
 ORCHESTRATOR = ("runs", "orchestrator")
-DOMAIN_KEYS = ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max", "dx", "dy", "dz", "units", "max_time",
-               "time_units")
+DOMAIN_KEYS = ("domain_x", "domain_y", "use_2d", "domain_z", "dx", "max_time", "from")
+# The unit strings the exported XML writes (server 2.5.2 / physicell_config): overall/space_units, max_time@units,
+# physical_parameter_set/diffusion_coefficient@units and decay_rate@units; add_single_substrate passes no initial
+# unit, so initial_condition@units and Dirichlet_boundary_condition@units are always "mmHg" for an added substrate.
+LENGTH_UNIT, TIME_UNIT = "micron", "min"
+DIFFUSION_UNIT, DECAY_UNIT = "micron^2/min", "1/min"
+ADDED_CONCENTRATION_UNIT = "mmHg"
+LIBRARY_SUBSTRATE = "substrate"  # the library default create_simulation_domain inserts (origin library_default)
+SUBSTRATE_KEYS = ("name", "units", "description", "from", "diffusion_coefficient", "decay_rate", "initial_condition",
+                  "dirichlet")
+SUBSTRATE_VALUES = ("diffusion_coefficient", "decay_rate", "initial_condition")
 ROUTES = ("physiboss", "rules", "none")
 MABOSS_RUNS = ("runs", "boolean-dynamics-modeler")
 DATA_KEYS = {"id", "session", "proposal", "approval"}
@@ -85,12 +112,30 @@ def orchestrator_json(root: Path, rel, what: str = "design") -> Path:
 
 
 def _basis_facts(root: Path, capture_rel: str) -> dict:
-    """{session, cell_definitions: {name: cycle model}, substrates: {name: units|None}} of a verified capture."""
+    """{session, cell_definitions: {name: cycle model}, substrates: {name: units|None}, values: {name:
+    settings_xml.substrate_facts}} of a verified capture."""
     bound = sx.capture(root, capture_rel)
     tree = sx.load(root / bound["xml_path"])
     cells = {name: sx.cycle_model(tree, name) for name in sx.cell_definitions(tree)}
-    subs = {e.get("name"): e.get("units") for e in tree.findall("microenvironment_setup/variable")}
-    return {"session": bound["session"], "cell_definitions": cells, "substrates": subs}
+    values = sx.substrate_facts(tree)
+    subs = {name: facts["units"] for name, facts in values.items()}
+    return {"session": bound["session"], "cell_definitions": cells, "substrates": subs, "values": values}
+
+
+def _basis_value(fact: dict | None) -> dict:
+    """A {value, unit, from: "basis"} copied from a captured element, TODO where it holds no number or unit."""
+    value = sx.number(fact["text"]) if fact else None
+    unit = fact.get("units") if fact else None
+    return {"value": TODO if value is None else value, "unit": unit or TODO, "from": BASIS_FROM}
+
+
+def _basis_substrate(name: str, facts: dict) -> dict:
+    dirichlet = facts["dirichlet"]
+    enabled = (dirichlet or {}).get("enabled")
+    return {"name": name, "units": facts["units"] or TODO, "description": TODO, "from": BASIS_FROM,
+            **{key: _basis_value(facts[key]) for key in SUBSTRATE_VALUES},
+            "dirichlet": {"enabled": {"true": True, "false": False}.get((enabled or "").lower(), TODO),
+                          "value": _basis_value(dirichlet)}}
 
 
 def _basis_input_files(root: Path, capture_rel: str) -> list:
@@ -147,10 +192,11 @@ def draft(root: Path, purpose: str, *, basis_capture: str | None, sources: list 
         session = facts["session"]
         cells = [{"name": n, "cycle_model": c, "description": TODO, "from": BASIS_FROM}
                  for n, c in facts["cell_definitions"].items()]
-        subs = [{"name": n, "units": u or TODO, "description": TODO, "from": BASIS_FROM}
-                for n, u in facts["substrates"].items()]
+        subs = [_basis_substrate(n, f) for n, f in facts["values"].items()]
+    length = {"value": TODO, "unit": LENGTH_UNIT}
     domain = None if basis_capture is not None else {
-        **{k: None for k in DOMAIN_KEYS[:9]}, "units": "micron", "max_time": None, "time_units": "min"}
+        "domain_x": dict(length), "domain_y": dict(length), "use_2d": TODO, "domain_z": TODO, "dx": dict(length),
+        "max_time": {"value": TODO, "unit": TIME_UNIT}, "from": TODO}
     design = {"kind": "physicell_design", "schema_version": 1,
               "basis": {"capture": basis_capture} if basis_capture is not None else None,
               "session": session, "domain": domain, "cycle_models": None,
@@ -227,8 +273,9 @@ class _Checker(Citations):
     def __init__(self, root: Path):
         super().__init__(root)
         self.basis: dict | None = None
-        self.cycle_allowed: set = set()
+        self.cycle_names: dict = {}
         self.cells: set = set()
+        self.substrate_names: set = set()
         self.intracellular: set = set()
 
     def head(self, data: dict) -> None:
@@ -262,42 +309,52 @@ class _Checker(Citations):
             self.error(f"session {session} must be the purpose {purpose} for a design without a basis (a lineage "
                        "anchor; the stage-A session is bound by its DATA_INPUT dispatch, not declared here)")
 
+    def measure(self, label: str, q, unit: str, keys=("value", "unit")) -> float | None:
+        """A {value > 0, unit} (plus `from` when in keys) whose unit is exactly `unit`; its value, else None."""
+        if not isinstance(q, dict) or set(q) != set(keys):
+            self.error(f"{label} must be exactly {{{', '.join(keys)}}}, not {q!r}")
+            return None
+        if q["unit"] != unit:
+            self.error(f"{label}.unit must be exactly {unit!r} (the unit the exported XML writes), not {q['unit']!r}")
+        if not finite_number(q["value"]) or q["value"] <= 0:
+            self.error(f"{label}.value must be a finite number > 0, not {q['value']!r}")
+            return None
+        return q["value"]
+
     def domain_section(self, domain) -> None:
         if self.has_basis:
             if domain is not None:
                 self.error("domain must be null with a basis (the captured configuration holds the domain)")
             return
         if not isinstance(domain, dict) or set(domain) != set(DOMAIN_KEYS):
-            self.error(f"domain is required without a basis, with exactly the keys {', '.join(DOMAIN_KEYS)}")
+            self.error(f"domain is required without a basis, with exactly the keys {', '.join(DOMAIN_KEYS)} "
+                       "(every create_simulation_domain argument, never a tool default)")
             return
-        if domain["units"] != "micron":
-            self.error(f"domain.units must be micron, not {domain['units']!r}")
-        if domain["time_units"] != "min":
-            self.error(f"domain.time_units must be min, not {domain['time_units']!r}")
-        for key in DOMAIN_KEYS:
-            if key not in ("units", "time_units") and not finite_number(domain[key]):
-                self.error(f"domain.{key} must be a finite number, not {domain[key]!r}")
-        if all(finite_number(domain[k]) for k in DOMAIN_KEYS if k not in ("units", "time_units")):
-            for axis in "xyz":
-                if domain[f"{axis}_min"] >= domain[f"{axis}_max"]:
-                    self.error(f"domain.{axis}_min must be below {axis}_max")
-                if domain[f"d{axis}"] <= 0:
-                    self.error(f"domain.d{axis} must be positive")
-            if domain["max_time"] <= 0:
-                self.error("domain.max_time must be positive")
+        for key in ("domain_x", "domain_y", "dx"):
+            self.measure(f"domain.{key}", domain[key], LENGTH_UNIT)
+        self.measure("domain.max_time", domain["max_time"], TIME_UNIT)
+        if not isinstance(domain["use_2d"], bool):
+            self.error(f"domain.use_2d must be true or false, not {domain['use_2d']!r}")
+        elif domain["use_2d"]:
+            if domain["domain_z"] is not None:
+                self.error("domain.domain_z must be null with use_2d (the server makes z one voxel, dx, thick)")
+        elif domain["domain_z"] is None:
+            self.error("domain.domain_z is required without use_2d (a 3D domain)")
+        else:
+            self.measure("domain.domain_z", domain["domain_z"], LENGTH_UNIT)
+        self.cite("domain", domain["from"])
 
     def cycle_models_section(self, models) -> None:
+        self.cycle_names: dict = {}
         if models is None:
-            if not self.has_basis:
-                self.error("cycle_models is absent: record the server's cycle models first "
-                           "(configurator get_available_cycle_models) before drafting a new configuration")
-            models = []
-        if not isinstance(models, list) or not all(real_text(m) for m in models) or len(set(models)) != len(models):
-            self.error("cycle_models must be null or a list of unique non-empty names")
             return
-        self.cycle_allowed = set(models)
-        if self.basis is not None:
-            self.cycle_allowed |= set(self.basis["cell_definitions"].values())
+        if not isinstance(models, list) or not all(
+                isinstance(m, dict) and set(m) == {"key", "name"} and real_text(m["key"]) and real_text(m["name"])
+                for m in models) or len({m["key"] for m in models}) != len(models):
+            self.error("cycle_models must be null or a list of {key, name} with unique keys, copied verbatim from "
+                       "get_available_cycle_models")
+            return
+        self.cycle_names = {m["key"]: m["name"] for m in models}
 
     def entity_common(self, label: str, item: dict) -> None:
         if not real_text(item.get("description")):
@@ -326,19 +383,22 @@ class _Checker(Citations):
             self.cells.add(name)
             self.entity_common(label, item)
             model = item["cycle_model"]
-            if not isinstance(model, str) or model not in self.cycle_allowed:
-                self.error(f"{label}: cycle model {model!r} is not one of the recorded cycle models "
-                           f"{sorted(self.cycle_allowed)}")
-            if self.has_basis and self.basis is not None:
-                if item["from"] == BASIS_FROM:
-                    if name not in base:
-                        self.error(f'{label}: from "basis" but {name} is not in the basis capture')
-                    elif model != base[name]:
-                        self.error(f"{label}: cycle model {model!r} differs from the basis ({base[name]!r})")
-                elif name in base:
-                    self.error(f'{label}: {name} is already in the basis; use from "basis" (change it by a patch later)')
-            elif item["from"] == BASIS_FROM:
-                pass  # already reported by cite
+            if self.has_basis and item["from"] == BASIS_FROM:
+                if self.basis is None:
+                    pass  # the basis failed to load: already reported
+                elif name not in base:
+                    self.error(f'{label}: from "basis" but {name} is not in the basis capture')
+                elif model != base[name]:
+                    self.error(f"{label}: cycle model {model!r} differs from the basis ({base[name]!r})")
+                continue
+            if self.basis is not None and name in base:
+                self.error(f'{label}: {name} is already in the basis; use from "basis" (change it by a patch later)')
+            if not self.cycle_names:
+                self.error(f"{label}: cycle_models is absent: record the server's cycle models first (a configurator "
+                           "discovery run: get_available_cycle_models) before declaring a new cell definition")
+            elif not isinstance(model, str) or model not in self.cycle_names:
+                self.error(f"{label}: cycle model {model!r} is not one of the recorded cycle model keys "
+                           f"{sorted(self.cycle_names)}")
         bases = {}
         for n, item in enumerate(items):
             variant = item.get("variant_of") if isinstance(item, dict) else None
@@ -358,12 +418,13 @@ class _Checker(Citations):
         if not isinstance(items, list) or not items:
             self.error("substrates must be a non-empty list")
             return
-        seen = set()
+        seen = self.substrate_names
         base = self.basis["substrates"] if self.basis else {}
         for n, item in enumerate(items):
             label = f"substrates[{n}]"
-            if not isinstance(item, dict) or set(item) != {"name", "units", "description", "from"}:
-                self.error(f"{label} must have exactly name, units, description, from")
+            if not isinstance(item, dict) or set(item) != set(SUBSTRATE_KEYS):
+                self.error(f"{label} must have exactly {', '.join(SUBSTRATE_KEYS)} (every add_single_substrate "
+                           "argument, never a tool default)")
                 continue
             name = item["name"]
             label = f"{label} ({name})"
@@ -379,14 +440,98 @@ class _Checker(Citations):
             if not real_text(item["units"]):
                 self.error(f"{label}: units must be stated (never inferred), not empty or TODO")
             self.entity_common(label, item)
-            if self.basis is not None:
-                if item["from"] == BASIS_FROM:
-                    if name not in base:
-                        self.error(f'{label}: from "basis" but {name} is not in the basis capture')
-                    elif base[name] is not None and item["units"] != base[name]:
-                        self.error(f"{label}: units {item['units']!r} differ from the basis ({base[name]!r})")
-                elif name in base:
-                    self.error(f'{label}: {name} is already in the basis; use from "basis"')
+            from_basis = self.has_basis and item["from"] == BASIS_FROM
+            if from_basis:
+                if self.basis is None:
+                    continue  # the basis failed to load: already reported
+                if name not in base:
+                    self.error(f'{label}: from "basis" but {name} is not in the basis capture')
+                    continue
+                if base[name] is not None and item["units"] != base[name]:
+                    self.error(f"{label}: units {item['units']!r} differ from the basis ({base[name]!r})")
+                self.substrate_values(label, item, self.basis["values"][name])
+                continue
+            if name in base:
+                self.error(f'{label}: {name} is already in the basis; use from "basis"')
+            if not self.has_basis and name == LIBRARY_SUBSTRATE:
+                self.error(f"{label}: {LIBRARY_SUBSTRATE!r} is the library default substrate the server inserts "
+                           "with the domain (add_single_substrate cannot add it again); choose another name")
+            if real_text(item["units"]) and item["units"] != ADDED_CONCENTRATION_UNIT:
+                self.error(f"{label}: units {item['units']!r}: server 2.5.2 writes initial_condition and "
+                           f"Dirichlet_boundary_condition units {ADDED_CONCENTRATION_UNIT!r} for an added substrate "
+                           "whatever its label, so only a substrate in that unit can be added consistently (units are "
+                           "never inferred)")
+            self.substrate_values(label, item, None)
+
+    def value(self, label: str, q, unit, basis: dict | None, minimum: float | None = None) -> None:
+        """A substrate {value, unit, from}: unit exactly `unit` (what the exported XML writes); for a "basis" substrate
+        `basis` is the captured element ({text, units}) and the value must equal it, from "basis"."""
+        if not isinstance(q, dict) or set(q) != {"value", "unit", "from"}:
+            self.error(f"{label} must be exactly {{value, unit, from}}, not {q!r}")
+            return
+        if not finite_number(q["value"]):
+            self.error(f"{label}.value must be a finite number, not {q['value']!r}")
+        elif minimum is not None and q["value"] < minimum:
+            self.error(f"{label}.value must be >= {minimum:g}, not {q['value']!r}")
+        if unit is None or q["unit"] != unit:
+            self.error(f"{label}.unit must be exactly {unit!r} (the unit the exported XML writes; never inferred), "
+                       f"not {q['unit']!r}")
+        if basis is None:
+            if q["from"] == BASIS_FROM:
+                self.error(f'{label}: from "basis" only for a value of a "basis" substrate')
+            else:
+                self.cite(label, q["from"])
+            return
+        if q["from"] != BASIS_FROM:
+            self.error(f'{label}: a "basis" substrate keeps its captured values: from must be "basis"')
+        if finite_number(q["value"]) and not sx.close(sx.number(basis["text"]), q["value"]):
+            self.error(f"{label}.value {q['value']!r} differs from the basis ({basis['text']!r})")
+
+    def substrate_values(self, label: str, item: dict, facts: dict | None) -> None:
+        def captured(key):
+            return facts[key] if facts else None
+
+        def unit(key, added):
+            if facts is None:
+                return added
+            return (facts[key] or {}).get("units")
+
+        missing = [k for k in (*SUBSTRATE_VALUES, "dirichlet") if facts is not None and facts[k] is None]
+        if missing:
+            self.error(f"{label}: the basis capture has no {', '.join(missing)} for this substrate")
+            return
+        self.value(f"{label}.diffusion_coefficient", item["diffusion_coefficient"],
+                   unit("diffusion_coefficient", DIFFUSION_UNIT), captured("diffusion_coefficient"), 0)
+        self.value(f"{label}.decay_rate", item["decay_rate"], unit("decay_rate", DECAY_UNIT), captured("decay_rate"),
+                   0)
+        self.value(f"{label}.initial_condition", item["initial_condition"],
+                   unit("initial_condition", ADDED_CONCENTRATION_UNIT), captured("initial_condition"))
+        dirichlet = item["dirichlet"]
+        if not isinstance(dirichlet, dict) or set(dirichlet) != {"enabled", "value"} \
+                or not isinstance(dirichlet["enabled"], bool):
+            self.error(f"{label}.dirichlet must be exactly {{enabled: true|false, value}}, not {dirichlet!r}")
+            return
+        if facts is not None and dirichlet["enabled"] != ((facts["dirichlet"].get("enabled") or "").lower() == "true"):
+            self.error(f"{label}.dirichlet.enabled differs from the basis ({facts['dirichlet'].get('enabled')!r})")
+        if dirichlet["value"] is None:
+            if dirichlet["enabled"]:
+                self.error(f"{label}.dirichlet.value is required when the Dirichlet condition is enabled")
+            elif facts is not None:
+                self.error(f'{label}.dirichlet.value: a "basis" substrate keeps its captured value (from "basis")')
+            return
+        self.value(f"{label}.dirichlet.value", dirichlet["value"], unit("dirichlet", ADDED_CONCENTRATION_UNIT),
+                   captured("dirichlet"))
+
+    def basis_coverage(self) -> None:
+        """Review M3: every basis cell definition and substrate is declared in the design (from "basis")."""
+        if self.basis is None:
+            return
+        for name in self.basis["cell_definitions"]:
+            if name not in self.cells:
+                self.error(f'basis cell definition {name} is not declared: declare it with from "basis"')
+        for name in self.basis["substrates"]:
+            if name not in self.substrate_names:
+                self.error(f'basis substrate {name} is not declared: declare it with from "basis"')
 
     def maboss_handoff(self, label: str, maboss, cell) -> None:
         if not isinstance(maboss, dict) or set(maboss) != {"handoff", "sha256"} \
@@ -495,12 +640,13 @@ def load_and_check(root: Path, rel: str) -> tuple[dict, str, list[str]]:
         checker.error(f"design keys must be exactly {', '.join(KEYS)}")
     else:
         checker.basis_section(data["basis"], data["session"], PurePosixPath(rel).parts[2])
-        checker.domain_section(data["domain"])
-        checker.cycle_models_section(data["cycle_models"])
         checker.sources.declare(data["sources"], "sources")
         checker.data_section(data["data"])
+        checker.domain_section(data["domain"])
+        checker.cycle_models_section(data["cycle_models"])
         checker.cell_section(data["cell_definitions"])
         checker.substrate_section(data["substrates"])
+        checker.basis_coverage()
         checker.intracellular_section(data["intracellular"])
         checker.coupling_section(data["coupling_plan"])
         checker.unmapped_section(data["unmapped"])

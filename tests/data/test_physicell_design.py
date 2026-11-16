@@ -5,6 +5,7 @@ import json
 import shutil
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from scripts import state
@@ -34,6 +35,69 @@ def write_config(folder, rules=False):
     (folder / "PhysiCell_settings.xml").write_text(text)
     shutil.copy(FIXTURES / "cell_rules.csv", folder)
     return folder / "PhysiCell_settings.xml"
+
+
+# the server's cycle models as get_available_cycle_models returns them (key: the tool argument, name: the XML name)
+CYCLE_MODELS = [{"key": "live", "name": "live"},
+                {"key": "flow_cytometry_separated", "name": "Flow cytometry model (separated)"}]
+CITE = {"source": "s1", "locator": "Fig. 2"}
+
+
+def substrate(name, units="mmHg", diffusion=100000.0, decay=0.1, initial=38.0, dirichlet=None, cite=CITE):
+    """A design substrate added by the configurator: every add_single_substrate argument, cited."""
+    def v(value, unit):
+        return {"value": value, "unit": unit, "from": cite}
+    return {"name": name, "units": units, "description": f"{name} supply", "from": cite,
+            "diffusion_coefficient": v(diffusion, "micron^2/min"), "decay_rate": v(decay, "1/min"),
+            "initial_condition": v(initial, units),
+            "dirichlet": {"enabled": dirichlet is not None, "value": v(dirichlet if dirichlet is not None else initial,
+                                                                        units)}}
+
+
+def domain(x=800.0, y=800.0, use_2d=True, z=None, dx=20.0, max_time=1440.0, cite=CITE):
+    def m(value, unit="micron"):
+        return {"value": value, "unit": unit}
+    return {"domain_x": m(x), "domain_y": m(y), "use_2d": use_2d, "domain_z": None if z is None else m(z),
+            "dx": m(dx), "max_time": m(max_time, "min"), "from": cite}
+
+
+def stage_a_xml(xml_root, links=False):
+    """Make the fixture XML the stage-A build of `Base.complete()`: tumor carries the MaBoSS fixture model (with an
+    empty mapping, as import_maboss_handoff writes it, unless `links`) and the new variant tumor_hypoxic (cycle
+    live) exists."""
+    tumor = xml_root.find("cell_definitions/cell_definition[@name='tumor']/phenotype")
+    intracellular = ET.parse(FIXTURES / "intracellular_tumor.xml").getroot()
+    if not links:
+        for link in list(intracellular.find("mapping")):
+            intracellular.find("mapping").remove(link)
+    tumor.append(intracellular)
+    definitions = xml_root.find("cell_definitions")
+    variant = copy.deepcopy(definitions.find("cell_definition[@name='default']"))
+    variant.set("name", "tumor_hypoxic")
+    variant.set("ID", "2")
+    variant.find("phenotype/cycle").set("name", "live")
+    definitions.append(variant)
+
+
+def built_capture(root, session, capture_id, rules=False, edit=None, links=False):
+    """Record a capture of the stage-A build of `Base.complete()` (stage_a_xml: tumor carries the PhysiBoSS
+    fixture model, empty mapping unless `links`: then input pressure -> B and output A -> apoptosis; tumor_hypoxic
+    added). Its rules ruleset is removed unless `rules` (ruling T5-d: server 2.5.2 cannot reload a captured rules
+    CSV). `edit(xml_root)`, if given, changes the XML before it is recorded."""
+    source = Path(root).parent / f"source-{session}-{capture_id}"
+    (source / "config").mkdir(parents=True)
+    tree = ET.parse(FIXTURES / "PhysiCell_settings.xml")
+    if not rules:
+        tree.getroot().remove(tree.getroot().find("cell_rules"))
+    stage_a_xml(tree.getroot(), links=links)
+    if edit is not None:
+        edit(tree.getroot())
+    tree.write(source / "config/PhysiCell_settings.xml", encoding="utf-8", xml_declaration=True)
+    (source / "config/cell_rules.csv").write_bytes((FIXTURES / "cell_rules.csv").read_bytes())
+    (source / "config/tumor.bnd").write_text("Node A { logic = A; }\nNode B { logic = B; }\nNode C { logic = C; }\n")
+    (source / "config/tumor.cfg").write_text("A.istate=0;")
+    record_physicell(root, source, source / "config/PhysiCell_settings.xml", session, capture_id)
+    return f"runs/multicellular-configurator/{session}/configs/{capture_id}"
 
 
 def dispatch_design(root, session=STAGE_A, rel=REL, approval="design-1", anchor=SESSION, agent="agent-1",
@@ -117,7 +181,7 @@ class Base(unittest.TestCase):
         data = json.loads(path.read_text())
         for item in data["cell_definitions"]:
             item["description"] = f"existing {item['name']}"
-        data["cell_definitions"].append({"name": "tumor_hypoxic", "cycle_model": "Live", "description": "hypoxic variant",
+        data["cell_definitions"].append({"name": "tumor_hypoxic", "cycle_model": "live", "description": "hypoxic variant",
                                          "from": {"source": "s1", "locator": "Fig. 2"}, "variant_of": "tumor"})
         for item in data["substrates"]:
             item["description"] = f"existing {item['name']}"
@@ -127,7 +191,20 @@ class Base(unittest.TestCase):
                                   "notes": "A drives apoptosis"},
                                  {"cell_definition": "tumor_hypoxic", "behavior_group": "motility", "route": "rules",
                                   "notes": "oxygen-dependent speed"}]
-        data["cycle_models"] = ["Live"]
+        data["cycle_models"] = copy.deepcopy(CYCLE_MODELS)
+        return data
+
+    def new_configuration(self, data=None, session="p1"):
+        """complete() as a new configuration (no basis): the domain and every substrate value declared and cited,
+        cell definitions with cycle model keys."""
+        data = data or self.complete()
+        data.update(basis=None, session=session, domain=domain(), cycle_models=copy.deepcopy(CYCLE_MODELS))
+        keys = {"default": "live", "tumor": "flow_cytometry_separated"}
+        for item in data["cell_definitions"]:
+            item["from"] = CITE
+            item["cycle_model"] = keys.get(item["name"], item["cycle_model"])
+        data["substrates"] = [substrate("oxygen", dirichlet=38.0), substrate("drug", diffusion=1000.0, decay=0.01,
+                                                                             initial=0.0)]
         return data
 
     def write(self, data, rel=REL):
@@ -156,6 +233,14 @@ class DraftTests(Base):
         self.assertEqual(data["cell_definitions"][1]["cycle_model"], "Flow cytometry model (separated)")
         self.assertEqual([s["name"] for s in data["substrates"]], ["oxygen", "drug"])
         self.assertEqual(data["substrates"][0]["units"], "mmHg")
+        # every add_single_substrate value is copied from the basis XML with its exact units, from "basis"
+        self.assertEqual(data["substrates"][0]["diffusion_coefficient"],
+                         {"value": 100000.0, "unit": "micron^2/min", "from": "basis"})
+        self.assertEqual(data["substrates"][0]["decay_rate"], {"value": 0.1, "unit": "1/min", "from": "basis"})
+        self.assertEqual(data["substrates"][0]["initial_condition"], {"value": 38.0, "unit": "mmHg", "from": "basis"})
+        self.assertEqual(data["substrates"][0]["dirichlet"],
+                         {"enabled": True, "value": {"value": 38.0, "unit": "mmHg", "from": "basis"}})
+        self.assertEqual(data["substrates"][1]["dirichlet"]["enabled"], False)
         self.assertEqual(data["cell_definitions"][0]["description"], "TODO")
         self.assertEqual(data["session"], SESSION)
         with self.assertRaisesRegex(ValueError, "never overwrite"):
@@ -166,12 +251,15 @@ class DraftTests(Base):
         data = json.loads(path.read_text())
         self.assertIsNone(data["basis"])
         self.assertEqual(data["session"], "p2")  # the anchor of a new configuration is its purpose
-        self.assertEqual(data["domain"]["units"], "micron")
-        self.assertEqual(data["domain"]["time_units"], "min")
-        self.assertIsNone(data["domain"]["x_min"])
+        # every create_simulation_domain argument is a TODO; the units are the ones the exported XML writes
+        self.assertEqual(data["domain"], {"domain_x": {"value": "TODO", "unit": "micron"},
+                                          "domain_y": {"value": "TODO", "unit": "micron"}, "use_2d": "TODO",
+                                          "domain_z": "TODO", "dx": {"value": "TODO", "unit": "micron"},
+                                          "max_time": {"value": "TODO", "unit": "min"}, "from": "TODO"})
         self.assertIsNone(data["cycle_models"])
         errors = pd.check(self.root, "runs/orchestrator/p2/physicell_design.json")
-        self.assertTrue(any("record the server's cycle models first" in e for e in errors), errors)
+        for pattern in ("domain.domain_x.value", "domain.use_2d", "domain.max_time.value", "domain: a source citation"):
+            self.assertTrue(any(pattern in e for e in errors), (pattern, errors))
 
 
 class CheckTests(Base):
@@ -215,26 +303,52 @@ class CheckTests(Base):
         self.assertRefused(data, "physiboss")
 
     def test_no_basis_without_domain_refused(self):
-        data = self.complete()
-        data.update(basis=None, domain=None, session="p1", cycle_models=["Live", "Flow cytometry model (separated)"])
-        for item in data["cell_definitions"]:
-            item["from"] = {"source": "s1", "locator": "Fig. 2"}
-        for item in data["substrates"]:
-            item["from"] = {"source": "s1", "locator": "Fig. 2"}
-        self.assertRefused(data, "domain")
+        data = self.new_configuration()
+        self.assertEqual(self.errors(data), [])
+        data["domain"] = None
+        self.assertRefused(data, "domain is required without a basis")
 
     def test_domain_units_refused(self):
-        data = self.complete()
-        data.update(basis=None, session="p1", cycle_models=["Live", "Flow cytometry model (separated)"])
-        for item in data["cell_definitions"] + data["substrates"]:
-            item["from"] = {"source": "s1", "locator": "Fig. 2"}
-        data["domain"] = {"x_min": -400, "x_max": 400, "y_min": -400, "y_max": 400, "z_min": -10, "z_max": 10,
-                          "dx": 20, "dy": 20, "dz": 20, "units": "mm", "max_time": 100, "time_units": "hours"}
+        data = self.new_configuration()
+        data["domain"]["domain_x"]["unit"] = "mm"
+        data["domain"]["max_time"]["unit"] = "hours"
         errors = self.errors(data)
-        self.assertTrue(any("micron" in e for e in errors), errors)
-        self.assertTrue(any("min" in e for e in errors), errors)
-        data["domain"].update(units="micron", time_units="min")
+        self.assertTrue(any("domain.domain_x.unit must be exactly 'micron'" in e for e in errors), errors)
+        self.assertTrue(any("domain.max_time.unit must be exactly 'min'" in e for e in errors), errors)
+        data["domain"]["domain_x"]["unit"], data["domain"]["max_time"]["unit"] = "micron", "min"
         self.assertEqual(self.errors(data), [])
+
+    def test_domain_every_argument_required(self):
+        # ruling T9-a: every create_simulation_domain argument comes from the design, never a tool default
+        for key in pd.DOMAIN_KEYS:
+            data = self.new_configuration()
+            del data["domain"][key]
+            with self.subTest(missing=key):
+                self.assertRefused(data, "domain is required without a basis, with exactly the keys")
+        data = self.new_configuration()
+        data["domain"]["dx"]["value"] = 0
+        data["domain"]["max_time"]["value"] = "TODO"
+        errors = self.errors(data)
+        self.assertTrue(any("domain.dx.value must be a finite number > 0" in e for e in errors), errors)
+        self.assertTrue(any("domain.max_time.value" in e for e in errors), errors)
+
+    def test_domain_z_null_iff_use_2d(self):
+        data = self.new_configuration()
+        data["domain"]["domain_z"] = {"value": 40.0, "unit": "micron"}
+        self.assertRefused(data, "domain_z must be null with use_2d")
+        data["domain"]["use_2d"] = False
+        self.assertEqual(self.errors(data), [])
+        data["domain"]["domain_z"] = None
+        self.assertRefused(data, "domain_z is required without use_2d")
+        data["domain"]["use_2d"] = "yes"
+        self.assertRefused(data, "use_2d must be true or false")
+
+    def test_domain_needs_a_source(self):
+        data = self.new_configuration()
+        data["domain"]["from"] = "basis"
+        self.assertRefused(data, 'domain: from "basis" needs a basis')
+        data["domain"]["from"] = {"source": "s9", "locator": "Methods"}
+        self.assertRefused(data, "source s9 is not declared")
 
     def test_todo_reason_refused(self):
         data = self.complete()
@@ -317,6 +431,104 @@ class CheckTests(Base):
             pd.check(self.root, REL)
 
 
+class ServerArgumentTests(Base):
+    """Ruling T9-a: every argument add_single_substrate and add_single_cell_type take comes from the design,
+    with the units the exported XML writes; a value without a source is refused."""
+
+    def test_every_substrate_argument_required(self):
+        for key in ("diffusion_coefficient", "decay_rate", "initial_condition", "dirichlet"):
+            data = self.new_configuration()
+            del data["substrates"][0][key]
+            with self.subTest(missing=key):
+                self.assertRefused(data, "every add_single_substrate argument, never a tool default")
+
+    def test_substrate_value_needs_a_source(self):
+        data = self.new_configuration()
+        data["substrates"][0]["decay_rate"]["from"] = "basis"
+        self.assertRefused(data, 'substrates[0] (oxygen).decay_rate: from "basis" only for a value of a "basis" substrate')
+        data = self.new_configuration()
+        data["substrates"][0]["diffusion_coefficient"]["from"] = {"source": "s9", "locator": "Table 1"}
+        self.assertRefused(data, "source s9 is not declared")
+        data = self.new_configuration()
+        del data["substrates"][0]["initial_condition"]["from"]
+        self.assertRefused(data, "initial_condition must be exactly {value, unit, from}")
+
+    def test_substrate_units_must_be_what_the_xml_writes(self):
+        cases = (("diffusion_coefficient", "micron^2/s", "'micron^2/min'"), ("decay_rate", "1/h", "'1/min'"),
+                 ("initial_condition", "mM", "'mmHg'"))
+        for key, unit, expected in cases:
+            data = self.new_configuration()
+            data["substrates"][0][key]["unit"] = unit
+            with self.subTest(key=key):
+                self.assertRefused(data, f"{key}.unit must be exactly {expected}")
+        data = self.new_configuration()
+        data["substrates"][0]["dirichlet"]["value"]["unit"] = "mM"
+        self.assertRefused(data, "dirichlet.value.unit must be exactly 'mmHg'")
+
+    def test_added_substrate_label_must_be_the_server_concentration_unit(self):
+        # server 2.5.2 writes initial_condition/Dirichlet units mmHg whatever the label (add_single_substrate)
+        data = self.new_configuration()
+        data["substrates"][1] = substrate("drug", units="dimensionless", initial=0.0)
+        errors = self.errors(data)
+        self.assertTrue(any("units 'dimensionless': server 2.5.2 writes initial_condition" in e for e in errors), errors)
+
+    def test_substrate_value_domains(self):
+        data = self.new_configuration()
+        data["substrates"][0]["diffusion_coefficient"]["value"] = -1
+        data["substrates"][0]["decay_rate"]["value"] = "TODO"
+        errors = self.errors(data)
+        self.assertTrue(any("diffusion_coefficient.value must be >= 0" in e for e in errors), errors)
+        self.assertTrue(any("decay_rate.value must be a finite number" in e for e in errors), errors)
+
+    def test_dirichlet_value_required_when_enabled(self):
+        data = self.new_configuration()
+        data["substrates"][0]["dirichlet"]["value"] = None
+        self.assertRefused(data, "dirichlet.value is required when the Dirichlet condition is enabled")
+        data["substrates"][0]["dirichlet"]["enabled"] = False
+        self.assertEqual(self.errors(data), [])
+        data["substrates"][0]["dirichlet"] = {"enabled": "no", "value": None}
+        self.assertRefused(data, "dirichlet must be exactly {enabled: true|false, value}")
+
+    def test_library_default_substrate_name_refused(self):
+        data = self.new_configuration()
+        data["substrates"][1] = substrate("substrate")
+        self.assertRefused(data, "'substrate' is the library default substrate")
+
+    def test_basis_substrate_values_must_equal_the_basis(self):
+        data = self.complete()
+        data["substrates"][0]["decay_rate"]["value"] = 0.2
+        self.assertRefused(data, "decay_rate.value 0.2 differs from the basis ('0.1')")
+        data = self.complete()
+        data["substrates"][0]["decay_rate"]["from"] = CITE
+        self.assertRefused(data, 'a "basis" substrate keeps its captured values: from must be "basis"')
+        data = self.complete()
+        data["substrates"][0]["initial_condition"]["unit"] = "mM"
+        self.assertRefused(data, "initial_condition.unit must be exactly 'mmHg'")
+        data = self.complete()
+        data["substrates"][0]["dirichlet"]["enabled"] = False
+        self.assertRefused(data, "dirichlet.enabled differs from the basis")
+
+    def test_cycle_models_are_discovery_records(self):
+        data = self.complete()
+        data["cycle_models"] = ["live"]
+        self.assertRefused(data, "cycle_models must be null or a list of {key, name}")
+        data = self.complete()
+        data["cycle_models"] = None
+        self.assertRefused(data, "record the server's cycle models first")
+        data = self.complete()
+        data["cell_definitions"][2]["cycle_model"] = "live (XML name)"
+        self.assertRefused(data, "is not one of the recorded cycle model keys")
+
+    def test_basis_cells_and_substrates_must_be_declared(self):
+        # review M3: basis ⊆ declared
+        data = self.complete()
+        data["cell_definitions"] = [c for c in data["cell_definitions"] if c["name"] != "default"]
+        data["substrates"] = [s for s in data["substrates"] if s["name"] != "drug"]
+        errors = self.errors(data)
+        self.assertTrue(any("basis cell definition default is not declared" in e for e in errors), errors)
+        self.assertTrue(any("basis substrate drug is not declared" in e for e in errors), errors)
+
+
 class HandoffBindingTests(Base):
     def test_target_cell_type_must_match_cell_definition(self):
         data = self.complete()
@@ -370,7 +582,7 @@ class HandoffBindingTests(Base):
 class VariantTests(Base):
     def test_variant_cycles_refused(self):
         data = self.complete()
-        data["cell_definitions"].append({"name": "t3", "cycle_model": "Live", "description": "d",
+        data["cell_definitions"].append({"name": "t3", "cycle_model": "live", "description": "d",
                                          "from": {"source": "s1", "locator": "Fig. 2"}, "variant_of": "tumor_hypoxic"})
         data["cell_definitions"][2]["variant_of"] = "t3"
         self.assertRefused(data, "cycle")
@@ -420,12 +632,7 @@ class ApprovalTests(Base):
             approvals.require_physicell_design_approval(self.root, "design-1", ref["path"], ref["sha256"])
 
     def test_new_configuration_uses_declared_session(self):
-        data = self.complete()
-        data.update(basis=None, session="p1", cycle_models=["Live", "Flow cytometry model (separated)"],
-                    domain={"x_min": -400, "x_max": 400, "y_min": -400, "y_max": 400, "z_min": -10, "z_max": 10,
-                            "dx": 20, "dy": 20, "dz": 20, "units": "micron", "max_time": 100, "time_units": "min"})
-        for item in data["cell_definitions"] + data["substrates"]:
-            item["from"] = {"source": "s1", "locator": "Fig. 2"}
+        data = self.new_configuration()
         ref = self.approve(data, session_id="p1")
         approvals.require_physicell_design_approval(self.root, "design-1", ref["path"], ref["sha256"])
         ref = self.approve(data, id="design-2", session_id="mc-new")
@@ -433,12 +640,7 @@ class ApprovalTests(Base):
             approvals.require_physicell_design_approval(self.root, "design-2", ref["path"], ref["sha256"])
 
     def test_new_configuration_session_must_be_the_purpose(self):
-        data = self.complete()
-        data.update(basis=None, session="mc-new", cycle_models=["Live", "Flow cytometry model (separated)"],
-                    domain={"x_min": -400, "x_max": 400, "y_min": -400, "y_max": 400, "z_min": -10, "z_max": 10,
-                            "dx": 20, "dy": 20, "dz": 20, "units": "micron", "max_time": 100, "time_units": "min"})
-        for item in data["cell_definitions"] + data["substrates"]:
-            item["from"] = {"source": "s1", "locator": "Fig. 2"}
+        data = self.new_configuration(session="mc-new")
         self.write(data)
         self.assertTrue(any("must be the purpose p1" in e for e in pd.check(self.root, REL)))
         data["session"] = "p1"

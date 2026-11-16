@@ -18,7 +18,7 @@ from scripts.data import approvals
 from scripts.physicell import capture_dictionary as cd
 from scripts.physicell import physicell_projection as pp
 from tests.data.test_physicell_design import (FIXTURES, MABOSS, REL, RULES_REFUSAL, SESSION, STAGE_A, Base,
-                                              dispatch_design)
+                                              built_capture, dispatch_design)
 from tests.data.test_physicell_dictionary import INVOCATION, good_calls
 
 PROJ = "runs/orchestrator/p1/physicell_projection.json"
@@ -37,28 +37,6 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def built_capture(root, session, capture_id, rules=False, edit=None):
-    """Record a capture of the fixture configuration whose tumor carries the PhysiBoSS fixture fragment (the
-    configuration the configurator built from the design): captured input link pressure -> B, output A -> apoptosis.
-    Its rules ruleset is removed unless `rules` (ruling T5-d: server 2.5.2 cannot reload a captured rules CSV).
-    `edit(xml_root)`, if given, changes the XML before it is recorded."""
-    source = root.parent / f"source-{session}-{capture_id}"
-    (source / "config").mkdir(parents=True)
-    tree = ET.parse(FIXTURES / "PhysiCell_settings.xml")
-    if not rules:
-        tree.getroot().remove(tree.getroot().find("cell_rules"))
-    tumor = tree.getroot().find("cell_definitions/cell_definition[@name='tumor']/phenotype")
-    tumor.append(ET.parse(FIXTURES / "intracellular_tumor.xml").getroot())
-    if edit is not None:
-        edit(tree.getroot())
-    tree.write(source / "config/PhysiCell_settings.xml", encoding="utf-8", xml_declaration=True)
-    (source / "config/cell_rules.csv").write_bytes((FIXTURES / "cell_rules.csv").read_bytes())
-    (source / "config/tumor.bnd").write_text("Node A { logic = A; }\nNode B { logic = B; }\nNode C { logic = C; }\n")
-    (source / "config/tumor.cfg").write_text("A.istate=0;")
-    record_physicell(root, source, source / "config/PhysiCell_settings.xml", session, capture_id)
-    return f"runs/multicellular-configurator/{session}/configs/{capture_id}"
-
-
 class ProjectionBase(Base):
     """A checked, approved design, its captured dictionary and a drafted projection over the built capture.
 
@@ -66,6 +44,8 @@ class ProjectionBase(Base):
 
     def make_handoff(self, session=MABOSS, nodes=("A", "B", "C"), outputs=("A", "B"), **kw):
         return super().make_handoff(session, nodes=nodes, outputs=outputs, **kw)
+
+    links = False  # the stage-A capture carries the fixture's PhysiBoSS links (only below the conformance check)
 
     def edit_capture(self, xml_root):
         """Hook: change the built capture's XML before it is recorded (default: unchanged)."""
@@ -75,7 +55,7 @@ class ProjectionBase(Base):
         self.design = self.complete()  # its basis is the fixture capture cap-1
         self.basis = self.capture
         # stage A: a new session (STAGE_A) dispatched with the design (anchored on the basis session SESSION)
-        self.capture = built_capture(self.root, STAGE_A, "cap-2", edit=self.edit_capture)
+        self.capture = built_capture(self.root, STAGE_A, "cap-2", edit=self.edit_capture, links=self.links)
         self.write(self.design)
         self.design_sha = sha(self.root / REL)
         dispatch_design(self.root)
@@ -471,6 +451,30 @@ class OneWriterTests(ProjectionBase):
         rules = [self.rule("r1", "oxygen", "migration speed"), self.rule("r2", "pressure", "migration speed")]
         self.assertEqual(self.errors(self.projection(rules)), [])
 
+    def test_setting_inside_intracellular_refused(self):
+        entry = copy.deepcopy(self.entries()[3])
+        entry.update(path=f"{TUMOR}/intracellular/mapping/output/settings/value", value=0.001,
+                     target_unit="1/min", target_unit_justification="j")
+        self.assertRefused(self.projection([entry]), "set1", "intracellular")
+
+
+class CapturedLinkTests(OneWriterTests):
+    """Defense in depth below the stage-A conformance check (which refuses any captured PhysiBoSS link, ruling
+    T9-b): with conformance bypassed, the one-writer rules still consult the captured links."""
+
+    links = True
+
+    def setUp(self):
+        patcher = mock.patch.object(cd, "conformance", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+
+    def test_without_the_bypass_the_capture_is_refused(self):
+        mock.patch.stopall()
+        self.assertRefused(self.projection(), "does not conform to the design",
+                           "cell definition tumor: 1 PhysiBoSS input link(s)")
+
     def test_input_link_already_in_captured_xml_refused(self):
         data, entry = self.entry("in1")
         entry.update(signal="pressure", node="B")
@@ -484,11 +488,6 @@ class OneWriterTests(ProjectionBase):
         data = self.projection([self.rule("rule9", "oxygen", "apoptosis")])
         self.assertRefused(data, "rule9", "captured XML", "A -> apoptosis")
 
-    def test_setting_inside_intracellular_refused(self):
-        entry = copy.deepcopy(self.entries()[3])
-        entry.update(path=f"{TUMOR}/intracellular/mapping/output/settings/value", value=0.001,
-                     target_unit="1/min", target_unit_justification="j")
-        self.assertRefused(self.projection([entry]), "set1", "intracellular")
 
 
 class ReviewMinorTests(ProjectionBase):

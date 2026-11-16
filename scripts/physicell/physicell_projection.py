@@ -11,7 +11,8 @@ Schema (schema_version 1; every key below is required):
                                  configs/<capture>, sha256 of its capture.json (settings_xml.capture verifies it);
                                  <session> must have been dispatched with the design (lineage.dispatched_with: an
                                  invocation task.txt line 2 is the design's DATA_INPUT line, path and sha256)
-  dictionary: {path, sha256}     the physicell_dictionary.json captured for exactly this capture and design
+  dictionary: {path, sha256}     the physicell_dictionary.json captured for exactly this capture and design; the
+                                 capture must still conform to the design (capture_dictionary.conformance)
   design: {path, sha256, approval}  the stage-A design, its physicell_design stage_approval; it is re-checked
   sources: [{id, path, sha256}]  researcher files under inputs/
   data: [{id, session, proposal, approval}]  approved data-analyst proposals
@@ -60,6 +61,7 @@ if __package__ in (None, ""):  # run as a script: make the repo importable
 from scripts import state  # noqa: E402
 from scripts.data import approvals  # noqa: E402
 from scripts.data.common import finite_number, project_root, reject_symlinks, sha256_file, strict_json  # noqa: E402
+from scripts.physicell import capture_dictionary as cd  # noqa: E402
 from scripts.physicell import lineage  # noqa: E402
 from scripts.physicell import physicell_design as pd  # noqa: E402
 from scripts.physicell import settings_xml as sx  # noqa: E402
@@ -271,6 +273,13 @@ class _Checker(pd.Citations):
             except (ValueError, OSError) as exc:
                 self.error(f"design {ref['path']}: the capture's session {self.session} was not dispatched with it: "
                            f"{exc}")
+        if self.capture is not None:
+            try:  # ruling T9-b: stage B starts only from a stage-A capture that conforms to its design
+                problems = cd.conformance(self.root, design, self.capture["path"])
+            except (ValueError, OSError) as exc:
+                problems = [str(exc)]
+            if problems:
+                self.error(f"capture {self.capture['path']} does not conform to the design: " + "; ".join(problems))
         self.design_ref = ref
         self.maboss = {}
         for item in design["intracellular"]:

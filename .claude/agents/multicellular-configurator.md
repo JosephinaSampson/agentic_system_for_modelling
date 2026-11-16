@@ -86,11 +86,15 @@ projection, its capture's session).
 **Building the approved design** (all of the design form, and the start of the projection form):
 1. With a `basis`, load the basis capture's packaged XML with `load_xml_configuration`:
    `<basis capture>/package/config/PhysiCell_settings.xml`, as an absolute path under the project root.
-   Keep its `from: "basis"` entries unchanged. Without a basis, create the declared domain.
-2. Create the declared substrates (with their declared units) and cell definitions (with their declared cycle
-   models); a `variant_of` cell definition is created like any other.
+   Keep its `from: "basis"` entries unchanged. Without a basis, create the declared domain
+   (`create_simulation_domain` with the design's `domain_x`, `domain_y`, `use_2d`, `domain_z`, `dx`, `max_time`).
+2. Create the declared substrates that are not from `"basis"` (`add_single_substrate` with the design's `units`
+   label, `diffusion_coefficient`, `decay_rate`, `initial_condition`, `dirichlet.enabled` and `dirichlet.value`,
+   passing `null` only where the design says `null`) and cell definitions (`add_single_cell_type` with the declared
+   `cycle_model` key); a `variant_of` cell definition is created like any other.
 3. Import each `intracellular` handoff onto its cell definition with `import_maboss_handoff`.
-Add no rule, link, parameter or other value while building.
+Pass every tool argument explicitly from the design: domain, substrate parameters and Dirichlet settings, cycle models. Never use a tool default or a typical value. If the design lacks a value a tool requires, return blocked. Add no rule, link or other value.
+The orchestrator compares the stage-A capture with the design before anything else uses it.
 
 - **Design.** Apply exactly the approved design: build it as above. Then, after the last structural call, call the
   discovery tools for the signal list (`list_all_available_signals()`) and for every cell definition's behavior

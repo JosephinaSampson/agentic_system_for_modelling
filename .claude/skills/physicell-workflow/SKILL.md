@@ -69,9 +69,14 @@ after `STAGE_GATE`, names an approved `physicell_design.json` (stage A) or
   Never re-add a captured configuration's rules by hand; if the captured configuration has a rules CSV, return blocked.
 - Building the approved design: with a `basis`, load the basis capture's packaged XML with
   `load_xml_configuration()` (`<basis capture>/package/config/PhysiCell_settings.xml`, as an absolute path under
-  the project root) and keep its `from: "basis"` entries unchanged; without one, create the declared domain.
-  Create the declared substrates and cell definitions, and import each handoff onto its cell definition
-  (`import_maboss_handoff()`). Add no rule, link or value while building.
+  the project root) and keep its `from: "basis"` entries unchanged; without one, create the declared domain
+  (`create_simulation_domain()` with `domain_x`, `domain_y`, `use_2d`, `domain_z`, `dx`, `max_time`).
+  Create the declared substrates (`add_single_substrate()` with the `units` label, `diffusion_coefficient`,
+  `decay_rate`, `initial_condition`, `dirichlet_enabled`, `dirichlet_value`) and cell definitions
+  (`add_single_cell_type()` with the declared `cycle_model` key), and import each handoff onto its cell definition
+  (`import_maboss_handoff()`).
+  Pass every tool argument explicitly from the design: domain, substrate parameters and Dirichlet settings, cycle models. Never use a tool default or a typical value. If the design lacks a value a tool requires, return blocked. Add no rule, link or other value.
+  The orchestrator compares the stage-A capture with the design (`capture_dictionary.py`) before it is used.
 - Design: apply exactly the approved design (build it). Then, after the last structural call, call
   `list_all_available_signals()` and `list_all_available_behaviors(cell_type=...)` for every cell definition,
   so the invocation record holds them (the orchestrator captures the dictionary from it). Then export.

@@ -9,6 +9,8 @@ and "1" differ. Callers that need numeric equality compare numbers explicitly.
 from __future__ import annotations
 
 import hashlib
+import math
+import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
@@ -114,6 +116,49 @@ def cycle_model(root: ET.Element, cell_definition: str) -> str:
     if len(cycle) != 1 or not cycle[0].get("name"):
         raise ValueError(f"cell definition {cell_definition} has no unique named cycle")
     return cycle[0].get("name")
+
+
+DECIMAL = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")  # ASCII; no _, nan or inf
+
+
+def number(text) -> float | None:
+    """The finite float an XML text holds as a strict ASCII decimal, else None."""
+    text = (text or "").strip() if isinstance(text, str) or text is None else None
+    if text is None or not DECIMAL.fullmatch(text):
+        return None
+    value = float(text)
+    return value if math.isfinite(value) else None
+
+
+def close(found: float | None, expected: float, rel: float = 1e-9) -> bool:
+    return found is not None and math.isclose(found, expected, rel_tol=rel, abs_tol=0.0)
+
+
+def _valued(element: ET.Element | None) -> dict | None:
+    if element is None:
+        return None
+    return {"text": (element.text or "").strip(), "units": element.get("units"), "enabled": element.get("enabled")}
+
+
+def substrate_facts(root: ET.Element) -> dict[str, dict]:
+    """{name: {units, diffusion_coefficient, decay_rate, initial_condition, dirichlet, boundaries, count}} of every
+    microenvironment_setup/variable: values are {text, units, enabled} of the element (None when absent),
+    boundaries the Dirichlet_options/boundary_value {ID, enabled, text}; count > 1 flags a duplicate name."""
+    facts: dict[str, dict] = {}
+    for variable in root.findall("microenvironment_setup/variable"):
+        name = variable.get("name")
+        if name in facts:
+            facts[name]["count"] += 1
+            continue
+        facts[name] = {
+            "units": variable.get("units"), "count": 1,
+            "diffusion_coefficient": _valued(variable.find("physical_parameter_set/diffusion_coefficient")),
+            "decay_rate": _valued(variable.find("physical_parameter_set/decay_rate")),
+            "initial_condition": _valued(variable.find("initial_condition")),
+            "dirichlet": _valued(variable.find("Dirichlet_boundary_condition")),
+            "boundaries": [{"ID": b.get("ID"), "enabled": b.get("enabled"), "text": (b.text or "").strip()}
+                           for b in variable.findall("Dirichlet_options/boundary_value")]}
+    return facts
 
 
 def _read_verified(path: Path, expected, label: str) -> tuple[bytes, str]:

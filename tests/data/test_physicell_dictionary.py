@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from scripts.physicell import capture_dictionary as cd
 from scripts.capture.record_physicell_config import record_physicell
-from tests.data.test_physicell_design import REL, STAGE_A, Base, dispatch_design, write_config
+from tests.data.test_physicell_design import REL, STAGE_A, Base, built_capture, dispatch_design
 
 P = "mcp__physicell-agent__"
 FIXTURE = Path(__file__).parent / "fixtures" / "physicell" / "tool_calls.json"
@@ -70,9 +72,7 @@ class DictionaryTests(Base):
         self.design = self.complete()  # anchored on the basis capture's session
         self.write(self.design)
         # stage A: a new configurator session, dispatched with the design, built and captured the configuration
-        source = self.root.parent / "source-stage-a"
-        record_physicell(self.root, source, write_config(source / "config"), STAGE_A, "cap-a")
-        self.capture = f"runs/multicellular-configurator/{STAGE_A}/configs/cap-a"
+        self.capture = built_capture(self.root, STAGE_A, "cap-a")
         dispatch_design(self.root)
 
     def invoke(self, content, rel=INVOCATION):
@@ -210,19 +210,20 @@ class DictionaryTests(Base):
         self.refused(content, "add_single_cell_type.*dangling9")
 
     def test_odd_case_name_preserved(self):
-        self.design["cell_definitions"][1]["name"] = "Tumor_Cell"
-        self.design["intracellular"] = []
-        self.design["coupling_plan"] = []
-        self.design["cell_definitions"][1]["from"] = {"source": "s1", "locator": "Fig. 1"}
-        self.design["cell_definitions"][1]["cycle_model"] = "Live"
-        self.design["cell_definitions"] = [c for c in self.design["cell_definitions"] if c["name"] != "tumor_hypoxic"]
+        self.design["cell_definitions"][2]["name"] = "Tumor_Cell"
+        self.design["coupling_plan"][1]["cell_definition"] = "Tumor_Cell"
         self.write(self.design)
         dispatch_design(self.root)  # stage A was dispatched with this design
+
+        def rename(xml_root):
+            xml_root.find("cell_definitions/cell_definition[@name='tumor_hypoxic']").set("name", "Tumor_Cell")
+
+        self.capture = built_capture(self.root, STAGE_A, "cap-odd", edit=rename)
         content = blocks(call(1, "list_all_available_signals", {}, structured("signals", SIGNALS)),
                          *[call(2 + i, "list_all_available_behaviors", {"cell_type": c}, structured("behaviors", behaviors(c)))
-                           for i, c in enumerate(("default", "Tumor_Cell"))])
+                           for i, c in enumerate(("default", "tumor", "Tumor_Cell"))])
         out = json.loads(self.run_capture(content).read_text())
-        self.assertEqual(list(out["behaviors"]), ["default", "Tumor_Cell"])
+        self.assertEqual(list(out["behaviors"]), ["default", "tumor", "Tumor_Cell"])
 
     def test_design_anchor_is_not_the_capture_session(self):
         # the design's session is its basis anchor; stage A is bound by dispatch lineage, not by session
@@ -252,6 +253,200 @@ class DictionaryTests(Base):
         self.run_capture(self.good())
         with self.assertRaisesRegex(ValueError, "new design purpose directory; never delete"):
             cd.capture_dictionary(self.root, INVOCATION, self.capture, REL)
+
+
+def find(xml_root, path):
+    found = xml_root.find(path)
+    assert found is not None, path
+    return found
+
+
+def oxygen(xml_root, path=""):
+    return find(xml_root, "microenvironment_setup/variable[@name='oxygen']" + (f"/{path}" if path else ""))
+
+
+class ConformanceTests(DictionaryTests):
+    """Ruling T9-b: the stage-A capture equals the design before its dictionary is recorded; every mismatch is
+    named. The conforming capture of setUp passes (test_happy_path)."""
+
+    count = 0
+
+    def refused_capture(self, pattern, edit=None, **kw):
+        ConformanceTests.count += 1
+        self.capture = built_capture(self.root, "mc-stage-a", f"cap-c{self.count}", edit=edit, **kw)
+        self.refused(self.good(), "does not conform to the design.*" + pattern)
+
+    def test_conforming_capture_passes(self):
+        self.assertEqual(cd.conformance(self.root, self.design, self.capture), [])
+
+    def test_cell_definition_set(self):
+        def extra(xml_root):
+            definitions = find(xml_root, "cell_definitions")
+            stromal = copy.deepcopy(find(definitions, "cell_definition[@name='default']"))
+            stromal.set("name", "stromal")
+            definitions.append(stromal)
+        self.refused_capture(r"cell definitions \['stromal'\] are in the capture but not in the design", extra)
+
+        def missing(xml_root):
+            definitions = find(xml_root, "cell_definitions")
+            definitions.remove(find(definitions, "cell_definition[@name='tumor_hypoxic']"))
+        self.refused_capture(r"cell definitions \['tumor_hypoxic'\] are in the design but not in the capture", missing)
+
+    def test_cycle_model(self):
+        def cycle(xml_root):
+            find(xml_root, "cell_definitions/cell_definition[@name='tumor_hypoxic']/phenotype/cycle").set(
+                "name", "Ki67 (basic)")
+        self.refused_capture("cell definition tumor_hypoxic: cycle 'Ki67 \\(basic\\)' is not the design's 'live'", cycle)
+
+    def test_substrate_set_and_label(self):
+        def extra(xml_root):
+            setup = find(xml_root, "microenvironment_setup")
+            glucose = copy.deepcopy(oxygen(xml_root))
+            glucose.set("name", "glucose")
+            setup.insert(0, glucose)
+        self.refused_capture(r"substrates \['glucose'\] are in the capture but not in the design", extra)
+        self.refused_capture("substrate oxygen: units label 'mM' is not the design's 'mmHg'",
+                             lambda x: oxygen(x).set("units", "mM"))
+
+    def test_substrate_values_and_units(self):
+        cases = (("physical_parameter_set/diffusion_coefficient", "100", "diffusion_coefficient: the capture holds '100'"),
+                 ("physical_parameter_set/decay_rate", "0.2", "decay_rate: the capture holds '0.2'"),
+                 ("initial_condition", "21", "initial_condition: the capture holds '21'"),
+                 ("Dirichlet_boundary_condition", "20", "Dirichlet value: the capture holds '20'"))
+        for path, text, pattern in cases:
+            with self.subTest(path=path):
+                def edit(xml_root, path=path, text=text):
+                    oxygen(xml_root, path).text = text
+                self.refused_capture(pattern, edit)
+        self.refused_capture("decay_rate: the capture's units '1/s' are not the design's '1/min'",
+                             lambda x: oxygen(x, "physical_parameter_set/decay_rate").set("units", "1/s"))
+        self.refused_capture("Dirichlet enabled: the capture holds 'false'",
+                             lambda x: oxygen(x, "Dirichlet_boundary_condition").set("enabled", "false"))
+
+    def test_domain_of_a_basis_design_is_the_basis_domain(self):
+        self.refused_capture("domain: differs from the basis capture's",
+                             lambda x: setattr(find(x, "domain/x_max"), "text", "500"))
+        self.refused_capture("overall/max_time: differs from the basis capture's",
+                             lambda x: setattr(find(x, "overall/max_time"), "text", "60"))
+
+    def test_maboss_models_on_exactly_the_declared_cells(self):
+        def moved(xml_root):
+            tumor = find(xml_root, "cell_definitions/cell_definition[@name='tumor']/phenotype")
+            model = find(tumor, "intracellular")
+            tumor.remove(model)
+            find(xml_root, "cell_definitions/cell_definition[@name='tumor_hypoxic']/phenotype").append(model)
+        self.refused_capture("cell definition tumor: the design's MaBoSS model is not its one intracellular model", moved)
+        self.refused_capture("cell definition tumor_hypoxic: carries an intracellular model the design does not declare",
+                             moved)
+
+    def test_no_enabled_rules_ruleset(self):
+        self.refused_capture("enabled rules ruleset", rules=True)
+
+    def test_no_physiboss_links(self):
+        # import_maboss_handoff (server 2.5.2) attaches the model with an empty mapping
+        self.refused_capture("cell definition tumor: 1 PhysiBoSS input link", links=True)
+        self.refused_capture("cell definition tumor: 1 PhysiBoSS output link", links=True)
+
+    def test_every_mismatch_named(self):
+        def many(xml_root):
+            oxygen(xml_root, "physical_parameter_set/decay_rate").text = "0.2"
+            find(xml_root, "cell_definitions/cell_definition[@name='tumor_hypoxic']/phenotype/cycle").set("name", "x")
+        self.refused_capture("tumor_hypoxic: cycle.*; substrate oxygen decay_rate", many)
+
+
+def new_configuration_xml(xml_root):
+    """The fixture stage-A XML as built for Base.new_configuration(): default's cycle is the server name `live`,
+    drug is an added substrate in mmHg."""
+    find(xml_root, "cell_definitions/cell_definition[@name='default']/phenotype/cycle").set("name", "live")
+    drug = find(xml_root, "microenvironment_setup/variable[@name='drug']")
+    for element in (drug, find(drug, "initial_condition"), find(drug, "Dirichlet_boundary_condition")):
+        element.set("units", "mmHg")
+
+
+def library_default(xml_root, decay="10"):
+    """The library default substrate server 2.5.2 inserts with create_simulation_domain (probe output)."""
+    variable = ET.fromstring(
+        '<variable name="substrate" units="dimensionless" ID="0"><physical_parameter_set>'
+        '<diffusion_coefficient units="micron^2/min">100000</diffusion_coefficient>'
+        f'<decay_rate units="1/min">{decay}</decay_rate></physical_parameter_set>'
+        '<initial_condition units="mmHg">0</initial_condition>'
+        '<Dirichlet_boundary_condition units="mmHg" enabled="false">0</Dirichlet_boundary_condition>'
+        '<Dirichlet_options><boundary_value ID="xmin" enabled="false" /></Dirichlet_options></variable>')
+    find(xml_root, "microenvironment_setup").insert(0, variable)
+
+
+class NewConfigurationConformanceTests(ConformanceTests):
+    """A new configuration: the domain and max_time are the design's; the untouched library default substrate is
+    the server's own."""
+
+    def setUp(self):
+        super().setUp()
+        self.design = self.new_configuration(copy.deepcopy(self.design))
+        self.write(self.design)
+        dispatch_design(self.root, anchor="p1")
+        self.capture = built_capture(self.root, STAGE_A, "cap-new", edit=self.to_new)
+
+    def to_new(self, xml_root):
+        new_configuration_xml(xml_root)
+        library_default(xml_root)
+
+    def refused_capture(self, pattern, edit=None, **kw):
+        def both(xml_root):
+            self.to_new(xml_root)
+            if edit is not None:
+                edit(xml_root)
+        super().refused_capture(pattern, both, **kw)
+
+    def test_happy_path(self):
+        self.assertTrue(self.run_capture(self.good()).is_file())
+
+    def test_capture_from_another_session_refused(self):
+        self.refused(self.good(), "session", rel="runs/multicellular-configurator/other/invocation/a/tool_calls.json")
+
+    def test_odd_case_name_preserved(self):
+        pass  # covered by the basis form
+
+    def test_changed_design_refused(self):
+        self.design["unmapped"] = [{"item": "fibroblast", "reason": "out of scope"}]
+        self.write(self.design)
+        self.refused(self.good(), "lineage")
+
+    def test_domain_of_a_basis_design_is_the_basis_domain(self):
+        pass  # a new configuration: test_domain below
+
+    def test_domain(self):
+        cases = (("domain/x_max", "500", "domain x_max: the capture holds '500', the design 400.0"),
+                 ("domain/y_min", "-300", "domain y_min: the capture holds '-300', the design -400.0"),
+                 ("domain/z_max", "20", "domain z_max: the capture holds '20', the design 10.0"),
+                 ("domain/dy", "10", "domain dy: the capture holds '10', the design 20.0"),
+                 ("domain/use_2D", "false", "domain use_2D: the capture holds 'false', the design 'true'"),
+                 ("overall/max_time", "60", "overall max_time: the capture holds '60', the design 1440.0"),
+                 ("overall/space_units", "mm", "overall space_units: the capture holds 'mm', the design 'micron'"))
+        for path, text, pattern in cases:
+            with self.subTest(path=path):
+                def edit(xml_root, path=path, text=text):
+                    find(xml_root, path).text = text
+                self.refused_capture(pattern, edit)
+        self.refused_capture("overall max_time: the capture's units 'h' are not the design's 'min'",
+                             lambda x: find(x, "overall/max_time").set("units", "h"))
+
+    def test_library_default_substrate_must_be_untouched(self):
+        self.refused_capture(r"substrates \['substrate'\] are in the capture but not in the design",
+                             lambda x: setattr(find(x, "microenvironment_setup/variable[@name='substrate']"
+                                                       "/physical_parameter_set/decay_rate"), "text", "5"))
+
+    def test_added_substrate_dirichlet_boundaries(self):
+        def boundary(xml_root):
+            find(xml_root, "microenvironment_setup/variable[@name='oxygen']/Dirichlet_options/boundary_value"
+                           "[@ID='xmin']").attrib.update(enabled="true")
+        self.refused_capture("substrate oxygen Dirichlet boundary xmin: the capture holds '0.0', the design 38.0",
+                             boundary)
+
+        def drug_boundary(xml_root):
+            options = ET.SubElement(find(xml_root, "microenvironment_setup/variable[@name='drug']"), "Dirichlet_options")
+            ET.SubElement(options, "boundary_value", {"ID": "xmin", "enabled": "true"}).text = "0"
+        self.refused_capture("substrate drug Dirichlet boundary xmin: enabled, the design's Dirichlet condition is "
+                             "disabled", drug_boundary)
 
 
 if __name__ == "__main__":

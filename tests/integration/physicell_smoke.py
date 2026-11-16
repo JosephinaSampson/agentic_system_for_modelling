@@ -40,6 +40,7 @@ sys.path.insert(0, str(REPO))
 from scripts import state  # noqa: E402
 from scripts.capture.record_physicell_config import record_physicell  # noqa: E402
 from scripts.physicell import build as physicell_build  # noqa: E402
+from scripts.physicell import capture_dictionary as cd  # noqa: E402
 from scripts.physicell import physicell_projection as pp  # noqa: E402
 from scripts.physicell import settings_xml as sx  # noqa: E402
 from tests.data.test_physicell_design import CAPTURE, MABOSS, REL, SESSION, STAGE_A, write_config  # noqa: E402
@@ -135,17 +136,35 @@ def maboss():
     return {"session": session, "handoff": rel}
 
 
+def build_design(s, design):
+    """The configurator's build of an approved new-configuration design: every tool argument from the design
+    (ruling T9-a/T9-c), never a tool default."""
+    d = design["domain"]
+    physicell(s, "create_simulation_domain", domain_x=d["domain_x"]["value"], domain_y=d["domain_y"]["value"],
+              use_2d=d["use_2d"], domain_z=None if d["domain_z"] is None else d["domain_z"]["value"],
+              dx=d["dx"]["value"], max_time=d["max_time"]["value"])
+    for sub in design["substrates"]:
+        dirichlet = sub["dirichlet"]
+        physicell(s, "add_single_substrate", substrate_name=sub["name"],
+                  diffusion_coefficient=sub["diffusion_coefficient"]["value"], decay_rate=sub["decay_rate"]["value"],
+                  initial_condition=sub["initial_condition"]["value"], units=sub["units"],
+                  dirichlet_enabled=dirichlet["enabled"],
+                  dirichlet_value=None if dirichlet["value"] is None else dirichlet["value"]["value"])
+    for cell in design["cell_definitions"]:
+        physicell(s, "add_single_cell_type", cell_type_name=cell["name"], cycle_model=cell["cycle_model"])
+    for n, item in enumerate(design["intracellular"]):
+        physicell(s, "import_maboss_handoff", manifest_path=str(PROJECT / item["maboss"]["handoff"]),
+                  artifact_prefix=f"maboss_import_{n}")
+
+
 def configure(stage):
     """Stage A builds the design and lists signals/behaviors; stage B replays the same calls in a new session,
     then applies exactly the projection's entries (model values) and exports the rules CSV before the XML."""
     from mcp_biomodelling_servers.PhysiCell import server as s
     from scripts.physicell import physicell_projection as pp
+    design = json.loads((PROJECT / args["design"]).read_text())
     physicell(s, "create_session", set_as_default=True)
-    physicell(s, "create_simulation_domain", domain_x=200.0, domain_y=200.0, use_2d=True, dx=20.0, max_time=100.0)
-    physicell(s, "add_single_substrate", substrate_name="oxygen", diffusion_coefficient=100000.0, decay_rate=0.1,
-              initial_condition=38.0, units="mmHg")
-    physicell(s, "add_single_cell_type", cell_type_name="tumor", cycle_model="Ki67_basic")
-    physicell(s, "import_maboss_handoff", manifest_path=args["manifest"], artifact_prefix="maboss_import")
+    build_design(s, design)
     if stage == "A":
         physicell(s, "list_all_available_signals")
         physicell(s, "list_all_available_behaviors", cell_type="tumor")
@@ -185,7 +204,7 @@ def discover():
     from mcp_biomodelling_servers.PhysiCell import server as s
     invoke(s.create_session, set_as_default=True)
     cycle = invoke(s.get_available_cycle_models)
-    return {"cycle_models": [m["key"] for m in cycle.structured_content["models"]]}
+    return {"cycle_models": [{"key": m["key"], "name": m["name"]} for m in cycle.structured_content["models"]]}
 
 
 mode = sys.argv[1]
@@ -349,7 +368,7 @@ class Smoke:
         def fill_design(data):
             for item in data["cell_definitions"] + data["substrates"]:
                 item["description"] = f"existing {item['name']}"
-            data["cell_definitions"].append({"name": "tumor_hypoxic", "cycle_model": "Live",
+            data["cell_definitions"].append({"name": "tumor_hypoxic", "cycle_model": "live",
                                              "description": "hypoxic variant", "variant_of": "tumor",
                                              "from": {"source": "s1", "locator": "Fig. 2"}})
             data["intracellular"] = [{"cell_definition": "tumor",
@@ -359,7 +378,7 @@ class Smoke:
                  "notes": "oxygen drives node A; node B drives migration speed"},
                 {"cell_definition": "tumor_hypoxic", "behavior_group": "motility", "route": "rules",
                  "notes": "oxygen-dependent speed"}]
-            data["cycle_models"] = ["Live"]
+            data["cycle_models"] = [{"key": "live", "name": "live"}]
 
         self.check_refused_then_passes("scripts/physicell/physicell_design.py", REL, fill_design)
         # the design is anchored on its basis capture's session; it is approved before stage A runs
@@ -495,13 +514,22 @@ class Smoke:
         cite = {"source": "s1", "locator": "Methods"}
 
         def fill_design(data):
-            data["domain"] = {"x_min": -100.0, "x_max": 100.0, "y_min": -100.0, "y_max": 100.0, "z_min": -10.0,
-                              "z_max": 10.0, "dx": 20.0, "dy": 20.0, "dz": 20.0, "units": "micron",
-                              "max_time": 100.0, "time_units": "min"}
+            def length(value):
+                return {"value": value, "unit": "micron"}
+
+            def value(number, unit):
+                return {"value": number, "unit": unit, "from": cite}
+
+            # every create_simulation_domain / add_single_substrate / add_single_cell_type argument, cited
+            data["domain"] = {"domain_x": length(200.0), "domain_y": length(200.0), "use_2d": True, "domain_z": None,
+                              "dx": length(20.0), "max_time": {"value": 100.0, "unit": "min"}, "from": cite}
             data["cycle_models"] = found["cycle_models"]
             data["cell_definitions"] = [{"name": "tumor", "cycle_model": "Ki67_basic", "description": "tumor cells",
                                          "from": cite}]
-            data["substrates"] = [{"name": "oxygen", "units": "mmHg", "description": "oxygen", "from": cite}]
+            data["substrates"] = [{"name": "oxygen", "units": "mmHg", "description": "oxygen", "from": cite,
+                                   "diffusion_coefficient": value(100000.0, "micron^2/min"),
+                                   "decay_rate": value(0.1, "1/min"), "initial_condition": value(38.0, "mmHg"),
+                                   "dirichlet": {"enabled": True, "value": value(38.0, "mmHg")}}]
             data["intracellular"] = [{"cell_definition": "tumor",
                                       "maboss": {"handoff": mab["handoff"], "sha256": sha256(Path(manifest))}}]
             data["coupling_plan"] = [
@@ -521,11 +549,23 @@ class Smoke:
 
         # stage A: a new PhysiCell session builds the design, imports the handoff, lists signals and behaviors;
         # the recorder keeps the dispatched brief (line 2: the design's DATA_INPUT line) as its task.txt
-        a = self.server("A", manifest=manifest, capture="capA", agent="agent-a")
+        a = self.server("A", design=REAL_DESIGN, capture="capA", agent="agent-a")
         assert a["session"] != REAL
         self.task_record(a["session"], "agent-a", design_form.prompt)
         bound = sx.capture(self.root, a["capture"])
         assert bound["rules_path"] is None, bound
+        design = json.loads((self.root / REAL_DESIGN).read_text())
+        assert cd.conformance(self.root, design, a["capture"]) == [], cd.conformance(self.root, design, a["capture"])
+        # a stage-A capture that differs from the design (oxygen decay_rate) is refused before any dictionary
+        folder = Path(a["artifacts"])
+        tree = ET.parse(folder / sx.XML_NAME)
+        tree.getroot().find("microenvironment_setup/variable[@name='oxygen']/physical_parameter_set/decay_rate").text = "0.2"
+        tree.write(folder / "nonconforming.xml", encoding="utf-8", xml_declaration=True)
+        record_physicell(self.root, folder, folder / "nonconforming.xml", a["session"], "capA-bad")
+        bad = self.py("scripts/physicell/capture_dictionary.py", a["invocation"],
+                      f"runs/multicellular-configurator/{a['session']}/configs/capA-bad", REAL_DESIGN, check=False)
+        assert bad.returncode == 1 and "does not conform to the design" in bad.stderr \
+            and "oxygen decay_rate: the capture holds '0.2', the design 0.1" in bad.stderr, bad.stderr
         out = self.py("scripts/physicell/capture_dictionary.py", a["invocation"], a["capture"],
                       REAL_DESIGN).stdout.strip()
         dictionary = json.loads((self.root / out).read_text())
@@ -533,7 +573,8 @@ class Smoke:
         behaviors = [b["name"] for b in dictionary["behaviors"]["tumor"]]
         assert {"oxygen", "pressure"} <= set(signals) and "apoptosis" in behaviors, (signals, behaviors)
         step(f"real design {REAL} (anchor {REAL}) checked, approved and dispatched (hook exit 0); stage A in session "
-             f"{a['session']} captured ({a['capture']}); dictionary from its real invocation record, bound by the "
+             f"{a['session']} built from the design's values and captured ({a['capture']}); it conforms to the design "
+             "(a decay_rate-tampered copy is refused); dictionary from its real invocation record, bound by the "
              f"design's DATA_INPUT line ({len(signals)} signals, {len(behaviors)} tumor behaviors)")
 
         self.draft_projection(REAL, a["capture"], REAL_DESIGN, "design-2")
@@ -556,7 +597,7 @@ class Smoke:
              "checked and approved; the hook accepts its DATA_INPUT line")
 
         # stage B: a new session replays the design, applies the entries, exports rules CSV then XML
-        b = self.server("B", manifest=manifest, capture="capB", agent="agent-b", projection=REAL_PROJ)
+        b = self.server("B", design=REAL_DESIGN, capture="capB", agent="agent-b", projection=REAL_PROJ)
         assert b["session"] != a["session"]
         self.task_record(b["session"], "agent-b", dispatched.prompt)
         code, report, rel = self.verify(REAL_PROJ, b["capture"])
