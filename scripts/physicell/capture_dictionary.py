@@ -28,6 +28,7 @@ from pathlib import Path, PurePosixPath
 
 if __package__ in (None, ""):  # run as a script: make the repo importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts import state  # noqa: E402
 from scripts.capture.exports import _structured  # noqa: E402
 from scripts.data.common import project_root, reject_symlinks, strict_json  # noqa: E402
 from scripts.physicell import lineage  # noqa: E402
@@ -333,13 +334,63 @@ def _cells(design: dict, tree, problems: list) -> None:
                                 "writes none and stage A adds none")
 
 
+MODEL_FILES = (("bnd", "bnd_filename", "bnd_file"), ("cfg", "cfg_filename", "cfg_file"))
+
+
+def _handoff_models(root: Path, design: dict, problems: list) -> dict:
+    """{carrier: {"bnd": sha256, "cfg": sha256}} from each design handoff manifest's bnd_file / cfg_file, read from
+    exactly the bytes the design pins (its maboss.sha256); an unreadable handoff is a problem."""
+    models = {}
+    for item in design["intracellular"]:
+        cell, ref = item["cell_definition"], item["maboss"]
+        try:
+            raw = state.artifact(Path(root), ref["handoff"]).read_bytes()
+            if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+                raise ValueError("it changed since the design check")
+            manifest = strict_json(raw)
+            models[cell] = {}
+            for key, _, field in MODEL_FILES:
+                digest = (manifest.get(field) or {}).get("sha256") if isinstance(manifest, dict) else None
+                if not isinstance(digest, str):
+                    raise ValueError(f"it has no {field} sha256")
+                models[cell][key] = digest
+        except (ValueError, OSError, AttributeError) as exc:
+            models.pop(cell, None)
+            problems.append(f"cell definition {cell}: the design's MaBoSS handoff {ref['handoff']}: {exc}")
+    return models
+
+
+def _carrier_models(tree, manifest: dict, models: dict, problems: list) -> None:
+    """Each carrier's captured MaBoSS .bnd/.cfg (the package dependency its bnd_filename/cfg_filename names, with the
+    sha256 settings_xml.capture verified) holds exactly the bytes of the design handoff's bnd_file/cfg_file:
+    import_maboss_handoff (server 2.5.2) copies them verbatim and the recorder copies them into package/config."""
+    deps = {PurePosixPath(d["path"]).name: d.get("sha256") for d in manifest["dependencies"]}
+    for definition in tree.findall("cell_definitions/cell_definition"):
+        cell = definition.get("name")
+        intracellular = definition.findall("phenotype/intracellular")
+        if cell not in models or len(intracellular) != 1:
+            continue  # not a carrier, or its model count is already a problem (_cells)
+        for key, tag, field in MODEL_FILES:
+            text = (intracellular[0].findtext(tag) or "").strip()
+            name = PurePosixPath(text).name if text else None
+            found = deps.get(name) if name else None
+            if found is None:
+                problems.append(f"cell definition {cell}: its MaBoSS .{key} ({tag} {text!r}) is not a captured "
+                                "dependency")
+            elif found != models[cell][key]:
+                problems.append(f"cell definition {cell}: its MaBoSS .{key} {name} (sha256 {found[:12]}) is not the "
+                                f"{field} (sha256 {models[cell][key][:12]}) of the design's handoff: a stale or other "
+                                "MaBoSS export was imported")
+
+
 def conformance(root: Path, design: dict, capture_rel: str) -> list[str]:
     """Every difference between a checked design and its stage-A capture (ruling T9-b); [] when it conforms.
 
     The cell definitions (plus nothing else), their cycles, the substrates (the untouched library default substrate
     of a new configuration aside) with their label, values, units and Dirichlet settings, the domain and max_time
-    (with a basis: the basis capture's), the MaBoSS models on exactly the design's carriers, no PhysiBoSS link and no
-    enabled rules ruleset."""
+    (with a basis: the basis capture's), the MaBoSS models on exactly the design's carriers, each holding exactly the
+    .bnd/.cfg bytes (sha256) of its design handoff's bnd_file/cfg_file, no PhysiBoSS link and no enabled rules
+    ruleset."""
     root = Path(root)
     bound = sx.capture(root, capture_rel)
     raw = (root / bound["xml_path"]).read_bytes()
@@ -352,6 +403,7 @@ def conformance(root: Path, design: dict, capture_rel: str) -> list[str]:
         basis_tree = sx.load(root / basis["xml_path"])
     problems: list[str] = []
     _cells(design, tree, problems)
+    _carrier_models(tree, bound["manifest"], _handoff_models(root, design, problems), problems)
     _substrates(design, tree, problems)
     _domain(design, tree, basis_tree, problems)
     parents = {child: parent for parent in tree.iter() for child in parent}

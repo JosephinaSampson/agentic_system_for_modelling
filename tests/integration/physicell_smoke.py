@@ -556,6 +556,15 @@ class Smoke:
         self.task_record(a["session"], "agent-a", design_form.prompt)
         bound = sx.capture(self.root, a["capture"])
         assert bound["rules_path"] is None, bound
+        # import_maboss_handoff copies the handoff's .bnd/.cfg verbatim (server copy_verified_handoff_artifact) and the
+        # recorder copies them into package/config: conformance compares exactly these bytes (PR #17 review 4586110937)
+        handoff = json.loads((self.root / mab["handoff"]).read_text())
+        deps = {Path(d["path"]).name: d["sha256"] for d in bound["manifest"]["dependencies"]}
+        model = ET.fromstring((self.root / bound["xml_path"]).read_bytes()).find(
+            "cell_definitions/cell_definition[@name='tumor']/phenotype/intracellular")
+        for tag, field in (("bnd_filename", "bnd_file"), ("cfg_filename", "cfg_file")):
+            name = Path(model.findtext(tag).strip()).name
+            assert deps[name] == handoff[field]["sha256"], (tag, name, deps, handoff[field])
         design = json.loads((self.root / REAL_DESIGN).read_text())
         assert cd.conformance(self.root, design, a["capture"]) == [], cd.conformance(self.root, design, a["capture"])
         # a stage-A capture that differs from the design (oxygen decay_rate) is refused before any dictionary
@@ -575,7 +584,8 @@ class Smoke:
         behaviors = [b["name"] for b in dictionary["behaviors"]["tumor"]]
         assert {"oxygen", "pressure"} <= set(signals) and "apoptosis" in behaviors, (signals, behaviors)
         step(f"real design {REAL} (anchor {REAL}) checked, approved and dispatched (hook exit 0); stage A in session "
-             f"{a['session']} built from the design's values and captured ({a['capture']}); it conforms to the design "
+             f"{a['session']} built from the design's values and captured ({a['capture']}); its MaBoSS .bnd/.cfg are "
+             "the handoff's bytes (import_maboss_handoff copies verbatim); it conforms to the design "
              "(a decay_rate-tampered copy is refused); dictionary from its real invocation record, bound by the "
              f"design's DATA_INPUT line ({len(signals)} signals, {len(behaviors)} tumor behaviors)")
 

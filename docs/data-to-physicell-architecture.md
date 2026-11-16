@@ -92,7 +92,9 @@ outline:
 - **Stage-A conformance:** the cell-definition set and cycle names; the substrate set, label,
   values, units and Dirichlet settings (the library default `substrate` accepted only untouched,
   in a new configuration); domain extents, `dx`/`dy`/`dz`, `use_2D`, units and `max_time` (with a
-  basis: the basis capture's); MaBoSS models on exactly the declared carriers; no PhysiBoSS link
+  basis: the basis capture's); MaBoSS models on exactly the declared carriers, each carrier's
+  captured `.bnd`/`.cfg` dependency sha256 equal to its design handoff manifest's `bnd_file`/`cfg_file`
+  sha256 (import copies them verbatim: a stale, other or swapped export is refused); no PhysiBoSS link
   (import writes none); no enabled rules ruleset.
 - **Dictionary** (`kind: physicell_dictionary`, write-new): session (= the capture's), invocation,
   capture and design bindings, signals, per-cell behaviors, `source_sha256` of `tool_calls.json`.

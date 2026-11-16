@@ -403,7 +403,9 @@ whatever the label, so an added substrate must be in `mmHg`); a basis substrate 
 `from: "basis"`, and every basis cell definition and substrate is declared. `capture_dictionary.py` (and again the
 projection check) compares the stage-A capture with the design and names every mismatch: the cell definitions and
 their cycles, the substrates and their values, units and Dirichlet settings, the domain and `max_time` (a basis: the
-basis's), the MaBoSS models on exactly the declared cells, no PhysiBoSS link and no enabled rules ruleset. The library
+basis's), the MaBoSS models on exactly the declared cells, each holding exactly its design handoff's `.bnd` and `.cfg`
+bytes (the captured dependency sha256 equals the handoff manifest's `bnd_file`/`cfg_file` sha256; a stale or other
+export is refused), no PhysiBoSS link and no enabled rules ruleset. The library
 default substrate `substrate` that `create_simulation_domain` inserts is accepted only untouched.
 
 **Values.** A quantity is `{value, value_unit, transform, factor, target_unit?, model_value}` (a `setting` entry

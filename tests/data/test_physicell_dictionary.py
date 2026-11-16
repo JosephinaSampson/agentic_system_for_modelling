@@ -369,6 +369,41 @@ class ConformanceTests(DictionaryTests):
         self.refused_capture("cell definition tumor_hypoxic: carries an intracellular model the design does not declare",
                              moved)
 
+    def test_carrier_model_is_the_design_handoff_bytes(self):
+        # PR #17 review 4586110937: a stale or other MaBoSS export imported onto the carrier is refused
+        self.refused_capture("cell definition tumor: its MaBoSS .bnd .*tumor.bnd.* is not the bnd_file .* of the "
+                             "design's handoff", bnd=b"Node A { logic = B; }\nNode B { logic = A; }\n")
+        self.refused_capture("cell definition tumor: its MaBoSS .cfg .*tumor.cfg.* is not the cfg_file",
+                             cfg=b"A.istate=1;")
+
+    def test_two_carriers_with_swapped_models_refused(self):
+        hypoxic = self.make_handoff("maboss-hyp", nodes=("A", "B", "X"), cell_type="tumor_hypoxic")
+        folder = self.root / "runs/boolean-dynamics-modeler"
+        design = copy.deepcopy(self.design)
+        design["intracellular"].append({"cell_definition": "tumor_hypoxic",
+                                        "maboss": {"handoff": hypoxic["path"], "sha256": hypoxic["sha256"]}})
+
+        def second_model(xml_root):
+            getattr(self, "to_new", lambda x: None)(xml_root)  # the new-configuration form's stage-A XML
+            model = copy.deepcopy(find(xml_root, "cell_definitions/cell_definition[@name='tumor']/phenotype/"
+                                                 "intracellular"))
+            find(model, "bnd_filename").text = "./config/hyp.bnd"
+            find(model, "cfg_filename").text = "./config/hyp.cfg"
+            find(xml_root, "cell_definitions/cell_definition[@name='tumor_hypoxic']/phenotype").append(model)
+
+        mine = {"bnd": (folder / "maboss-session/model.bnd").read_bytes(),
+                "cfg": (folder / "maboss-session/model.cfg").read_bytes()}
+        theirs = {"bnd": (folder / "maboss-hyp/model.bnd").read_bytes(),
+                  "cfg": (folder / "maboss-hyp/model.cfg").read_bytes()}
+        right = built_capture(self.root, STAGE_A, "cap-two", edit=second_model, **mine,
+                              files={"hyp.bnd": theirs["bnd"], "hyp.cfg": theirs["cfg"]})
+        self.assertEqual(cd.conformance(self.root, design, right), [])
+        swapped = built_capture(self.root, STAGE_A, "cap-swap", edit=second_model, **theirs,
+                                files={"hyp.bnd": mine["bnd"], "hyp.cfg": mine["cfg"]})
+        problems = cd.conformance(self.root, design, swapped)
+        for cell in ("tumor", "tumor_hypoxic"):
+            self.assertTrue(any(p.startswith(f"cell definition {cell}: its MaBoSS .bnd") for p in problems), problems)
+
     def test_no_enabled_rules_ruleset(self):
         self.refused_capture("enabled rules ruleset", rules=True)
 

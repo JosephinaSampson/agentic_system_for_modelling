@@ -79,11 +79,15 @@ def stage_a_xml(xml_root, links=False):
     definitions.append(variant)
 
 
-def built_capture(root, session, capture_id, rules=False, edit=None, links=False):
+def built_capture(root, session, capture_id, rules=False, edit=None, links=False, bnd=None, cfg=None, files=None):
     """Record a capture of the stage-A build of `Base.complete()` (stage_a_xml: tumor carries the PhysiBoSS
     fixture model, empty mapping unless `links`: then input pressure -> B and output A -> apoptosis; tumor_hypoxic
     added). Its rules ruleset is removed unless `rules` (ruling T5-d: server 2.5.2 cannot reload a captured rules
-    CSV). `edit(xml_root)`, if given, changes the XML before it is recorded."""
+    CSV). `edit(xml_root)`, if given, changes the XML before it is recorded.
+
+    tumor.bnd / tumor.cfg hold `bnd` / `cfg` (bytes) when given, else the bytes of the MaBoSS handoff of session
+    MABOSS when it exists (import_maboss_handoff copies them verbatim), else a 3-node model. `files` ({name: bytes})
+    adds further config files (for models an `edit` attaches)."""
     source = Path(root).parent / f"source-{session}-{capture_id}"
     (source / "config").mkdir(parents=True)
     tree = ET.parse(FIXTURES / "PhysiCell_settings.xml")
@@ -94,8 +98,16 @@ def built_capture(root, session, capture_id, rules=False, edit=None, links=False
         edit(tree.getroot())
     tree.write(source / "config/PhysiCell_settings.xml", encoding="utf-8", xml_declaration=True)
     (source / "config/cell_rules.csv").write_bytes((FIXTURES / "cell_rules.csv").read_bytes())
-    (source / "config/tumor.bnd").write_text("Node A { logic = A; }\nNode B { logic = B; }\nNode C { logic = C; }\n")
-    (source / "config/tumor.cfg").write_text("A.istate=0;")
+    handoff = Path(root) / "runs/boolean-dynamics-modeler" / MABOSS
+    if bnd is None:
+        bnd = (handoff / "model.bnd").read_bytes() if (handoff / "model.bnd").is_file() else \
+            b"Node A { logic = A; }\nNode B { logic = B; }\nNode C { logic = C; }\n"
+    if cfg is None:
+        cfg = (handoff / "model.cfg").read_bytes() if (handoff / "model.cfg").is_file() else b"A.istate=0;"
+    (source / "config/tumor.bnd").write_bytes(bnd)
+    (source / "config/tumor.cfg").write_bytes(cfg)
+    for name, content in (files or {}).items():
+        (source / "config" / name).write_bytes(content)
     record_physicell(root, source, source / "config/PhysiCell_settings.xml", session, capture_id)
     return f"runs/multicellular-configurator/{session}/configs/{capture_id}"
 
