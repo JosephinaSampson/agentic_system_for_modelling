@@ -132,7 +132,8 @@ outline:
   `record_session_id`. Design form: with `upstream_session_id`, every handoff lies under
   `runs/boolean-dynamics-modeler/<that session>/` (at least one); with `standalone_decision_id`,
   none. Projection form: `record_session_id` = the capture session; its design and approval are
-  re-checked. The line-1 `STAGE_GATE` check is unchanged.
+  re-checked, and the design's handoffs are bound to the `STAGE_GATE` exactly as in the design form
+  (stage B replays the design). The line-1 `STAGE_GATE` check is unchanged.
 - **Build:** `--verification` must be a passed `physicell_verification` whose after capture re-binds
   byte for byte and whose recomputed `entries`, `unexpected_changes`, `before`, `after` and
   `projection` equal the file's. The packaged XML and dependencies are copied into `config/`

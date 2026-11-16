@@ -423,7 +423,8 @@ package, through the configured modelling Python (`.setup/local.json` `env_prefi
 **Gate.** The hook re-checks the file on exactly the approved bytes and the approval. Design form: every MaBoSS
 handoff of the design comes from the `STAGE_GATE` upstream MaBoSS session; with a `standalone_decision_id` the
 design has none. Projection form: `record_session_id` = the approval's session = the projection's capture session,
-and the projection's design and its approval are re-checked. The design, projection and dictionary may be named
+and the projection's design and its approval are re-checked; stage B replays that design, so its MaBoSS handoffs
+must come from the `STAGE_GATE` upstream as in the design form. The design, projection and dictionary may be named
 only on the `DATA_INPUT` line.
 
 **Verification.** `verify_export.py` re-checks the projection, requires the stage-B capture to come from a new

@@ -1338,6 +1338,15 @@ class PhysiCellDataInputTests(ProjectionBase):
         self.accepted(self.task(line, gate_line=sa_gate))
         self.refused(self.task(self.design_line(), gate_line=sa_gate), "standalone.*MaBoSS")
 
+    def test_projection_design_handoff_must_be_the_stage_gate_upstream(self):
+        # PR #17 review 4586110268: the projection form binds its design's MaBoSS handoffs to the line-1 STAGE_GATE
+        self.make_handoff("maboss-other")
+        other_gate = "STAGE_GATE " + json.dumps({"upstream_session_id": "maboss-other", "outputs": MC_OUTPUTS})
+        self.accepted(f"{other_gate}\nImport the approved handoff.")  # the STAGE_GATE itself passes
+        self.refused(self.task(self.projection_line(), gate_line=other_gate), f"{MC_MABOSS}.*maboss-other")
+        self.refused(self.task(self.projection_line(), gate_line=self.standalone_gate()), "standalone.*MaBoSS")
+        self.accepted(self.task(self.projection_line()))
+
     def errors_at(self, rel):
         from scripts.physicell import physicell_design
         return physicell_design.check(self.root, rel)
