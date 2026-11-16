@@ -18,6 +18,8 @@ CAPTURE = "cap-1"
 MABOSS = "maboss-session"
 REL = "runs/orchestrator/p1/physicell_design.json"
 RULES_REFUSAL = "the PhysiCell server (2.5.2) cannot reload a captured rules CSV"
+INPUT_FILES_REFUSAL = ("the PhysiCell server (2.5.2) cannot reload a captured configuration's input files (rules, "
+                       "MaBoSS, initial cells) into a new session; use a basis without input files")
 
 
 def write_config(folder, rules=False):
@@ -260,6 +262,19 @@ class CheckTests(Base):
         self.assertRefused(data, RULES_REFUSAL)
         self.assertRefused(data, "apply projections to the stage-A capture (no rules), and revise and re-apply a "
                                  "projection from there")
+
+    def test_basis_with_input_files_refused(self):
+        # Ruling T5-e: a new session's load_xml_configuration lacks the capture's ./config input files
+        from tests.data.test_physicell_projection import built_capture
+        manifest = json.loads((self.root / self.capture / "capture.json").read_text())
+        self.assertEqual(manifest["dependencies"], [])
+        bnd = built_capture(self.root, SESSION, "cap-bnd")  # tumor carries a PhysiBoSS model: .bnd and .cfg files
+        names = [d["path"] for d in json.loads((self.root / bnd / "capture.json").read_text())["dependencies"]]
+        self.assertIn("package/config/tumor.bnd", names)
+        data = self.complete()
+        data["basis"]["capture"] = bnd
+        self.assertRefused(data, INPUT_FILES_REFUSAL)
+        self.assertRefused(data, "package/config/tumor.bnd")
 
     def test_load_and_check_returns_hash_of_bytes_read(self):
         path = self.write(self.complete())

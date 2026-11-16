@@ -597,8 +597,9 @@ def _check_physicell_input(root, value, first_line):
     (physicell_projection.load_and_check: capture, dictionary, the design and its approval), its
     physicell_projection approval binds path and sha256, and record_session_id is the approval's session_id and
     the projection's capture session. The STAGE_GATE stays the plain multicellular check (check_task).
-    record_session_id is a lineage anchor, never a live session: the configurator starts a new PhysiCell session
-    (loading the captured XML for a basis design or a projection) and never passes it to a tool.
+    record_session_id is a lineage anchor, never a live session: the configurator starts a new PhysiCell session,
+    builds the design (loading a design's basis XML, if any; for a projection, replaying the projection's design)
+    and never passes record_session_id to a tool.
     The check runs before the approval is trusted: the approval's session derivation assumes a checked file.
     """
     form = next((name for name, keys in PHYSICELL_FORMS.items() if set(value) == keys), None)

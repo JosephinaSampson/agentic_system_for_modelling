@@ -140,6 +140,10 @@ def _enabled(element: ET.Element, parents: dict) -> bool:
 # export_cell_rules_csv writes only the new rules and leaves two enabled rulesets in the XML.
 RULES_RELOAD = ("the PhysiCell server (2.5.2) cannot reload a captured rules CSV; apply projections to the stage-A "
                 "capture (no rules), and revise and re-apply a projection from there")
+# Loading a captured package XML into a new session also leaves its ./config input files (rules CSV, MaBoSS .bnd/.cfg,
+# initial-cell CSV) behind: they are not in the new session's directory (probe, ruling T5-e).
+INPUT_FILES_RELOAD = ("the PhysiCell server (2.5.2) cannot reload a captured configuration's input files (rules, "
+                      "MaBoSS, initial cells) into a new session; use a basis without input files")
 
 def capture(root: Path, capture_rel: str) -> dict:
     """Bind a captured configuration, verified against its capture.json manifest."""

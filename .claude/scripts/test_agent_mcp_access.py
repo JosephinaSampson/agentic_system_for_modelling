@@ -192,8 +192,15 @@ class DataAnalystAccessTests(unittest.TestCase):
             )
 
 
-RULES_RELOAD_RULE = ("Never re-add a captured configuration's rules by hand; if the captured configuration has a "
-                     "rules CSV, return blocked.")
+PHYSICELL_DATA_RULES = (
+    "`record_session_id` is a lineage anchor, never a live session", "Create a new PhysiCell session for either form",
+    "Never pass `record_session_id` to any tool", "Report the new full session ID",
+    "the orchestrator registers it with `Derived from` = `record_session_id`", "Never infer units",
+    "take names and values only from the verified files named on the `DATA_INPUT` line",
+    "Never re-add a captured configuration's rules by hand; if the captured configuration has a rules CSV, return blocked.",
+)
+# Ruling T5-e: a projection is applied by replaying its design in a new session, never by loading its capture.
+PHYSICELL_STALE = ("for every projection", "projection's `capture.path`", "On the loaded capture", "on the loaded capture")
 REVISION_RULE = "return `blocked` unless the session's current revision equals `proposal.model.revision`"
 
 
@@ -202,28 +209,28 @@ class DataHandoffInstructionTests(unittest.TestCase):
         expected = {
             ".claude/agents/network-curator.md": ("DATA_INPUT", "hgnc_symbol", "manifest.json", "absent from the database", "seeds.json"),
             ".claude/agents/boolean-dynamics-modeler.md": ("DATA_INPUT", "(context, perturbation)", "the context without the", "standalone approval"),
-            ".claude/agents/multicellular-configurator.md": (
+            ".claude/agents/multicellular-configurator.md": PHYSICELL_DATA_RULES + (
                 "Applying an approved design or projection", 'DATA_INPUT {"design"', 'DATA_INPUT {"projection"',
-                "`record_session_id` is a lineage anchor, never a live session", "Create a new PhysiCell session",
-                "load the captured configuration's packaged XML with `load_xml_configuration`",
-                "`<capture>/package/config/PhysiCell_settings.xml`, as an absolute path under the project root",
-                "Never pass\n`record_session_id` to any tool", "Report the new full session ID",
-                "`Derived from` = `record_session_id`",
-                "Apply exactly the approved design", "import_maboss_handoff",
-                "list_all_available_signals()", "list_all_available_behaviors(cell_type=...)",
-                "so the invocation record holds them", "apply exactly the entries with the matching tools",
-                "relative tolerance 1e-9", "Return `blocked` on any difference", "Never infer units",
-                "take names and values only from the verified files named on the `DATA_INPUT` line",
-                "no dispatcher check for this DATA_INPUT", RULES_RELOAD_RULE),
-            ".claude/skills/physicell-workflow/SKILL.md": (RULES_RELOAD_RULE,
-                "`DATA_INPUT` on line 2", "`record_session_id` is a\nlineage anchor, never a live session",
-                "Create a new PhysiCell session", "`load_xml_configuration()`: `<capture>/package/config/PhysiCell_settings.xml`",
-                "as an absolute path under the project root", "Never pass `record_session_id` to any tool",
-                "Report the new full session ID", "`Derived from` = `record_session_id`",
-                "apply exactly the approved design", "import each handoff\n  onto its cell definition",
-                "so\n  the invocation record holds them", "apply exactly the entries with the matching\n  tools", "rel 1e-9",
-                "return `blocked` on any\n  difference", "Never infer units",
-                "take names and values only from the verified files named on\n  the `DATA_INPUT` line"),
+                "load the basis capture's packaged XML with `load_xml_configuration`",
+                "`<basis capture>/package/config/PhysiCell_settings.xml`, as an absolute path under the project root",
+                "Import each `intracellular` handoff onto its cell definition with `import_maboss_handoff`",
+                "Apply exactly the approved design", "list_all_available_signals()",
+                "list_all_available_behaviors(cell_type=...)", "so the invocation record holds them",
+                "Re-apply the approved design exactly as in stage A",
+                "build the design named in the verified\n  projection's `design.path`",
+                "Do not call the discovery list tools again", "Then apply exactly the entries with the matching tools",
+                "relative tolerance 1e-9", "Return `blocked` on any difference",
+                "Apply only the projection entries. Then export (Cell Rules CSV before XML).",
+                "no dispatcher check for this DATA_INPUT"),
+            ".claude/skills/physicell-workflow/SKILL.md": PHYSICELL_DATA_RULES + (
+                "`DATA_INPUT` on line 2", "load the basis capture's packaged XML with\n  `load_xml_configuration()`",
+                "(`<basis capture>/package/config/PhysiCell_settings.xml`, as an absolute path under\n  the project root)",
+                "import each handoff onto its cell definition", "apply exactly the approved design",
+                "so the invocation record holds them", "re-apply the approved design exactly as in stage A",
+                "build the design named in the verified\n  projection's `design.path`",
+                "do not call the discovery list tools again", "apply exactly the entries with\n  the matching tools",
+                "rel 1e-9", "return `blocked` on any difference", "Apply only the projection entries",
+                "Then export (rules CSV before XML)."),
             ".claude/agents/scientific-reviewer.md": ("Data-stage and mapping checklist", "unmapped", "locator"),
             ".claude/agents/reproducibility-auditor.md": ("Data-stage and mapping checklist", "data-derived", "locator", "seeds"),
             ".claude/skills/validate-stage/SKILL.md": ("data_mapping", "mapping.py check", "data_seeds", "--stage-gate"),
@@ -248,6 +255,13 @@ class DataHandoffInstructionTests(unittest.TestCase):
             for phrase in phrases:
                 with self.subTest(path=path, phrase=phrase):
                     self.assertIn(phrase, text)
+
+    def test_configurator_never_loads_a_projection_capture(self):
+        for path in (".claude/agents/multicellular-configurator.md", ".claude/skills/physicell-workflow/SKILL.md"):
+            text = (ROOT / path).read_text(encoding="utf-8")
+            for phrase in PHYSICELL_STALE:
+                with self.subTest(path=path, phrase=phrase):
+                    self.assertNotIn(phrase, text)
 
 
 if __name__ == "__main__":
