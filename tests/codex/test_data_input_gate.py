@@ -1421,5 +1421,45 @@ class PhysiCellDataInputTests(ProjectionBase):
         self.refused(self.task(self.design_line(), tail=" data-20990101T000000Z-deadbeef"), "data-analyst")
 
 
+def load_hook():
+    """The dispatch hook module, loaded in-process (its main() reads the event from sys.stdin)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("stage_gate_guard_under_test", HOOK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_hook(module, root, subagent_type, prompt):
+    """(exit status, stderr) of the in-process hook on one Agent dispatch event."""
+    import contextlib
+    import io
+    event = {"tool_name": "Agent", "tool_input": {"subagent_type": subagent_type, "prompt": prompt}}
+    err = io.StringIO()
+    with mock.patch.object(module, "ROOT", root), mock.patch.object(sys, "stdin", io.StringIO(json.dumps(event))), \
+            contextlib.redirect_stderr(err):
+        status = module.main()
+    return status, err.getvalue()
+
+
+class HookRoleTests(unittest.TestCase):
+    """PR #17 review 4586112665: every gated role takes DATA_INPUT; the hook has no check_job_mentions branch and
+    fails closed (exit 2) on a gated role without a DATA_INPUT form."""
+
+    def test_every_gated_role_has_a_data_input_line(self):
+        self.assertLessEqual(load_hook().GATED, set(gate.DATA_INPUT_LINE))
+
+    def test_gated_role_without_data_input_form_is_blocked(self):
+        hook = load_hook()
+        lines = {k: v for k, v in gate.DATA_INPUT_LINE.items() if k != "network_curator"}
+        with mock.patch.object(gate, "DATA_INPUT_LINE", lines):
+            status, err = run_hook(hook, state.ROOT, "network-curator", "Build a network.")
+        self.assertEqual(status, 2)
+        self.assertIn("network_curator has no DATA_INPUT form", err)
+
+    def test_hook_does_not_import_check_job_mentions(self):
+        self.assertNotIn("check_job_mentions", HOOK.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
