@@ -295,3 +295,62 @@ def require_proposal_job(root: Path, rel: str, proposal: dict) -> dict:
         raise ValueError(f"{rel}: its mapping {ref} is not the mapping of the job.json beside it "
                          f"({job.get('mapping')!r})")
     return job
+
+
+def _physicell_design_facts(root: Path, rel: str, sha256: str) -> tuple[str | None, list]:
+    """(PhysiCell session, cell definition and substrate names) of a physicell_design.json, tolerant of shape.
+
+    The bytes are read once; their digest must equal `sha256` and the facts come from those same bytes.
+    """
+    from scripts.data.common import strict_json
+    raw = _state().artifact(Path(root), rel).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != sha256:
+        raise ValueError(f"{rel} changed during approval check (sha256 mismatch)")
+    try:
+        data = strict_json(raw)
+    except (ValueError, RecursionError) as exc:
+        raise ValueError(f"cannot read {rel}: {exc}") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"{rel} must be a JSON object")
+    basis = data.get("basis")
+    capture = basis.get("capture") if isinstance(basis, dict) else None
+    parts = capture.split("/") if isinstance(capture, str) else []
+    session = parts[2] if len(parts) == 5 else (data.get("session") if basis is None else None)
+    names = []
+    for key in ("cell_definitions", "substrates"):
+        for item in data.get(key) if isinstance(data.get(key), list) else ():
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                names.append(item["name"])
+    return session, names
+
+
+def require_physicell_design_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
+    """The physicell_design stage_approval of exactly this physicell_design.json path and sha256.
+
+    The record must pass `state.validate_record`; session_id is the PhysiCell session of the design's basis
+    capture (or the session the design declares for a new configuration) and outputs are exactly the cell
+    definition and substrate names. This binds the approval to the bytes; run
+    `scripts/physicell/physicell_design.py check` and have it pass before the researcher approves.
+    """
+    record = _require_artifact_approval(root, record_id, "physicell_design", rel, sha256)
+    _state().validate_record(Path(root), record)
+    session, names = _physicell_design_facts(root, rel, sha256)
+    if record.get("session_id") != session:
+        raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
+                         f"but the design binds PhysiCell session {session!r}")
+    outputs = record.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) != len(set(outputs)) or set(outputs) != set(names) \
+            or len(names) != len(set(names)):
+        raise ValueError(f"decision {record_id} outputs must equal the cell definition and substrate names "
+                         f"of the design: {sorted(set(names))}")
+    return record
+
+
+def require_physicell_projection_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
+    """The physicell_projection stage_approval of exactly this artifact path and sha256 (validate_record included).
+
+    The artifact's own content rules (session, outputs) belong to the projection tooling that names it.
+    """
+    record = _require_artifact_approval(root, record_id, "physicell_projection", rel, sha256)
+    _state().validate_record(Path(root), record)
+    return record
