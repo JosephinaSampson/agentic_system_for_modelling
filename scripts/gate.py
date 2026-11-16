@@ -597,6 +597,8 @@ def _check_physicell_input(root, value, first_line):
     (physicell_projection.load_and_check: capture, dictionary, the design and its approval), its
     physicell_projection approval binds path and sha256, and record_session_id is the approval's session_id and
     the projection's capture session. The STAGE_GATE stays the plain multicellular check (check_task).
+    record_session_id is a lineage anchor, never a live session: the configurator starts a new PhysiCell session
+    (loading the captured XML for a basis design or a projection) and never passes it to a tool.
     The check runs before the approval is trusted: the approval's session derivation assumes a checked file.
     """
     form = next((name for name, keys in PHYSICELL_FORMS.items() if set(value) == keys), None)
@@ -608,7 +610,8 @@ def _check_physicell_input(root, value, first_line):
     if not all(isinstance(v, str) and v for v in (rel, digest, approval_id)):
         raise ValueError(f"DATA_INPUT {form}, sha256 and approval must be nonempty strings")
     if not isinstance(session, str) or not session:
-        raise ValueError("DATA_INPUT record_session_id must be a nonempty string (the PhysiCell session)")
+        raise ValueError("DATA_INPUT record_session_id must be a nonempty string (the approved file's PhysiCell "
+                         "session, a lineage anchor; the configurator always starts a new session)")
     if not SHA256.fullmatch(digest):
         raise ValueError(f"DATA_INPUT {form} needs a lowercase hex sha256")
     if form == "design":

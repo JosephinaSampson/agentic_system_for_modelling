@@ -57,20 +57,28 @@ configurations active.
 **Approved design or projection (`DATA_INPUT` on line 2):** the brief's line 2,
 after `STAGE_GATE`, names an approved `physicell_design.json` (stage A) or
 `physicell_projection.json` (stage B), its sha256, approval and
-`record_session_id`, all verified by the dispatch hook. Work only in that session
-and read only that file (and, for a design, the handoff manifests it lists). Never
-infer units; take names and values only from the verified files named on the
-`DATA_INPUT` line.
-- Design: apply exactly the approved design. Keep a basis configuration's
-  `from: "basis"` entries unchanged, create the declared substrates and cell
-  definitions, and import each handoff onto its cell definition
-  (`import_maboss_handoff()`); add no rule, link or value. Then, after the last
-  structural call, call `list_all_available_signals()` and
-  `list_all_available_behaviors(cell_type=...)` for every cell definition, so the
-  invocation record holds them (the orchestrator captures the dictionary from it).
-  Then export.
-- Projection: apply exactly the entries with the matching tools
-  (`add_physiboss_input_link()`, `add_physiboss_output_link()`,
+`record_session_id`, all verified by the dispatch hook. `record_session_id` is a
+lineage anchor, never a live session (MCP sessions end with each run).
+- Create a new PhysiCell session. For a design with a `basis`, and for every
+  projection, load the captured configuration's packaged XML with
+  `load_xml_configuration()`: `<capture>/package/config/PhysiCell_settings.xml`,
+  as an absolute path under the project root, with the capture taken from the
+  verified file (the design's basis capture, or the projection's `capture.path`).
+- Never pass `record_session_id` to any tool. Report the new full session ID; the
+  orchestrator registers it with `Derived from` = `record_session_id`.
+- Read only the verified file (and, for a design, the handoff manifests it lists).
+  Never infer units; take names and values only from the verified files named on
+  the `DATA_INPUT` line.
+- Design: apply exactly the approved design. Keep a loaded basis configuration's
+  `from: "basis"` entries unchanged (without a basis, create the declared domain),
+  create the declared substrates and cell definitions, and import each handoff
+  onto its cell definition (`import_maboss_handoff()`); add no rule, link or
+  value. Then, after the last structural call, call `list_all_available_signals()`
+  and `list_all_available_behaviors(cell_type=...)` for every cell definition, so
+  the invocation record holds them (the orchestrator captures the dictionary from
+  it). Then export.
+- Projection: on the loaded capture, apply exactly the entries with the matching
+  tools (`add_physiboss_input_link()`, `add_physiboss_output_link()`,
   `add_single_cell_rule()`, and a setting's `tool_hint`) at each quantity's model
   value. Compare each returned stored value (rel 1e-9) and return `blocked` on any
   difference. Then export.
