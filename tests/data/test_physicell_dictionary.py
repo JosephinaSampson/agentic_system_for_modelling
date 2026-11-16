@@ -51,6 +51,15 @@ def blocks(*calls):
     return [b for c in calls for b in c]
 
 
+def good_calls(extra_before=(), cells=("default", "tumor", "tumor_hypoxic")):
+    """A tool_calls.json block list holding fresh signal and per-cell behavior lists (used by projection tests)."""
+    return blocks(*extra_before,
+                  call(10, "list_all_available_signals", {"session_id": SESSION}, structured("signals", SIGNALS)),
+                  *[call(11 + i, "list_all_available_behaviors", {"session_id": SESSION, "cell_type": c},
+                         structured("behaviors", behaviors(c)))
+                    for i, c in enumerate(cells)])
+
+
 class DictionaryTests(Base):
     def setUp(self):
         super().setUp()
@@ -64,11 +73,7 @@ class DictionaryTests(Base):
         return rel
 
     def good(self, extra_before=()):
-        return blocks(*extra_before,
-                      call(10, "list_all_available_signals", {"session_id": SESSION}, structured("signals", SIGNALS)),
-                      *[call(11 + i, "list_all_available_behaviors", {"session_id": SESSION, "cell_type": c},
-                             structured("behaviors", behaviors(c)))
-                        for i, c in enumerate(("default", "tumor", "tumor_hypoxic"))])
+        return good_calls(extra_before)
 
     def run_capture(self, content, **kw):
         return cd.capture_dictionary(self.root, self.invoke(content, **kw), self.capture, REL)
@@ -94,6 +99,7 @@ class DictionaryTests(Base):
         self.assertEqual(out["session"], SESSION)
         self.assertEqual(out["invocation"], INVOCATION)
         self.assertEqual(out["capture"], {"path": self.capture, "sha256": hashlib.sha256(manifest).hexdigest()})
+        self.assertEqual(out["design"], {"path": REL, "sha256": hashlib.sha256((self.root / REL).read_bytes()).hexdigest()})
         self.assertEqual(out["source_sha256"], hashlib.sha256(raw).hexdigest())
         self.assertEqual(out["signals"], uniform(SIGNALS, "signal_type"))
         self.assertEqual(set(out["behaviors"]), {"default", "tumor", "tumor_hypoxic"})

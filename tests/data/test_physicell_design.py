@@ -364,18 +364,6 @@ class ApprovalTests(Base):
         ref = self.approve(data, session_id="mc-new")
         approvals.require_physicell_design_approval(self.root, "design-1", ref["path"], ref["sha256"])
 
-    def test_projection_approval_binds_artifact(self):
-        path = self.root / "runs/orchestrator/p1/physicell_projection.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}")
-        ref = {"path": "runs/orchestrator/p1/physicell_projection.json", "sha256": state.digest(path)}
-        state.update(self.root, "record", {"id": "proj-1", "kind": "stage_approval", "session_id": SESSION,
-                                           "stage": "physicell_projection", "outputs": ["x"], "approved_by": "researcher",
-                                           "authorization": "ok", "artifact": ref})
-        approvals.require_physicell_projection_approval(self.root, "proj-1", ref["path"], ref["sha256"])
-        with self.assertRaises(ValueError):
-            approvals.require_physicell_projection_approval(self.root, "proj-1", ref["path"], "0" * 64)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,7 +4,8 @@
 Reads runs/multicellular-configurator/<session>/invocation/<id>/tool_calls.json and writes
 physicell_dictionary.json next to the design (write-new, never overwrites):
   {kind: "physicell_dictionary", schema_version: 1, session, invocation, capture: {path, sha256 of capture.json},
-   signals: [..], behaviors: {cell_definition: [..]}, source_sha256 (of tool_calls.json)}
+   design: {path, sha256 of the checked design bytes}, signals: [..], behaviors: {cell_definition: [..]},
+   source_sha256 (of tool_calls.json)}
 
 Server order is kept (nothing sorted); exact repeats are dropped. Only successful list calls count, and only
 those whose tool_use comes after the tool_result of the last successful structure-changing call of the session.
@@ -177,7 +178,7 @@ def capture_dictionary(root: Path, invocation_rel: str, capture_rel: str, design
     bound = sx.capture(root, capture_rel)
     if bound["session"] != session:
         raise ValueError(f"invocation session {session} is not the capture's session {bound['session']}")
-    design, _, problems = pd.load_and_check(root, design_rel)
+    design, design_sha, problems = pd.load_and_check(root, design_rel)
     if problems:
         raise ValueError("the design is not valid: " + "; ".join(problems))
     if design["session"] != session:
@@ -197,7 +198,8 @@ def capture_dictionary(root: Path, invocation_rel: str, capture_rel: str, design
     if errors:
         raise ValueError("dictionary not recorded: " + "; ".join(errors))
     out = {"kind": "physicell_dictionary", "schema_version": 1, "session": session, "invocation": invocation,
-           "capture": {"path": capture_rel, "sha256": manifest_sha}, "signals": found["signals"],
+           "capture": {"path": capture_rel, "sha256": manifest_sha},
+           "design": {"path": design_rel, "sha256": design_sha}, "signals": found["signals"],
            "behaviors": found["behaviors"], "source_sha256": hashlib.sha256(raw).hexdigest()}
     target = (root / design_rel).with_name("physicell_dictionary.json")
     try:

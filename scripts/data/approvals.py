@@ -346,11 +346,45 @@ def require_physicell_design_approval(root: Path, record_id: str, rel: str, sha2
     return record
 
 
-def require_physicell_projection_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
-    """The physicell_projection stage_approval of exactly this artifact path and sha256 (validate_record included).
+def _physicell_projection_facts(root: Path, rel: str, sha256: str) -> tuple[str | None, list]:
+    """(PhysiCell session of the projection's capture, entry ids) of a physicell_projection.json, tolerant of shape.
 
-    The artifact's own content rules (session, outputs) belong to the projection tooling that names it.
+    The bytes are read once; their digest must equal `sha256` and the facts come from those same bytes.
+    """
+    from scripts.data.common import strict_json
+    raw = _state().artifact(Path(root), rel).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != sha256:
+        raise ValueError(f"{rel} changed during approval check (sha256 mismatch)")
+    try:
+        data = strict_json(raw)
+    except (ValueError, RecursionError) as exc:
+        raise ValueError(f"cannot read {rel}: {exc}") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"{rel} must be a JSON object")
+    capture = data.get("capture")
+    path = capture.get("path") if isinstance(capture, dict) else None
+    parts = path.split("/") if isinstance(path, str) else []
+    session = parts[2] if len(parts) == 5 else None
+    entries = data.get("entries") if isinstance(data.get("entries"), list) else []
+    ids = [e["entry_id"] for e in entries if isinstance(e, dict) and isinstance(e.get("entry_id"), str)]
+    return session, ids
+
+
+def require_physicell_projection_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
+    """The physicell_projection stage_approval of exactly this physicell_projection.json path and sha256.
+
+    The record must pass `state.validate_record`; session_id is the PhysiCell session of the projection's capture
+    and outputs are exactly the entry ids. This binds the approval to the bytes; run
+    `scripts/physicell/physicell_projection.py check` and have it pass before the researcher approves.
     """
     record = _require_artifact_approval(root, record_id, "physicell_projection", rel, sha256)
     _state().validate_record(Path(root), record)
+    session, ids = _physicell_projection_facts(root, rel, sha256)
+    if record.get("session_id") != session:
+        raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
+                         f"but the projection's capture is of PhysiCell session {session!r}")
+    outputs = record.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) != len(set(outputs)) or set(outputs) != set(ids) \
+            or len(ids) != len(set(ids)):
+        raise ValueError(f"decision {record_id} outputs must equal the entry ids of the projection: {sorted(set(ids))}")
     return record

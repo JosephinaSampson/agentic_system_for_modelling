@@ -69,10 +69,11 @@ def _real_text(value) -> bool:
     return _is_text(value) and value.strip().upper() != TODO
 
 
-def _design_path(root: Path, rel) -> Path:
+def orchestrator_json(root: Path, rel, what: str = "design") -> Path:
+    """The existing runs/orchestrator/<purpose>/<name>.json file `rel` names (no traversal or symlinks)."""
     parts = PurePosixPath(rel).parts if isinstance(rel, str) and rel and "\\" not in rel else ()
     if len(parts) != 4 or parts[:2] != ORCHESTRATOR or not rel.endswith(".json"):
-        raise ValueError(f"design must be runs/orchestrator/<purpose>/<name>.json, not {rel!r}")
+        raise ValueError(f"{what} must be runs/orchestrator/<purpose>/<name>.json, not {rel!r}")
     state.identifier(parts[2])
     return state.artifact(root, rel)
 
@@ -94,17 +95,9 @@ def write_new(root: Path, path: Path, text: str) -> None:
         handle.write(text)
 
 
-def draft(root: Path, purpose: str, *, basis_capture: str | None, sources: list = (), data: list = (),
-          session: str | None = None) -> Path:
-    """Write a skeleton design. With a basis, cell definitions and substrates are pre-filled from the capture
-    (description TODO, from "basis"); without one the domain is a TODO skeleton and `session` (optional here,
-    required by `check`) names the new PhysiCell session. `sources` = [(id, path under inputs/)],
-    `data` = [(id, data session, proposal id, approval id)]."""
-    root = Path(root)
-    state.identifier(purpose)
-    target = root / ORCHESTRATOR[0] / ORCHESTRATOR[1] / purpose / "physicell_design.json"
-    if target.exists() or target.is_symlink():
-        raise ValueError(f"{target.relative_to(root).as_posix()} exists; drafts never overwrite a design")
+def declare_inputs(root: Path, sources, data) -> tuple[list, list]:
+    """(sources, data) declarations for a draft: sources = [(id, path under inputs/)] (sha256 computed now),
+    data = [(id, data session, proposal id, approval id)], each proposal checked as approved."""
     declared, proposals = [], []
     for source_id, rel in sources:
         if any(item["id"] == source_id for item in declared):
@@ -116,6 +109,21 @@ def draft(root: Path, purpose: str, *, basis_capture: str | None, sources: list 
         record = approvals.require_data_approval(root, approval, data_session)
         approvals.require_proposal_approved(root, record, data_session, proposal)
         proposals.append({"id": data_id, "session": data_session, "proposal": proposal, "approval": approval})
+    return declared, proposals
+
+
+def draft(root: Path, purpose: str, *, basis_capture: str | None, sources: list = (), data: list = (),
+          session: str | None = None) -> Path:
+    """Write a skeleton design. With a basis, cell definitions and substrates are pre-filled from the capture
+    (description TODO, from "basis"); without one the domain is a TODO skeleton and `session` (optional here,
+    required by `check`) names the new PhysiCell session. `sources` = [(id, path under inputs/)],
+    `data` = [(id, data session, proposal id, approval id)]."""
+    root = Path(root)
+    state.identifier(purpose)
+    target = root / ORCHESTRATOR[0] / ORCHESTRATOR[1] / purpose / "physicell_design.json"
+    if target.exists() or target.is_symlink():
+        raise ValueError(f"{target.relative_to(root).as_posix()} exists; drafts never overwrite a design")
+    declared, proposals = declare_inputs(root, sources, data)
     cells, subs = [], []
     if basis_capture is not None:
         facts = _basis_facts(root, basis_capture)
@@ -140,20 +148,71 @@ def draft(root: Path, purpose: str, *, basis_capture: str | None, sources: list 
 
 # ---------------------------------------------------------------- check
 
-class _Checker:
-    def __init__(self, root: Path):
+class Citations:
+    """Declared sources and approved data proposals and the `from` refs citing them; problems go to `errors`.
+
+    Shared by the stage-A design and the stage-B projection. A ref is "basis" (allowed only when `has_basis`),
+    {source, locator} or {data, locator}; `cite` validates and counts it, `uncited_data` and
+    `sources.uncited()` report declarations never cited."""
+
+    def __init__(self, root: Path, has_basis: bool = False):
         self.root = root
         self.errors: list[str] = []
         self.sources = user_sources.Sources(root, self.error)
         self.data_ids: dict[str, int] = {}
-        self.basis: dict | None = None
-        self.has_basis = False
-        self.cycle_allowed: set = set()
-        self.cells: set = set()
-        self.intracellular: set = set()
+        self.has_basis = has_basis
 
     def error(self, message: str) -> None:
         self.errors.append(message)
+
+    def cite(self, label: str, ref) -> None:
+        if ref == BASIS_FROM:
+            if not self.has_basis:
+                self.error(f'{label}: from "basis" needs a basis')
+            return
+        if isinstance(ref, dict) and set(ref) == {"data", "locator"}:
+            if not isinstance(ref["data"], str) or ref["data"] not in self.data_ids:
+                self.error(f"{label}: data proposal {ref['data']} is not declared")
+            else:
+                self.data_ids[ref["data"]] += 1
+            problem = user_sources.check_locator(ref["locator"])
+            if problem:
+                self.error(f"{label}: {problem}")
+            return
+        self.sources.ref(label, ref)
+
+    def data_section(self, items) -> None:
+        if not isinstance(items, list):
+            self.error("data must be a list of {id, session, proposal, approval}")
+            return
+        for n, item in enumerate(items):
+            here = f"data[{n}]"
+            if not isinstance(item, dict) or set(item) != DATA_KEYS or not all(_is_text(v) for v in item.values()):
+                self.error(f"{here} must have exactly id, session, proposal, approval (non-empty strings)")
+                continue
+            if item["id"] in self.data_ids:
+                self.error(f"{here}: duplicate data id {item['id']}")
+                continue
+            self.data_ids[item["id"]] = 0
+            try:
+                record = approvals.require_data_approval(self.root, item["approval"], item["session"])
+                approvals.require_proposal_approved(self.root, record, item["session"], item["proposal"])
+            except (ValueError, OSError) as exc:
+                self.error(f"{here}: {exc}")
+
+    def uncited_data(self) -> None:
+        for data_id, count in self.data_ids.items():
+            if not count:
+                self.error(f"data proposal {data_id} is never cited")
+
+
+class _Checker(Citations):
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.basis: dict | None = None
+        self.cycle_allowed: set = set()
+        self.cells: set = set()
+        self.intracellular: set = set()
 
     def head(self, data: dict) -> None:
         if data.get("kind") != "physicell_design" or type(data.get("schema_version")) is not int \
@@ -211,41 +270,6 @@ class _Checker:
         self.cycle_allowed = set(models)
         if self.basis is not None:
             self.cycle_allowed |= set(self.basis["cell_definitions"].values())
-
-    def cite(self, label: str, ref) -> None:
-        if ref == BASIS_FROM:
-            if not self.has_basis:
-                self.error(f'{label}: from "basis" needs a basis')
-            return
-        if isinstance(ref, dict) and set(ref) == {"data", "locator"}:
-            if ref["data"] not in self.data_ids:
-                self.error(f"{label}: data proposal {ref['data']} is not declared")
-            else:
-                self.data_ids[ref["data"]] += 1
-            problem = user_sources.check_locator(ref["locator"])
-            if problem:
-                self.error(f"{label}: {problem}")
-            return
-        self.sources.ref(label, ref)
-
-    def data_section(self, items) -> None:
-        if not isinstance(items, list):
-            self.error("data must be a list of {id, session, proposal, approval}")
-            return
-        for n, item in enumerate(items):
-            here = f"data[{n}]"
-            if not isinstance(item, dict) or set(item) != DATA_KEYS or not all(_is_text(v) for v in item.values()):
-                self.error(f"{here} must have exactly id, session, proposal, approval (non-empty strings)")
-                continue
-            if item["id"] in self.data_ids:
-                self.error(f"{here}: duplicate data id {item['id']}")
-                continue
-            self.data_ids[item["id"]] = 0
-            try:
-                record = approvals.require_data_approval(self.root, item["approval"], item["session"])
-                approvals.require_proposal_approved(self.root, record, item["session"], item["proposal"])
-            except (ValueError, OSError) as exc:
-                self.error(f"{here}: {exc}")
 
     def entity_common(self, label: str, item: dict) -> None:
         if not _real_text(item.get("description")):
@@ -424,14 +448,9 @@ class _Checker:
             elif not _real_text(item["reason"]):
                 self.error(f"unmapped[{n}] ({item['item']}): reason must be a non-empty explanation, not empty or TODO")
 
-    def uncited_data(self) -> None:
-        for data_id, count in self.data_ids.items():
-            if not count:
-                self.error(f"data proposal {data_id} is never cited")
-
 
 def _load(root: Path, rel: str) -> tuple[dict, str]:
-    raw = _design_path(root, rel).read_bytes()
+    raw = orchestrator_json(root, rel).read_bytes()
     data = strict_json(raw)
     if not isinstance(data, dict):
         raise ValueError("design must be a JSON object")
@@ -472,6 +491,22 @@ def check(root: Path, rel: str) -> list[str]:
 
 # ---------------------------------------------------------------- CLI
 
+def parse_input_args(source_values, data_values) -> tuple[list, list]:
+    """CLI --source ID:PATH and --data ID:SESSION:PROPOSAL:APPROVAL values as declare_inputs tuples."""
+    sources, data = [], []
+    for value in source_values:
+        parts = value.split(":", 1)
+        if len(parts) != 2 or not all(parts):
+            raise ValueError(f"expected ID:PATH, got {value!r}")
+        sources.append(tuple(parts))
+    for value in data_values:
+        parts = value.split(":")
+        if len(parts) != 4 or not all(parts):
+            raise ValueError(f"expected ID:SESSION:PROPOSAL:APPROVAL, got {value!r}")
+        data.append(tuple(parts))
+    return sources, data
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -487,17 +522,7 @@ def main(argv: list[str] | None = None) -> int:
     root = project_root().resolve()
     try:
         if args.command == "draft":
-            sources, data = [], []
-            for value in args.source:
-                parts = value.split(":", 1)
-                if len(parts) != 2 or not all(parts):
-                    raise ValueError(f"expected ID:PATH, got {value!r}")
-                sources.append(tuple(parts))
-            for value in args.data:
-                parts = value.split(":")
-                if len(parts) != 4 or not all(parts):
-                    raise ValueError(f"expected ID:SESSION:PROPOSAL:APPROVAL, got {value!r}")
-                data.append(tuple(parts))
+            sources, data = parse_input_args(args.source, args.data)
             path = draft(root, args.purpose, basis_capture=args.basis, sources=sources, data=data,
                          session=args.session)
             print(f"physicell design drafted: {path.relative_to(root).as_posix()} sha256={sha256_file(path)}")
