@@ -196,18 +196,20 @@ runs as portable jobs outside this skill; sensitivity analysis and ODE-to-PhysiC
 
 ## Apply an approved calibration
 
-Only with a hook-checked line 1 `DATA_INPUT {"calibration": "runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json", "sha256": "...", "approval": "<record id>"}`
-and `record_session_id` set to that proposal's ODE session (the brief names exactly that one, written
-`record_session_id <session>` or as JSON; phrasings such as `is`, or joining it to another id, are refused).
+Only with a hook-checked line 1 `DATA_INPUT {"calibration": "runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<ODE session>", "accept": ["<name>", ...]}`.
+The hook verifies that `record_session_id` is the proposal's ODE session (the approval's `session_id`) and that
+`accept` is exactly the approval's `outputs` (the accepted parameters). Take the session only from that
+`record_session_id` and the parameter names only from that `accept` list; ignore any session or name given in
+prose elsewhere in the brief.
 The Codex runtime has no dispatcher check for the calibration `DATA_INPUT` yet, so under Codex the
 specialist returns `blocked` for such a request.
-1. Read the proposal and the approval `outputs`: the accepted parameters. Ignore the others.
+1. Read the proposal; the accepted parameters are the `accept` names of the DATA_INPUT line. Ignore the others.
 2. Read the session's current revision and configuration with `inspect_model`. The values were fitted to
    one model revision: return `blocked` unless the session's current revision equals `proposal.model.revision`
    (a later edit or regeneration means the calibration must be redone or re-approved). The proposal's `unit`
    of each accepted parameter must equal that parameter's configured unit; otherwise return `blocked`
    (never infer units).
-3. Apply exactly the accepted parameters at their `best` values through the server. `configure_model`
+3. Apply exactly the `accept` parameters at their proposal `best` values through the server. `configure_model`
    replaces the whole configuration, so send it with every other configured value re-applied unchanged.
 4. Read back the stored values and compare each with the proposal; execution success is not enough.
 5. Report the new revision, the applied and the unchanged values, the job id, proposal sha256 and

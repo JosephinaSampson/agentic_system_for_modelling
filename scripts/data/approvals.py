@@ -180,14 +180,17 @@ def _ode_mapping_outputs(root: Path, rel: str, sha256: str) -> tuple[str | None,
 def require_ode_mapping_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
     """The ode_mapping stage_approval of exactly this ode_mapping.json path and sha256.
 
-    session_id is the ODE session of the mapping and outputs are exactly the measurement ids the
-    rules use plus the fitted parameter names.
+    The record must pass `state.validate_record` (researcher authorization, outputs); session_id is the ODE
+    session of the mapping and outputs are exactly the measurement ids the rules use plus the fitted names.
 
-    This binds hash, session and outputs only; it does not validate the mapping. Run
-    `scripts/ode/ode_mapping.py check` and have it pass before the researcher approves (the
-    downstream build and gate run the full check again).
+    This binds the approval to the mapping bytes; it does not validate the mapping's content. Run
+    `scripts/ode/ode_mapping.py check` and have it pass before the researcher approves; `scripts/jobs/build.py`
+    runs the full check again before it builds a job (and job.json binds that mapping's sha256). The
+    ode-modeler gate does not re-run the check: it requires the job.json beside the calibration proposal to
+    name this same mapping path, sha256 and approval, and calls this function.
     """
     record = _require_artifact_approval(root, record_id, "ode_mapping", rel, sha256)
+    _state().validate_record(Path(root), record)
     session, expected = _ode_mapping_outputs(root, rel, sha256)
     if record.get("session_id") != session:
         raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
@@ -199,6 +202,51 @@ def require_ode_mapping_approval(root: Path, record_id: str, rel: str, sha256: s
     return record
 
 
-def require_calibration_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
-    """The ode_calibration stage_approval of exactly this artifact path and sha256."""
-    return _require_artifact_approval(root, record_id, "ode_calibration", rel, sha256)
+def require_calibration_approval(root: Path, record_id: str, rel: str, sha256: str) -> tuple[dict, dict]:
+    """(record, proposal): the ode_calibration stage_approval of exactly this calibration_proposal.json.
+
+    Every check of a calibration approval, shared by the ode-modeler gate and score_holdout:
+      * a stage_approval of stage ode_calibration whose artifact is exactly `rel` at `sha256`, and the file
+        still has that sha256;
+      * the record passes `state.validate_record` (researcher authorization, unique nonempty outputs);
+      * the proposal (parsed from the same bytes whose sha256 was checked) is a calibration_proposal with an
+        ODE session and parameter names;
+      * outputs (the accepted parameters) are a nonempty list of unique proposal parameter names;
+      * session_id is the proposal's ODE session.
+    """
+    from scripts.data.common import strict_json
+    state = _state()
+    root = Path(root)
+    record = load_record(root, record_id)
+    _stage_approval(record, record_id, "ode_calibration")
+    approved = record.get("artifact")
+    if not isinstance(approved, dict) or approved.get("path") != rel:
+        raise ValueError(f"decision {record_id} artifact must be {rel}")
+    if approved.get("sha256") != sha256:
+        raise ValueError(f"decision {record_id} approves a different sha256 than {sha256}")
+    state.validate_record(root, record)
+    raw = state.artifact(root, rel).read_bytes()  # one read: the hash and the parsed proposal agree
+    if hashlib.sha256(raw).hexdigest() != sha256:
+        raise ValueError(f"{rel} changed since approval {record_id} (sha256 mismatch)")
+    try:
+        proposal = strict_json(raw)
+    except (ValueError, RecursionError) as exc:
+        raise ValueError(f"cannot read {rel}: {exc}") from None
+    if not isinstance(proposal, dict) or proposal.get("kind") != "calibration_proposal":
+        raise ValueError(f"{rel} is not a calibration_proposal")
+    model = proposal.get("model")
+    session = model.get("ode_session") if isinstance(model, dict) else None
+    rows = proposal.get("parameters")
+    names = [r.get("name") for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+    if not isinstance(session, str) or not session or not names \
+            or not all(isinstance(n, str) and n for n in names) or len(names) != len(set(names)):
+        raise ValueError(f"{rel} names no ODE session or no (unique) parameter names")
+    outputs = record.get("outputs")
+    if (not isinstance(outputs, list) or not outputs or len(outputs) != len(set(outputs))
+            or not all(isinstance(o, str) for o in outputs) or not set(outputs) <= set(names)):
+        raise ValueError(f"calibration approval {record_id} outputs must be a nonempty list of unique parameter "
+                         f"names of the proposal ({', '.join(sorted(names))}); got {outputs!r}")
+    if record.get("session_id") != session:
+        raise ValueError(f"calibration approval {record_id} has session_id {record.get('session_id')!r}; "
+                         f"it must be the proposal's ODE session {session}")
+    return record, proposal

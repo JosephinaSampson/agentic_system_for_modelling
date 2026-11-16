@@ -4,8 +4,8 @@
   launch.py local start <job-id> [--parallel K]   unpack, then run env/bootstrap.sh and launch/local.sh detached
   launch.py local status <job-id>                 progress (JSON)
   launch.py local fetch <job-id>                  copy results.tar.gz to inputs/calibration-results/<job-id>/
-  launch.py local validate <job-id> [--params FILE] [--use fit|holdout|all] [--out FILE]
-                                                  bootstrap if needed, then run.py validate (foreground)
+  launch.py local validate <job-id> [--params FILE [--partial]] [--nominal] [--use fit|holdout|all]
+                           [--out FILE]           bootstrap if needed, then run.py validate (foreground)
   launch.py print <job-id> --host NAME            the numbered scp/ssh commands to run by hand (runs nothing)
   launch.py ssh submit <job-id> --host NAME --authorization "<quote>"
                                                   mkdir, scp the bundle, set up, start (steps 1-4 of `print`); logs first
@@ -211,7 +211,8 @@ def fetch(root: Path, job_id: str) -> Path:
     return dest
 
 
-def validate(root: Path, job_id: str, params: str | None, use: str, out: str | None) -> int:
+def validate(root: Path, job_id: str, params: str | None, use: str, out: str | None, *, partial: bool = False,
+             nominal: bool = False) -> int:
     target = unpack(root, job_id)
     if _pid(target) and not _environment_ok(target):
         # a `start` is bootstrapping: a second bootstrap would rebuild .venv under it
@@ -223,6 +224,7 @@ def validate(root: Path, job_id: str, params: str | None, use: str, out: str | N
         command += ["--params", str(Path(params).resolve())]
     if out:
         command += ["--out", str(Path(out).resolve())]
+    command += ["--partial"] * partial + ["--nominal"] * nominal
     return subprocess.run(command, cwd=target).returncode
 
 
@@ -493,6 +495,9 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--params", metavar="FILE")
     v.add_argument("--use", choices=runtime.USES, default="fit")
     v.add_argument("--out", metavar="FILE")
+    v.add_argument("--partial", action="store_true", help="--params gives some fitted names; the rest keep the "
+                   "model defaults")
+    v.add_argument("--nominal", action="store_true", help="also report the score at the model defaults")
     p = modes.add_parser("print")
     p.add_argument("job_id")
     p.add_argument("--host", required=True, metavar="NAME")
@@ -528,7 +533,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "fetch":
             print(f"fetched: {fetch(root, args.job_id).relative_to(root).as_posix()}")
         else:
-            return validate(root, args.job_id, args.params, args.use, args.out)
+            return validate(root, args.job_id, args.params, args.use, args.out, partial=args.partial,
+                            nominal=args.nominal)
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

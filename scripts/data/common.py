@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -70,6 +71,11 @@ def _unique_keys(pairs):
 
 def _no_constant(name):
     raise ValueError(f"non-finite value: {name}")
+
+
+def finite_number(value) -> bool:
+    """An int or float (never bool) that is finite."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def strict_json(raw: bytes):

@@ -25,22 +25,23 @@ def main():
         role = inputs.get("subagent_type", "").split(":")[-1].replace("-", "_")
         if role not in GATED:
             return 0
-        from scripts.gate import check_data_input, check_job_mentions, check_task
+        from scripts.gate import DATA_INPUT_LINE, check_data_input, check_job_mentions, check_task
         prompt = inputs.get("prompt")
         prompt = "" if prompt is None else prompt
         if not isinstance(prompt, str):
             raise ValueError("dispatch prompt must be a string")
-        # No gated specialist may be pointed at a calibration job folder or returned results (only the
-        # ode-modeler's approved DATA_INPUT proposal, verified below, is exempt).
-        check_job_mentions(ROOT, role, prompt)
+        # Data enter NeKo, MaBoSS and the ODE (approved calibration values) only through an approved, hash-checked
+        # DATA_INPUT line. check_data_input also runs, once and after verifying that line, the rule that no
+        # specialist is pointed at a calibration job folder or returned results (only the ode-modeler's approved
+        # proposal is exempt); the other gated roles get that rule from check_job_mentions.
+        if role in DATA_INPUT_LINE:
+            check_data_input(ROOT, role, prompt)
+        else:
+            check_job_mentions(ROOT, role, prompt)
         # ODE authoring has its own source/readiness/whole-model approval contract;
         # this hook enforces the two sequential Boolean downstream boundaries.
         if role in {"boolean_dynamics_modeler", "multicellular_configurator"}:
             check_task(ROOT, role, prompt)
-        # Data enter NeKo, MaBoSS and the ODE (approved calibration values) only through an approved, hash-checked
-        # DATA_INPUT line, checked after STAGE_GATE.
-        if role in {"network_curator", "boolean_dynamics_modeler", "ode_modeler"}:
-            check_data_input(ROOT, role, prompt)
         return 0
     except Exception as exc:  # noqa: BLE001 - see fail-closed note above
         print(f"Downstream stage dispatch blocked: {type(exc).__name__}: {exc}"[:2000], file=sys.stderr)

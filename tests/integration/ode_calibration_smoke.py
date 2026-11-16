@@ -311,9 +311,10 @@ def run(scratch: Path) -> None:
     # 9. the ode-modeler DATA_INPUT gate, through the real hook script
     hook = root / ".claude" / "scripts" / "stage_gate_guard.py"
 
-    def gate(digest: str) -> subprocess.CompletedProcess:
-        line = "DATA_INPUT " + json.dumps({"calibration": proposal_rel, "sha256": digest, "approval": "ode-cal-1"})
-        prompt = f"{line}\nApply the accepted values; record_session_id {SESSION}."
+    def gate(digest: str, accept=("kf2",), session=SESSION) -> subprocess.CompletedProcess:
+        line = "DATA_INPUT " + json.dumps({"calibration": proposal_rel, "sha256": digest, "approval": "ode-cal-1",
+                                           "record_session_id": session, "accept": list(accept)})
+        prompt = f"{line}\nApply the accepted values."
         event = {"tool_name": "Agent", "tool_input": {"subagent_type": "ode-modeler", "prompt": prompt}}
         return subprocess.run([sys.executable, str(hook)], input=json.dumps(event), text=True, capture_output=True,
                               cwd=root, env={**env, "PYTHONPATH": str(root)}, timeout=60)
@@ -322,12 +323,15 @@ def run(scratch: Path) -> None:
     assert accepted.returncode == 0, accepted.stderr
     wrong = gate("0" * 64)
     assert wrong.returncode == 2 and "sha256" in wrong.stderr, (wrong.returncode, wrong.stderr)
-    step("ode-modeler gate: brief accepted (exit 0); the same brief with a wrong sha refused (exit 2)")
+    for bad in (gate(sha256(proposal_path), accept=("kf2", "kf3")), gate(sha256(proposal_path), session="ode-x")):
+        assert bad.returncode == 2, (bad.returncode, bad.stderr)
+    step("ode-modeler gate: brief accepted (exit 0); a wrong sha, accept list or record_session_id refused (exit 2)")
 
     # 10. the hold-out, once
     py("scripts/jobs/score_holdout.py", job_id, "--approval", "ode-cal-1")
     holdout = json.loads((job_dir / "holdout_score.json").read_text(encoding="utf-8"))
     assert math.isfinite(holdout["score"]) and holdout["accepted"] == ["kf2"], holdout
+    assert set(holdout["parameters"]) == {"kf2"} and set(holdout["effective_parameters"]) == {"kf2", "kf3"}, holdout
     again = py("scripts/jobs/score_holdout.py", job_id, "--approval", "ode-cal-1", check=False)
     assert again.returncode != 0, "the hold-out must be scored only once"
     step(f"hold-out scored once: {holdout['score']:.4g} (a second scoring is refused)")

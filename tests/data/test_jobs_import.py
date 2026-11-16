@@ -349,41 +349,42 @@ class HardeningTests(ImportFixture):
 
 
 class DefaultReproduceTests(ImportFixture):
-    def test_default_reproduce_runs_launch_validate_with_best_params(self):
+    def test_default_reproduce_runs_launch_validate_once_with_best_params(self):
+        # PR 16 review import_results.py:230: one validate run gives the best score and the nominal values
         self.write_archive()
         seen = []
         local = {"kf1": 2.0, "kf2": 0.3}
 
-        def fake_validate(root, job_id, params, use, out):
+        def fake_validate(root, job_id, params, use, out, nominal=False):
             given = json.loads(Path(params).read_text(encoding="utf-8")) if params else None
-            seen.append({"job_id": job_id, "params": given, "use": use})
-            report = ({"score": 1.0, "use": use, "params_source": "given", "params": given} if params else
-                      {"score": 3.0, "use": use, "params_source": "nominal", "params": local})
+            seen.append({"job_id": job_id, "params": given, "use": use, "nominal": nominal})
+            report = {"score": 1.0, "use": use, "params_source": "given", "params": given,
+                      "nominal": {"params": local, "score": 3.0, "penalty": False}}
             Path(out).write_text(json.dumps(report), encoding="utf-8")
             return 0
 
         with mock.patch.object(launch, "validate", fake_validate):
             path = import_results.import_results(self.root, self.job_id)
-        self.assertEqual(seen, [{"job_id": self.job_id, "params": GOOD, "use": "fit"},
-                                {"job_id": self.job_id, "params": None, "use": "fit"}])
+        self.assertEqual(seen, [{"job_id": self.job_id, "params": GOOD, "use": "fit", "nominal": True}])
         rows = {p["name"]: p for p in json.loads(path.read_text(encoding="utf-8"))["parameters"]}
         self.assertEqual({n: r["start"] for n, r in rows.items()}, local)
 
     def test_default_reproduce_refuses_a_report_without_nominal_params(self):
         self.write_archive()
+        for report in ({"score": 1.0, "params_source": "given"},
+                       {"score": 1.0, "params_source": "given", "nominal": {"score": 3.0}},
+                       {"score": 1.0, "params_source": "nominal", "nominal": {"params": {}, "score": 3.0}}):
+            def fake_validate(root, job_id, params, use, out, nominal=False, report=report):
+                Path(out).write_text(json.dumps(report), encoding="utf-8")
+                return 0
 
-        def fake_validate(root, job_id, params, use, out):
-            report = {"score": 1.0, "params_source": "given"} if params else {"score": 3.0, "params_source": "x"}
-            Path(out).write_text(json.dumps(report), encoding="utf-8")
-            return 0
-
-        with mock.patch.object(launch, "validate", fake_validate), \
-                self.assertRaisesRegex(ValueError, "nominal"):
-            import_results.import_results(self.root, self.job_id)
+            with self.subTest(report=report), mock.patch.object(launch, "validate", fake_validate), \
+                    self.assertRaisesRegex(ValueError, "nominal|given"):
+                import_results.import_results(self.root, self.job_id)
 
     def test_default_reproduce_failure_is_a_refusal(self):
         self.write_archive()
-        with mock.patch.object(launch, "validate", lambda *a: 1), \
+        with mock.patch.object(launch, "validate", lambda *a, **kw: 1), \
                 self.assertRaisesRegex(ValueError, "validate.*exit 1"):
             import_results.import_results(self.root, self.job_id)
 

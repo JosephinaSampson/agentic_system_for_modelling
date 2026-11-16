@@ -350,8 +350,8 @@ An `ode_measurements` table, once approved, can calibrate a BioMASS model throug
 in docs/ode-workflow.md): `ode_mapping.py` -> researcher approval (`ode_mapping`) -> `build.py` ->
 `launch.py` (local/ssh/slurm; only the bundle leaves the machine) -> `fetch` -> `import_results.py` ->
 `calibration_proposal.json` -> researcher approval of the accepted parameters (`ode_calibration`) ->
-ode-modeler `DATA_INPUT {"calibration": ..., "sha256": ..., "approval": ...}` on line 1 with
-`record_session_id` -> `score_holdout.py`. Calibrated values carry the `data-calibrated` tag (job id,
+ode-modeler `DATA_INPUT {"calibration": ..., "sha256": ..., "approval": ..., "record_session_id": ..., "accept": [...]}`
+on line 1 -> `score_holdout.py`. Calibrated values carry the `data-calibrated` tag (job id,
 proposal sha256, approval id). Caveats for the researcher: BioMASS differential-evolution defaults stop
 early with few fitted parameters (raise `popsize`/`maxiter`); restart agreement and the
 `poorly_constrained` flag are heuristics; the hold-out is scored once. A calibration proposal or an

@@ -175,19 +175,21 @@ Calibration is a portable job the researcher approves step by step; no specialis
    `ode_calibration` `stage_approval` with `session_id` = the proposal's ODE session, `outputs` = the
    accepted parameter names and `artifact` = the proposal path and sha256.
 7. **Apply.** Dispatch ode-modeler with line 1
-   `DATA_INPUT {"calibration": "runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json", "sha256": "...", "approval": "<record id>"}`
-   and `record_session_id` = that ODE session (no other value, no other proposal or ode_mapping file named).
-   The hook checks the approval, hash, outputs, session and `record_session_id`; the specialist applies
-   exactly the accepted `best` values (only when the session's current revision equals
+   `DATA_INPUT {"calibration": "runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<ODE session>", "accept": ["<name>", ...]}`
+   (`record_session_id` = the proposal's ODE session, `accept` = exactly the approval's `outputs`; no other
+   proposal or ode_mapping file named). The hook checks the approval (researcher-authorized), hash, session,
+   `record_session_id` and `accept`; the specialist takes the session and the names only from that line and
+   applies exactly the `accept` parameters at their `best` values (only when the session's current revision equals
    `proposal.model.revision`; otherwise it returns `blocked`) and re-applies every other configured value unchanged
    (`configure_model` replaces the configuration), then reports the new revision. Tag the values
    `data-calibrated`; register the new revision with Derived from = the calibrated session, the job id,
    proposal short hash and approval id. The new revision needs the usual review and approval.
-8. **Hold-out.** `score_holdout.py <job-id> --approval <id>` scores the held-out rows once with the accepted
-   parameters at their best values and every other fitted parameter at its start value, and writes
-   `holdout_score.json` with `n_rows`, the hold-out rows that received a prediction. It never overwrites;
-   a null start for a non-accepted parameter refuses, and so does a run in which no hold-out row received a
-   prediction (an objective over no rows is 0, not a score). It runs
+8. **Hold-out.** `score_holdout.py <job-id> --approval <id>` scores the held-out rows once, passing only the
+   accepted parameters at their best values (every other parameter keeps the bundled model's default,
+   recorded as `effective_parameters`), and writes `holdout_score.json` with `n_rows`, the hold-out rows that
+   received a prediction. It never overwrites. It writes nothing (so the hold-out stays unscored) when no
+   hold-out row received a prediction (an objective over no rows is 0, not a score), when any hold-out
+   prediction failed (solver failure, non-finite value; listed by row) or when the score is the penalty. It runs
    the bundled model with the accepted values, so it is independent of when the ode-modeler applies them:
    run it once, after the calibration approval.
 
@@ -195,9 +197,9 @@ The dispatch hook also refuses an ODE brief that names a data-analyst path or se
 For every gated specialist it refuses any path under a calibration job folder (`runs/orchestrator/<p>/jobs/`,
 e.g. `report.md`, `holdout_score.json`, figures, the bundle) or under `inputs/calibration-results/`; the only
 exception is the ode-modeler's `DATA_INPUT` proposal itself and its own job folder. With the calibration
-`DATA_INPUT` it also checks that the proposal's `mapping` is an approved `ode_mapping` and that its
-`job_sha256` is the sha256 of the `job.json` beside it. The hook records a malformed or ambiguous
-`record_session_id` (any case or separator, joined to another id) as a refusal.
+`DATA_INPUT` it also checks that the proposal's `mapping` is an approved `ode_mapping` (researcher-authorized
+record) and that the `job.json` beside the proposal has its `job_sha256`, its `job_id` (= the folder name)
+and the same `mapping` (path, sha256, approval).
 
 ## Dispatch and isolation
 

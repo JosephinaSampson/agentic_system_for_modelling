@@ -42,7 +42,7 @@ one-time hold-out scoring.
 | **Data and predictions normalised the same way (N)** | Tables hold raw values. Each rule divides the data exactly as it divides the predictions: by the t0 row (`fold_change_vs_t0`), the reference condition at the same time (`relative_to_condition`), the max over the rows of the same `use` (`max_normalized`) or the reference mean (`endpoint_contrast`). `check` requires every divisor row, non-zero, and one `value_unit` per normalisation group. |
 | **Real export layout; revision bound to the fitted export; checked before applying** | The bundle is the export zip exactly as BioMASS 2.5.x writes it: `model/` is the revision folder, the Text2Model package is `model/generated_model/` (found as the single folder with `ode.py` and `name2idx/`), and the calibration bundle keeps it at that path; the runner imports it by its own name. `inputs.model.revision` is the captured revision whose `integrity.json` equals the export zip's `model/integrity.json`, and the zip's `model/` files must match that inventory (`draft` derives it, `check` refuses any other). The modeler applies only when the session's current revision equals `proposal.model.revision`; otherwise it returns `blocked`. |
 | **Restarts: no double runs, no oversubscription** | An interrupt writes no result, so a rerun resumes. A restart folder with a live owner (or an active SLURM task) is never deleted. Every launcher runs K = min(parallel, cores // workers) restarts at a time (1 for `workers: -1`; cores = a host's `max_cores` or the local CPU count; an unconfigured printed host runs one at a time unless `workers` is 1). |
-| **Gate binds proposal, mapping, `job.json` and `record_session_id`** | The ode-modeler `DATA_INPUT` names the proposal. The gate checks the `ode_calibration` approval, the proposal hash, accepted outputs, the proposal's `mapping` approval, `job_sha256` against `job.json`, and that the brief carries the proposal's ODE session as `record_session_id` and no other value. |
+| **Gate binds proposal, mapping, `job.json`, session and accepted names** | The ode-modeler `DATA_INPUT` names the proposal and carries `record_session_id` and `accept`. The gate checks the `ode_calibration` approval (one helper, `approvals.require_calibration_approval`, shared with `score_holdout.py`), the proposal hash, `record_session_id` = the proposal's ODE session = the approval's session, `accept` = the approval's `outputs`, the proposal's `mapping` approval (researcher-authorized), and that the `job.json` beside it has the proposal's `job_sha256`, `job_id` (= folder name) and `mapping`. The modeler reads the session and names only from that verified line. |
 | **Job-folder and results mentions refused outside `DATA_INPUT`** | Job folders and returned results hold remote-derived values. They reach a specialist only as the approved proposal, so a brief naming them is refused. |
 
 ## 3. Components
@@ -59,7 +59,7 @@ one-time hold-out scoring.
 | `scripts/jobs/launch.py` | `local`, `ssh` (`print`, `submit`, `status`, `fetch`, `cancel`) and `slurm` launchers; `hosts.json` and the authorization log. |
 | `scripts/jobs/import_results.py` | Verifies the archive, reproduces the score, writes `calibration_proposal.json`, `report.md` and figures. |
 | `scripts/jobs/score_holdout.py` | Scores hold-out rows once after the calibration approval. |
-| `scripts/gate.py` | Ode-modeler calibration `DATA_INPUT` check, `record_session_id` rule, job-folder and results mention refusals. |
+| `scripts/gate.py` | Ode-modeler calibration `DATA_INPUT` check (session, accepted names, job binding), job-folder and results mention refusals (one scan per dispatch). |
 | `scripts/state.py`, `scripts/data/manifest.py` | Governance stages `ode_mapping` and `ode_calibration`; proposal kind `ode_measurements` (layer `biomass`). |
 | `templates/calibration-settings.{first-pass,final}.json` | Starting settings (10 and 30 restarts). |
 | `tests/integration/ode_calibration_smoke.py` | Synthetic model through mapping, bundle, bootstrap, two local restarts, import and the hook check. Network parts skip offline. |
@@ -117,16 +117,16 @@ The procedure is in [ODE workflow](ode-workflow.md). In outline:
   per-restart table; a `partial` flag. `report.md` carries the same, with figures.
 - **Calibration approval:** `ode_calibration` `stage_approval`, `session_id` = the ODE
   session, `outputs` = accepted parameter names, `artifact` = proposal path and sha256.
-- **Ode-modeler `DATA_INPUT`** (line 1): `{"calibration", "sha256", "approval"}` plus
-  `record_session_id` = the ODE session in the brief.
+- **Ode-modeler `DATA_INPUT`** (line 1): `{"calibration", "sha256", "approval", "record_session_id",
+  "accept"}`; `record_session_id` = the proposal's ODE session, `accept` = the approval's `outputs`.
 - **Lineage:** values get the tag `data-calibrated`, citing job id, proposal hash and
   approval id. The new revision's row has Derived from = the calibrated session.
 
 ## 6. Guardrails and threat model
 
 - **Dispatch hook:** refuses a calibration `DATA_INPUT` whose approval, hash, outputs,
-  mapping approval, `job_sha256` or ODE session do not match, a missing or conflicting
-  `record_session_id`, and any mention of a job folder or `inputs/calibration-results`
+  mapping approval, `job.json` (sha256, job id, mapping), `record_session_id` or `accept` do not
+  match, and any mention of a job folder or `inputs/calibration-results`
   outside the `DATA_INPUT` proposal. It also refuses stray ode_mapping, seeds and
   calibration files.
 - **Untrusted remote archive:** members are checked against `results.json`; total size is
@@ -149,8 +149,6 @@ The procedure is in [ODE workflow](ode-workflow.md). In outline:
 - **No offline installs.** Lab machines need internet and a POSIX shell.
 - **Three of four `uv` platform checksums are not verified live;** only one platform was
   checked against a download.
-- **The `record_session_id` rule over-refuses** some natural phrasings. Write it as
-  `record_session_id <session>` or JSON.
 - **Input files named like `calibration_results*`** are refused in briefs. Rename them.
 - **Editing an `ode_mapping` in place** makes its earlier approved proposal unapplicable.
   Keep the mapping unchanged until the proposal is applied. For a changed mapping use a new

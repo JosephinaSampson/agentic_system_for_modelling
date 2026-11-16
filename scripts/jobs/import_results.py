@@ -30,10 +30,10 @@ Proposal conventions:
     or failed restart); failed restarts are listed with their status and excluded from the good restarts.
 
 `reproduce(root, job_id, params_file) -> (score, nominal)` is injectable. The default runs
-`launch.py local validate <job-id> --params <file> --out <file>` (bootstrapping the cache environment when
-missing: this needs internet and builds ~/.cache/agentic-jobs/<job-id>/, minutes, even for ssh/slurm jobs)
-and reads the score of the report (use=fit, the objective the restarts minimised); then it runs the same
-validate without --params and returns that report's `params` (params_source "nominal") as `nominal`.
+`launch.py local validate <job-id> --params <file> --nominal --out <file>` once (bootstrapping the cache
+environment when missing: this needs internet and builds ~/.cache/agentic-jobs/<job-id>/, minutes, even for
+ssh/slurm jobs) and reads the score of the report (use=fit, the objective the restarts minimised) and its
+`nominal.params` (the model defaults of the fitted names, from the same process) as `nominal`.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ from pathlib import Path, PurePosixPath
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.data.common import project_root, reject_symlinks, sha256_file, strict_json  # noqa: E402
+from scripts.data.common import finite_number, project_root, reject_symlinks, sha256_file, strict_json  # noqa: E402
 from scripts.jobs import launch  # noqa: E402
 from scripts.jobs.runtime.compare import PENALTY  # noqa: E402
 
@@ -155,10 +155,6 @@ def check_env(members: dict[str, Path]) -> None:
         raise ValueError(f"env_report: biomass {packages.get('biomass')!r} is not the pinned biomass {PIN_BIOMASS}")
 
 
-def _number(value) -> bool:
-    return type(value) in (int, float) and math.isfinite(value)
-
-
 def check_restarts(results: dict, settings: dict, fit: list[dict]) -> list[dict]:
     restarts = results.get("restarts")
     if not isinstance(restarts, list) or not restarts:
@@ -175,10 +171,10 @@ def check_restarts(results: dict, settings: dict, fit: list[dict]) -> list[dict]
         if type(r.get("seed")) is not int:
             raise ValueError(f"restart {n}: seed {r.get('seed')!r} must be an integer")
         wall = r.get("wall_time_s")
-        if wall is not None and not (_number(wall) and wall >= 0):
+        if wall is not None and not (finite_number(wall) and wall >= 0):
             raise ValueError(f"restart {n}: wall_time_s {wall!r} must be a finite number >= 0 or null")
         score = r.get("score")
-        if score is not None and not _number(score):
+        if score is not None and not finite_number(score):
             raise ValueError(f"restart {n}: score {score!r} must be a finite number or null")
         if r.get("seed") != expected:
             raise ValueError(f"seed {r.get('seed')!r} of restart {n} differs from the settings seed {expected}")
@@ -186,7 +182,7 @@ def check_restarts(results: dict, settings: dict, fit: list[dict]) -> list[dict]
             raise ValueError(f"restart {n} has status {r.get('status')!r} (expected ok or failed)")
         if r["status"] != "ok":
             continue
-        if not _number(r.get("score")) or r["score"] < 0:
+        if not finite_number(r.get("score")) or r["score"] < 0:
             raise ValueError(f"restart {n} is ok but its score {r.get('score')!r} is not a finite number >= 0")
         params = r.get("params")
         if not isinstance(params, dict) or set(params) != set(names):
@@ -194,7 +190,7 @@ def check_restarts(results: dict, settings: dict, fit: list[dict]) -> list[dict]
         for f in fit:
             value = params[f["name"]]
             lo, hi = f["lower"], f["upper"]
-            if not _number(value) or not lo * (1 - BOUND_RTOL) <= value <= hi * (1 + BOUND_RTOL):
+            if not finite_number(value) or not lo * (1 - BOUND_RTOL) <= value <= hi * (1 + BOUND_RTOL):
                 raise ValueError(f"restart {n}: fitted {f['name']} = {value!r} is outside its bounds [{lo}, {hi}]")
     return sorted(restarts, key=lambda r: r["restart"])
 
@@ -215,27 +211,25 @@ def cross_check(members: dict[str, Path], restarts: list[dict]) -> None:
 
 
 def default_reproduce(root: Path, job_id: str, params_file: Path) -> tuple[float, dict]:
-    """(score of `launch.py local validate <job-id> --params <file>` (use=fit), the local nominal values).
+    """(score of `launch.py local validate <job-id> --params <file> --nominal` (use=fit), the local nominal values).
 
-    Both come from the locally unpacked, sha256-verified copy of the bundle, never from the archive.
+    One validate run (one bootstrap check, one process, one model load) gives both; they come from the
+    locally unpacked, sha256-verified copy of the bundle, never from the archive.
     """
     out = Path(params_file).with_name("reproduced.json")
-    code = launch.validate(root, job_id, str(params_file), "fit", str(out))
+    code = launch.validate(root, job_id, str(params_file), "fit", str(out), nominal=True)
     if code != 0:
         raise ValueError(f"launch.py local validate failed (exit {code}); cannot reproduce the best score")
     report = strict_json(out.read_bytes())
-    score = report.get("score") if isinstance(report, dict) else None
-    if not _number(score):
+    if not isinstance(report, dict) or report.get("params_source") != "given":
+        raise ValueError("the local validate report is not a score of the given (best) params")
+    score = report.get("score")
+    if not finite_number(score):
         raise ValueError("the reproduced score is not a finite number")
-    out = Path(params_file).with_name("nominal.json")
-    code = launch.validate(root, job_id, None, "fit", str(out))
-    if code != 0:
-        raise ValueError(f"launch.py local validate at nominal values failed (exit {code})")
-    report = strict_json(out.read_bytes())
-    if (not isinstance(report, dict) or report.get("params_source") != "nominal"
-            or not isinstance(report.get("params"), dict)):
-        raise ValueError("the local nominal validate report has no nominal params")
-    return float(score), report["params"]
+    nominal = report.get("nominal")
+    if not isinstance(nominal, dict) or not isinstance(nominal.get("params"), dict):
+        raise ValueError("the local validate report has no nominal params")
+    return float(score), nominal["params"]
 
 
 def _stats(fit: list[dict], restarts: list[dict], good: list[int], best: dict, start: dict) -> list[dict]:
@@ -255,7 +249,7 @@ def _start_values(nominal, names: list[str]) -> dict:
     """The locally computed nominal values of the fitted names (finite numbers only; others stay unknown)."""
     if not isinstance(nominal, dict):
         raise ValueError("the reproduce step must return the local nominal values as an object")
-    return {n: float(nominal[n]) for n in names if _number(nominal.get(n))}
+    return {n: float(nominal[n]) for n in names if finite_number(nominal.get(n))}
 
 
 def _g(value) -> str:
@@ -343,7 +337,7 @@ def import_results(root, job_id: str, *, reproduce=None) -> Path:
         if not isinstance(outcome, tuple) or len(outcome) != 2:
             raise ValueError("the reproduce step must return (score, nominal values)")
         reproduced, nominal = outcome
-        if not _number(reproduced):
+        if not finite_number(reproduced):
             raise ValueError("the reproduced score is not a finite number")
         rtol = settings["reproduce_rtol"]
         scale = abs(best["score"]) or 1.0

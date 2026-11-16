@@ -506,90 +506,71 @@ def _check_maboss_data_input(root, value, first_line):
     return {"mapping": rel, "sha256": digest, "approval_id": approval_id, anchor_key: anchor}, sessions
 
 
-# Any spelling of record_session_id (case, space, `_` or `-` separators) on the NFKC-normalised text.
-RECORD_MENTION = re.compile(r"record[\s_-]*session[\s_-]*id(?!\w)", re.I)
-RECORD_VALUE = re.compile(r"[\s\"'`:=]*([\w-]+(?:\.[\w-]+)*)([\"'`]*)")
-RECORD_JOINED = re.compile(r"\s*(?:[/&+]|and\s+\S)", re.I)
-RECORD_END = re.compile(r"(?:\Z|\s|[.;)\]}])")
-
-
-def _record_session_values(text):
-    """(mention count, values): the value after each record_session_id mention; a value must end at
-    whitespace, the end of the text or `. ; ) ] }` (or `,` after a closing quote), and not be joined
-    to another id by `,` `/` `&` `+` or `and`. A mention with no value, or a joined value, is returned
-    as None (never equal to a session)."""
-    values, mentions = [], 0
-    for mention in RECORD_MENTION.finditer(text):
-        mentions += 1
-        match = RECORD_VALUE.match(text, mention.end())
-        if not match:
-            values.append(None)
-            continue
-        end = match.end()
-        closed = bool(match.group(2))
-        ok = RECORD_END.match(text, end) or (closed and text.startswith(",", end))
-        values.append(match.group(1) if ok and not RECORD_JOINED.match(text, end) else None)
-    return mentions, values
 CALIBRATION_REL = re.compile(r"runs/orchestrator/[\w.-]+/jobs/[\w.-]+/calibration_proposal\.json")
+ODE_CALIBRATION_KEYS = {"calibration", "sha256", "approval", "record_session_id", "accept"}
 
 
-def _check_ode_calibration_input(root, value, text):
-    """The ode-modeler form: an approved calibration_proposal.json applied to its own ODE session."""
-    if set(value) != {"calibration", "sha256", "approval"}:
-        raise ValueError("ode-modeler DATA_INPUT requires exactly calibration, sha256 and approval")
+def _check_ode_calibration_input(root, value):
+    """The ode-modeler form: an approved calibration_proposal.json applied to its own ODE session.
+
+    {"calibration", "sha256", "approval", "record_session_id", "accept"}: record_session_id must be the
+    proposal's ODE session (= the approval's session_id) and `accept` (unique, nonempty) exactly the
+    approval's outputs, so the modeler takes the session and the parameter names only from this verified line.
+    The proposal must come from its job: the job.json beside it has the proposal's job_sha256, job id
+    (= the folder name) and mapping, an approved ode_mapping of the same ODE session.
+    """
+    if set(value) != ODE_CALIBRATION_KEYS:
+        raise ValueError("ode-modeler DATA_INPUT requires exactly calibration, sha256, approval, record_session_id "
+                         f"and accept; got {sorted(value)}")
     rel, digest, approval_id = value["calibration"], value["sha256"], value["approval"]
+    session, accept = value["record_session_id"], value["accept"]
     if not all(isinstance(v, str) and v for v in (rel, digest, approval_id)):
         raise ValueError("DATA_INPUT calibration, sha256 and approval must be nonempty strings")
+    if not isinstance(session, str) or not session:
+        raise ValueError("DATA_INPUT record_session_id must be a nonempty string (the proposal's ODE session)")
+    if (not isinstance(accept, list) or not accept or not all(isinstance(a, str) and a for a in accept)
+            or len(accept) != len(set(accept))):
+        raise ValueError("DATA_INPUT accept must be a nonempty list of unique parameter names (the approval's "
+                         f"outputs); got {accept!r}")
     if not SHA256.fullmatch(digest):
         raise ValueError("DATA_INPUT calibration needs a lowercase hex sha256")
     if not CALIBRATION_REL.fullmatch(rel):
         raise ValueError("DATA_INPUT calibration must be runs/orchestrator/<p>/jobs/<id>/calibration_proposal.json")
-    record = approvals.require_calibration_approval(root, approval_id, rel, digest)
-    validate_record(root, record)
-    # Check exactly the approved bytes: one read gives the parsed proposal and its hash.
-    raw = (Path(root) / rel).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != digest:
-        raise ValueError(f"{rel} changed since approval {approval_id} (sha256 mismatch)")
-    proposal = _strict_object(raw.decode("utf-8"), rel)
-    if proposal.get("kind") != "calibration_proposal":
-        raise ValueError(f"{rel} is not a calibration_proposal")
-    model = proposal.get("model")
-    session = model.get("ode_session") if isinstance(model, dict) else None
-    rows = proposal.get("parameters")
-    names = {r.get("name") for r in rows if isinstance(r, dict)} if isinstance(rows, list) else set()
-    if not isinstance(session, str) or not session or not names:
-        raise ValueError(f"{rel} names no ODE session or no parameters")
-    outputs = record.get("outputs")
-    if (not isinstance(outputs, list) or not outputs or len(outputs) != len(set(outputs))
-            or not all(isinstance(o, str) for o in outputs) or not set(outputs) <= names):
-        raise ValueError(f"calibration approval {approval_id} outputs must be a nonempty list of parameter names "
-                         f"of the proposal ({', '.join(sorted(names))}); got {outputs!r}")
-    if record.get("session_id") != session:
-        raise ValueError(f"calibration approval {approval_id} has session_id {record.get('session_id')!r}; "
-                         f"it must be the proposal's ODE session {session}")
+    record, proposal = approvals.require_calibration_approval(root, approval_id, rel, digest)
+    ode_session = proposal["model"]["ode_session"]
+    if session != ode_session:
+        raise ValueError(f"DATA_INPUT record_session_id {session!r} must be the proposal's ODE session "
+                         f"{ode_session} (the session of approval {approval_id})")
+    if set(accept) != set(record["outputs"]):
+        raise ValueError(f"DATA_INPUT accept {sorted(accept)} must equal the outputs of approval {approval_id} "
+                         f"{sorted(record['outputs'])}")
     # The proposal must come from an approved mapping and from the job built beside it.
     ref = proposal.get("mapping")
-    if not isinstance(ref, dict) or not all(isinstance(ref.get(k), str) and ref[k] for k in ("path", "sha256", "approval")):
+    if not isinstance(ref, dict) or set(ref) != {"path", "sha256", "approval"} \
+            or not all(isinstance(ref[k], str) and ref[k] for k in ref):
         raise ValueError(f"{rel} has no mapping {{path, sha256, approval}}")
     try:
         mapping_record = approvals.require_ode_mapping_approval(root, ref["approval"], ref["path"], ref["sha256"])
     except ValueError as exc:
         raise ValueError(f"{rel}: its mapping {ref['path']} (approval {ref['approval']}) is not an approved "
                          f"ode_mapping: {exc}") from None
-    if mapping_record.get("session_id") != session:
+    if mapping_record.get("session_id") != ode_session:
         raise ValueError(f"{rel}: mapping approval {ref['approval']} is for ODE session "
-                         f"{mapping_record.get('session_id')!r}, not the proposal's {session}")
-    job_json = (Path(root) / rel).parent / "job.json"
-    if job_json.is_symlink() or not job_json.is_file() \
-            or hashlib.sha256(job_json.read_bytes()).hexdigest() != proposal.get("job_sha256"):
+                         f"{mapping_record.get('session_id')!r}, not the proposal's {ode_session}")
+    folder = (Path(root) / rel).parent
+    job_json = folder / "job.json"
+    job_raw = job_json.read_bytes() if job_json.is_file() and not job_json.is_symlink() else None
+    if job_raw is None or hashlib.sha256(job_raw).hexdigest() != proposal.get("job_sha256"):
         raise ValueError(f"{rel}: job_sha256 does not match the job.json beside it")
-    mentions, named = _record_session_values(text)
-    if not mentions or set(named) != {session}:
-        raise ValueError(f"the brief must contain record_session_id {session} (the proposal's ODE session) and "
-                         f"no other record_session_id value, written as `record_session_id {session}` or JSON; "
-                         f"found {sorted(set(map(str, named)))}")
-    return {"calibration": rel, "sha256": digest, "approval_id": approval_id, "ode_session": session,
-            "outputs": outputs}, set()
+    job = _strict_object(job_raw.decode("utf-8"), f"{folder.name}/job.json")
+    if job.get("job_id") != folder.name or proposal.get("job_id") != folder.name:
+        raise ValueError(f"{rel}: the job_id of the proposal ({proposal.get('job_id')!r}) and of its job.json "
+                         f"({job.get('job_id')!r}) must both be its job folder name {folder.name}")
+    if job.get("mapping") != ref:
+        raise ValueError(f"{rel}: its mapping {ref} is not the mapping of the job.json beside it "
+                         f"({job.get('mapping')!r})")
+    return {"calibration": rel, "sha256": digest, "approval_id": approval_id, "ode_session": ode_session,
+            "outputs": list(accept)}, set()
 
 
 # Seeds and mapping files reach NeKo and MaBoSS only as the DATA_INPUT artifact. Every
@@ -641,14 +622,15 @@ def _resolve_mention(root, mention):
     return found
 
 
-def _orchestrator_mentions(root, text):
+def _orchestrator_mentions(root, text, cache=None):
     """(mention, existing paths) for each `runs/orchestrator` mention in the text.
 
     The mention is the unbroken token (trailing punctuation stripped; a glob cut back to its
     directory). Unless the token names a file, at most SPACED_CANDIDATES line prefixes ending
     in .json are tried too, stopping at the first that names something (names with spaces).
+    ``cache`` ({mention: paths}) is shared with the caller's other resolutions of the same brief.
     """
-    cache = {}
+    cache = {} if cache is None else cache
 
     def resolve(mention):
         if mention not in cache:
@@ -733,15 +715,14 @@ def _model_input_kind(path):
     return None
 
 
-def _check_orchestrator_mentions(root, text, allowed_rel):
-    """Refuse a seeds or mapping file mentioned in the brief unless it is the DATA_INPUT artifact."""
-    root = Path(root).resolve()
+def _check_orchestrator_mentions(root, mentions, allowed_rel):
+    """Refuse a seeds or mapping file among the resolved mentions unless it is the DATA_INPUT artifact."""
     allowed = None
     if allowed_rel:
         info = os.stat(root / allowed_rel)
         allowed = (info.st_dev, info.st_ino)
     checked = set()
-    for mention, paths in _orchestrator_mentions(root, text):
+    for mention, paths in mentions:
         for path in (f for p in paths for f in _candidate_files(root, p)):
             info = path.stat()
             key = (info.st_dev, info.st_ino)
@@ -777,52 +758,50 @@ def _job_area(root, path):
         or parts[:2] == ["inputs", "calibration-results"]
 
 
-def _check_job_mentions(root, text, allowed_rels):
-    """Refuse calibration job files and returned results named in the (normalised) brief text."""
+def _check_mentions(root, text, artifact_rel, model_inputs=True):
+    """One scan of the (normalised) brief: every runs/orchestrator mention is resolved once (shared cache).
+
+    Job rule (every gated specialist): no calibration job file or returned result, except the ode-modeler's
+    verified DATA_INPUT proposal (`artifact_rel` when it is a calibration_proposal.json) and its own job folder.
+    Model-input rule (`model_inputs`, the DATA_INPUT roles): no seeds, mapping, ode_mapping or calibration
+    proposal file other than `artifact_rel` (see _check_orchestrator_mentions).
+    """
     root = Path(root).resolve()
     allowed = set()
-    for rel in allowed_rels:
-        if isinstance(rel, str) and CALIBRATION_REL.fullmatch(rel) and (root / rel).is_file():
-            proposal = (root / rel).resolve()
-            allowed |= {proposal, proposal.parent}
+    if isinstance(artifact_rel, str) and CALIBRATION_REL.fullmatch(artifact_rel) and (root / artifact_rel).is_file():
+        proposal = (root / artifact_rel).resolve()
+        allowed = {proposal, proposal.parent}
     found = RESULTS_MENTION.search(text)
     if found:
         token = PATH_TOKEN.match(text, found.start()).group().rstrip(TRAILING)
         raise ValueError(f"brief mentions calibration job results {token!r}; {JOB_RULE}")
+    cache = {}
     for found in JOB_MENTION.finditer(text):
         token = PATH_TOKEN.match(text, found.start()).group().rstrip(TRAILING)
-        paths = _resolve_mention(root, token)
-        if not paths or not set(paths) <= allowed:
+        if token not in cache:
+            cache[token] = _resolve_mention(root, token)
+        if not cache[token] or not set(cache[token]) <= allowed:
             raise ValueError(f"brief mentions calibration job path {token!r}; {JOB_RULE}")
-    for mention, paths in _orchestrator_mentions(root, text):
+    mentions = list(_orchestrator_mentions(root, text, cache))
+    for mention, paths in mentions:
         for path in paths:
             if path not in allowed and _job_area(root, path):
                 raise ValueError(f"brief mentions {mention!r}, which is inside a calibration job folder or the "
                                  f"returned results ({path.relative_to(root).as_posix()}); {JOB_RULE}")
+    if model_inputs:
+        _check_orchestrator_mentions(root, mentions, artifact_rel)
 
 
 def check_job_mentions(root, specialist, task):
-    """The job-file rule for any gated specialist (the dispatch hook runs it for every one).
-
-    The exception for the ode-modeler's own proposal is taken, unverified, from any line starting with
-    `DATA_INPUT ` (so that a misplaced line gets check_data_input's placement message); the hook always runs
-    check_data_input afterwards for the ode-modeler, which verifies the line-1 DATA_INPUT and runs this rule
-    again with only the verified proposal exempt.
-    """
+    """The job-file rule for a gated specialist without a DATA_INPUT line (the dispatch hook runs it for those;
+    check_data_input runs the same rule, once, for the DATA_INPUT roles after verifying their line)."""
+    if specialist in DATA_INPUT_LINE:
+        raise ValueError(f"{specialist} takes DATA_INPUT: its job-file rule runs inside check_data_input")
     if task is None:
         task = ""
     if not isinstance(task, str):
         raise ValueError("dispatch prompt must be a string")
-    allowed = []
-    if specialist == "ode_modeler":
-        for line in task.splitlines():
-            if line.startswith("DATA_INPUT "):
-                try:
-                    value = _strict_object(line[len("DATA_INPUT "):], "DATA_INPUT")
-                except ValueError:
-                    continue
-                allowed.append(value.get("calibration"))
-    _check_job_mentions(root, _detection_text(task), allowed)
+    _check_mentions(root, _detection_text(task), None, model_inputs=False)
 
 
 def _quote(line, match):
@@ -876,6 +855,11 @@ def check_data_input(root, specialist, task):
     {"seeds", "sha256", "approval"} (an approved data_seeds seeds.json from user sources).
     boolean-dynamics-modeler: {"mapping", "sha256", "approval"}, bound to the STAGE_GATE
     upstream_session_id (NeKo export) or standalone_decision_id (researcher BNET).
+    ode-modeler: {"calibration", "sha256", "approval", "record_session_id", "accept"} (see
+    _check_ode_calibration_input).
+
+    The brief's runs/orchestrator mentions are then scanned once (_check_mentions): the job-file rule and the
+    model-input rule, with only the verified artifact exempt.
     """
     if specialist not in DATA_INPUT_LINE:
         return None
@@ -898,22 +882,19 @@ def check_data_input(root, specialist, task):
     if canonical is None:
         if DATA_PATH.search(text) or DATA_SESSION_ID.search(text):
             raise ValueError(DATA_REFUSAL)
-        _check_job_mentions(root, text, ())
-        _check_orchestrator_mentions(root, text, None)
+        _check_mentions(root, text, None)
         return None
     value = _strict_object(lines[expected][len("DATA_INPUT "):], "DATA_INPUT")
     if specialist == "network_curator":
         result, sessions = _check_neko_data_input(root, value)
     elif specialist == "ode_modeler":
-        result, sessions = _check_ode_calibration_input(root, value, text)
+        result, sessions = _check_ode_calibration_input(root, value)
     else:
         result, sessions = _check_maboss_data_input(root, value, lines[0])
     other = sorted(_data_sessions_named(text) - sessions)
     if other:
         raise ValueError(f"brief names data-analyst session(s) {', '.join(other)} outside its DATA_INPUT")
-    _check_job_mentions(root, text, (result.get("calibration"),))
-    _check_orchestrator_mentions(root, text, result.get("seeds") or result.get("mapping")
-                               or result.get("calibration"))
+    _check_mentions(root, text, result.get("seeds") or result.get("mapping") or result.get("calibration"))
     return result
 
 

@@ -656,6 +656,63 @@ class RuntimeReviewTests(unittest.TestCase):
             self.assertEqual(sorted(run.validate(self.root, {"k1": 1.0}, "holdout")["predictions"]), ["h1", "h2"])
             self.assertEqual(sorted(run.validate(self.root, {"k1": 1.0}, "all")["predictions"]), ["h1", "h2", "m1"])
 
+    # PR 16 review score_holdout.py:102 + import_results.py:230
+    def test_validate_partial_params_keep_the_model_defaults(self):
+        Fake, _ = self.fake_problem(self.spec())
+
+        class WithDefaults(Fake):
+            def nominal(self):
+                return {"k1": 0.0}  # a zero default: never passed as a value, so never refused
+
+        with mock.patch.object(run, "Problem", WithDefaults):
+            report = run.validate(self.root, {}, "holdout", partial=True)
+            self.assertEqual(report["params"], {"k1": 0.0})
+            self.assertEqual(report["params_source"], "partial")
+            self.assertEqual(report["params_given"], [])
+            report = run.validate(self.root, {"k1": 2.0}, "fit", partial=True)
+            self.assertEqual((report["params"], report["params_given"]), ({"k1": 2.0}, ["k1"]))
+
+    def test_read_params_partial(self):
+        fit = [{"name": "k1"}, {"name": "k2"}]
+        path = self.root / "p.json"
+        path.write_text(json.dumps({"k1": 2.0}))
+        with self.assertRaisesRegex(ValueError, "exactly"):
+            run._read_params(path, fit)
+        self.assertEqual(run._read_params(path, fit, partial=True), {"k1": 2.0})
+        for bad in ({}, {"k9": 1.0}, {"k1": 0.0}):
+            path.write_text(json.dumps(bad))
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                run._read_params(path, fit, partial=True)
+
+    def test_validate_reports_the_nominal_score_in_the_same_process(self):
+        Fake, simulated = self.fake_problem(self.spec())
+        loads = []
+
+        class WithDefaults(Fake):
+            def __init__(self, root):
+                loads.append(root)
+                super().__init__(root)
+
+            def nominal(self):
+                return {"k1": 1.0}
+
+            def simulate(self, name, fitted, times=None):
+                return {"obs": {t: fitted["k1"] + t for t in times}}
+        with mock.patch.object(run, "Problem", WithDefaults):
+            report = run.validate(self.root, {"k1": 2.0}, "fit", with_nominal=True)
+        self.assertEqual(len(loads), 1)  # one Problem for both scores
+        self.assertEqual(report["params_source"], "given")
+        self.assertEqual(report["score"], (12.0 - 2.0) ** 2)
+        self.assertEqual(report["nominal"], {"params": {"k1": 1.0}, "score": (11.0 - 2.0) ** 2, "penalty": False})
+        params = self.root / "best.json"
+        params.write_text(json.dumps({"k1": 2.0}))
+        out = self.root / "out.json"
+        with mock.patch.object(run, "Problem", WithDefaults), mock.patch.object(run, "ROOT", self.root), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(run.main(["validate", "--params", str(params), "--nominal", "--out", str(out)]), 0)
+        self.assertEqual(json.loads(out.read_text())["nominal"]["params"], {"k1": 1.0})
+        self.assertEqual(len(loads), 2)  # cmd_validate loads the Problem once
+
     # launch.py:294 + run.py:525 (controller ruling R-A3)
     def test_parallel_rule(self):
         rule = run.effective_parallel
@@ -852,6 +909,11 @@ class LaunchTests(JobFixture):
         with mock.patch.object(launch.subprocess, "run") as called:
             called.return_value.returncode = 0
             self.assertEqual(launch.validate(self.root, self.job_id, None, "fit", None), 0)
+            self.assertEqual(launch.validate(self.root, self.job_id, "p.json", "holdout", "o.json", partial=True,
+                                             nominal=True), 0)
+        command = called.call_args.args[0]
+        self.assertIn("--partial", command)
+        self.assertIn("--nominal", command)
 
 
 if __name__ == "__main__":

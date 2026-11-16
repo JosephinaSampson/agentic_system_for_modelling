@@ -76,14 +76,15 @@ When the stage applies a calibration, check that these agree:
   `export_sha256` equals the model revision bundle and `calibration_proposal.json` `model` names the same
   ODE session and revision;
 - proposal sha256 in the `ode_calibration` approval and the `DATA_INPUT` line; approval `outputs` are
-  parameter names of the proposal; `session_id` equals the proposal's ODE session and the brief's
-  `record_session_id`;
+  parameter names of the proposal and equal the `DATA_INPUT` `accept` list; `session_id` equals the proposal's
+  ODE session and the `DATA_INPUT` `record_session_id`; the `job.json` beside the proposal has its job id and
+  mapping;
 - the proposal's `results_sha256` equals `inputs/calibration-results/<job-id>/results.tar.gz`; `partial` and
   `poorly_constrained` flags are reported, not dropped;
 - stored parameter values in the new revision equal the approved `best` values, and every other configured
   value equals the previous revision's;
-- `holdout_score.json` exists once, cites the same proposal sha256 and approval, and lists accepted
-  parameters at best and the rest at start; `dispatch.jsonl` (ssh) matches the bundle sha256;
+- `holdout_score.json` exists once, cites the same proposal sha256 and approval, and lists only the accepted
+  parameters at best (`parameters`; the rest at the bundled model defaults, `effective_parameters`); `dispatch.jsonl` (ssh) matches the bundle sha256;
 - the `data-calibrated` tag cites the job id, proposal sha256 and approval id; registry lineage names them.
 
 ## Data-stage and mapping checklist

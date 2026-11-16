@@ -244,18 +244,20 @@ python3 scripts/jobs/score_holdout.py <job-id> --approval <ode_calibration recor
 `{"time", "host", "ssh_alias", "bundle_sha256", "authorization"}` to the job folder's `dispatch.jsonl` before
 anything leaves the machine, and only the bundle is sent. The `ode_mapping` and `ode_calibration` stages are
 governance stages of `state.py record`. The ode-modeler hook (`stage_gate_guard.py`) accepts
-a `DATA_INPUT {"calibration": ..., "sha256": ..., "approval": ...}` on line 1 only:
-approval stage `ode_calibration` bound to that path and sha256, `outputs` a nonempty subset of the proposal's
-parameter names, approval `session_id` = the proposal's ODE session, and the brief names
-`record_session_id` with exactly that session and no other. Any other calibration proposal or
+a `DATA_INPUT {"calibration": ..., "sha256": ..., "approval": ..., "record_session_id": ..., "accept": [...]}` on
+line 1 only: approval stage `ode_calibration` bound to that path and sha256 and passing `validate_record`,
+`outputs` a nonempty subset of the proposal's parameter names, approval `session_id` = the proposal's ODE
+session = `record_session_id`, and `accept` exactly the approval's `outputs` (all in
+`approvals.require_calibration_approval`, shared with `score_holdout.py`). Any other calibration proposal or
 `ode_mapping.json` named in the brief, or a payload-like `DATA_INPUT` elsewhere, is refused; errors deny.
-It also requires the proposal's `mapping` to be an approved `ode_mapping` and its `job_sha256` to match the
-`job.json` beside it. For every gated specialist the hook refuses any path under `runs/orchestrator/<p>/jobs/`
+It also requires the proposal's `mapping` to be an approved `ode_mapping` and the `job.json` beside it to
+match its `job_sha256`, `job_id` (= the folder name) and `mapping`. For every gated specialist the hook refuses any path under `runs/orchestrator/<p>/jobs/`
 or `inputs/calibration-results/` except the ode-modeler's `DATA_INPUT` proposal and its own job folder.
-`import_results.py` computes `start` (nominal values) locally while reproducing (needs internet; builds
-`~/.cache/agentic-jobs/<job-id>/`); the archive's selftest values are ignored.
-`score_holdout.py` writes `holdout_score.json` once with `n_rows` (accepted parameters at best, others at
-start; a null start or zero predicted hold-out rows refuses).
+`import_results.py` computes `start` (nominal values) locally in the same `validate --nominal` run that
+reproduces the best score (needs internet; builds `~/.cache/agentic-jobs/<job-id>/`); the archive's selftest
+values are ignored. `score_holdout.py` writes `holdout_score.json` once with `n_rows` (only the accepted
+parameters are passed, at best; the others keep the model defaults); it writes nothing when no hold-out row
+was predicted, any hold-out prediction failed or the score is the penalty.
 
 ## Evidence and provenance
 

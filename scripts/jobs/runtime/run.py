@@ -2,7 +2,7 @@
 """Run a BioMASS calibration job from inside its bundle folder.
 
   python run.py selftest
-  python run.py validate [--params FILE] [--use fit|holdout|all] [--out FILE]
+  python run.py validate [--params FILE [--partial]] [--nominal] [--use fit|holdout|all] [--out FILE]
   python run.py calibrate --restart N
   python run.py collect
   python run.py status
@@ -578,17 +578,21 @@ def cmd_calibrate(root: Path, restart: int) -> int:
 
 # ---------------------------------------------------------------- validate
 
-def _read_params(path: Path, fit: list[dict]) -> dict:
+def _read_params(path: Path, fit: list[dict], partial: bool = False) -> dict:
+    """The fitted values of a --params file: exactly the fitted names, or with `partial` a nonempty subset
+    (the others keep the model defaults and are never read from the file)."""
     data = read_json(path)
     if isinstance(data, dict) and isinstance(data.get("params"), dict):
         data = data["params"]  # a restart's result.json
     names = [f["name"] for f in fit]
-    if not isinstance(data, dict) or set(data) != set(names):
-        raise ValueError(f"--params must give exactly the fitted names {names}")
+    given = set(data) if isinstance(data, dict) else None
+    if given is None or (not given or not given <= set(names) if partial else given != set(names)):
+        raise ValueError(f"--params must give {'a nonempty subset of' if partial else 'exactly'} the fitted names "
+                         f"{names}")
     for name, value in data.items():
         if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
             raise ValueError(f"--params {name} must be a positive finite number")
-    return {name: float(data[name]) for name in names}
+    return {name: float(data[name]) for name in names if name in data}
 
 
 def prediction_rows(spec: dict, predictions: dict, use: str = "all") -> dict:
@@ -604,20 +608,36 @@ def prediction_rows(spec: dict, predictions: dict, use: str = "all") -> dict:
     return rows
 
 
-def validate(root: Path, params: dict | None, use: str) -> dict:
-    problem = Problem(root)
-    fitted = params if params is not None else problem.nominal()
+def validate(root: Path, params: dict | None, use: str, partial: bool = False, with_nominal: bool = False,
+             problem: Problem | None = None) -> dict:
+    """Score `params` (None: the model defaults) on the rows of `use`, with one loaded Problem.
+
+    partial: `params` may name only some fitted values; the others keep the model defaults (`params` is the
+    effective vector, `params_given` the names given). with_nominal: also score the model defaults on the
+    same rows (report["nominal"] = {params, score, penalty}).
+    """
+    problem = problem or Problem(root)
+    nominal = problem.nominal() if params is None or partial or with_nominal else None
+    fitted = nominal if params is None else ({**nominal, **params} if partial else params)
     score, predictions, sims = problem.evaluate(fitted, use)
-    return {"use": use, "params_source": "given" if params is not None else "nominal",
-            "params": fitted, "score": float(score), "penalty": score >= problem.compare.PENALTY,
-            "predictions": prediction_rows(problem.spec, predictions, use)}
+    report = {"use": use, "params_source": "nominal" if params is None else ("partial" if partial else "given"),
+              "params": fitted, "score": float(score), "penalty": score >= problem.compare.PENALTY,
+              "predictions": prediction_rows(problem.spec, predictions, use)}
+    if partial:
+        report["params_given"] = sorted(params or {})
+    if with_nominal:
+        nominal_score = score if params is None else problem.evaluate(nominal, use)[0]
+        report["nominal"] = {"params": nominal, "score": float(nominal_score),
+                             "penalty": nominal_score >= problem.compare.PENALTY}
+    return report
 
 
-def cmd_validate(root: Path, params_file: str | None, use: str, out: str | None) -> int:
+def cmd_validate(root: Path, params_file: str | None, use: str, out: str | None, partial: bool = False,
+                 with_nominal: bool = False) -> int:
     problem = Problem(root)
     problem._load()
-    params = _read_params(Path(params_file), problem.fit) if params_file else None
-    report = validate(root, params, use)
+    params = _read_params(Path(params_file), problem.fit, partial) if params_file else None
+    report = validate(root, params, use, partial, with_nominal, problem=problem)
     text = json.dumps(report, indent=2, allow_nan=False) + "\n"
     if out:
         Path(out).write_text(text, encoding="utf-8")
@@ -883,6 +903,9 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--params", metavar="FILE", help="JSON {fit name: value} or a restart result.json")
     v.add_argument("--use", choices=USES, default="fit")
     v.add_argument("--out", metavar="FILE")
+    v.add_argument("--partial", action="store_true",
+                   help="--params may give a subset of the fitted names; the others keep the model defaults")
+    v.add_argument("--nominal", action="store_true", help="also report the score at the model defaults")
     c = sub.add_parser("calibrate")
     c.add_argument("--restart", type=int, required=True)
     sub.add_parser("collect")
@@ -898,7 +921,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "selftest":
         return cmd_selftest(ROOT)
     if args.command == "validate":
-        return cmd_validate(ROOT, args.params, args.use, args.out)
+        if args.partial and not args.params:
+            parser.error("validate --partial needs --params")
+        return cmd_validate(ROOT, args.params, args.use, args.out, args.partial, args.nominal)
     if args.command == "calibrate":
         return cmd_calibrate(ROOT, args.restart)
     if args.command == "collect":

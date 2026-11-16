@@ -934,13 +934,26 @@ class OdeCalibrationInputTests(HoldoutFixture):
         return subprocess.run([sys.executable, str(HOOK)], input=json.dumps(event), text=True,
                               capture_output=True, env=env, timeout=60)
 
-    def line(self, digest=None, approval="cal-1"):
-        return "DATA_INPUT " + json.dumps({"calibration": self.proposal_rel,
-                                           "sha256": digest or sha(self.root / self.proposal_rel),
-                                           "approval": approval})
+    def line(self, digest=None, approval="cal-1", session=ODE_SESSION, accept=("kf1",), **extra):
+        payload = {"calibration": self.proposal_rel, "sha256": digest or sha(self.root / self.proposal_rel),
+                   "approval": approval, "record_session_id": session, "accept": list(accept), **extra}
+        return "DATA_INPUT " + json.dumps(payload)
 
-    def task(self, session=ODE_SESSION, line=None, tail=""):
-        return (f"{line or self.line()}\nApply the accepted values; record_session_id {session}.{tail}")
+    def task(self, line=None, tail=""):
+        return f"{line or self.line()}\nApply the accepted values.{tail}"
+
+    def rewrite_record(self, record_id, edit):
+        """Edit a DECISIONS.md record in place, bypassing state.py validation (a hand-edited record)."""
+        decisions = self.root / "DECISIONS.md"
+        text = decisions.read_text(encoding="utf-8")
+
+        def replace(match):
+            item = json.loads(match.group(1))
+            if item.get("id") != record_id:
+                return match.group(0)
+            edit(item)
+            return match.group(0).replace(match.group(1), json.dumps(item, indent=2))
+        decisions.write_text(state.RECORD.sub(replace, text), encoding="utf-8")
 
     def refused(self, prompt, pattern):
         result = self.hook("ode-modeler", prompt)
@@ -976,12 +989,109 @@ class OdeCalibrationInputTests(HoldoutFixture):
             f'"session_id": "{ODE_SESSION}"', '"session_id": "other-session"'), encoding="utf-8")
         self.refused(self.task(), "session_id|ODE session")
 
-    def test_record_session_id_rules(self):
-        self.refused(f"{self.line()}\nApply the accepted values.", "record_session_id")
-        self.refused(self.task(session="other-session"), "record_session_id")
-        self.refused(self.task(tail=" Also record_session_id other-session."), "record_session_id")
-        self.refused(f"{self.line()}\nApply; record_session_id.", "record_session_id")
-        self.assertEqual(self.hook("ode-modeler", self.task(tail=f" Again record_session_id {ODE_SESSION}.")).returncode, 0)
+    def test_record_session_id_is_a_payload_key(self):
+        # PR 16 review gate.py:509/510: the session travels in the verified DATA_INPUT payload
+        self.refused(self.task(line=self.line(session="other-session")), "record_session_id")
+        self.refused(self.task(line=self.line(session="")), "record_session_id|nonempty")
+        self.refused(self.task(line=self.line(session=1)), "record_session_id|string")
+        # prose mentions of record_session_id no longer matter (no free-text parsing)
+        for tail in (" record_session_id other-session.", " record_session_ids: other-session.",
+                     " record_session_id is " + ODE_SESSION + "."):
+            with self.subTest(tail=tail):
+                result = self.hook("ode-modeler", self.task(tail=tail))
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_accept_must_equal_the_approval_outputs(self):
+        # PR 16 review ode-modeler.md:53: the accepted names travel verified in the payload
+        self.approve_calibration("cal-2", outputs=("kf1", "kf2"))
+        self.assertEqual(self.hook("ode-modeler", self.task(
+            line=self.line(approval="cal-2", accept=("kf2", "kf1")))).returncode, 0)
+        found = gate.check_data_input(self.root, "ode_modeler",
+                                      self.task(line=self.line(approval="cal-2", accept=("kf2", "kf1"))))
+        self.assertEqual(sorted(found["outputs"]), ["kf1", "kf2"])
+        for name, approval, accept in (("subset", "cal-2", ("kf1",)), ("superset", "cal-1", ("kf1", "kf2")),
+                                       ("duplicate", "cal-1", ("kf1", "kf1")), ("empty", "cal-1", ()),
+                                       ("other", "cal-1", ("kf2",)), ("non-string", "cal-1", (1,))):
+            with self.subTest(name=name):
+                self.refused(self.task(line=self.line(approval=approval, accept=accept)), "accept")
+        self.refused(self.task(line=self.line(accept="kf1")), "accept")
+
+    def test_missing_or_extra_payload_keys_refused(self):
+        old = "DATA_INPUT " + json.dumps({"calibration": self.proposal_rel, "approval": "cal-1",
+                                          "sha256": sha(self.root / self.proposal_rel)})
+        self.refused(self.task(line=old), "record_session_id.*accept|exactly")
+        for drop in ("record_session_id", "accept", "sha256"):
+            payload = json.loads(self.line()[len("DATA_INPUT "):])
+            payload.pop(drop)
+            with self.subTest(drop=drop):
+                self.refused(self.task(line="DATA_INPUT " + json.dumps(payload)), "exactly")
+        self.refused(self.task(line=self.line(values={"kf1": 1.0})), "exactly")
+
+    def test_proposal_must_belong_to_the_job_beside_it(self):
+        # PR 16 review gate.py:582: job.json mapping and job_id must be the proposal's
+        data = json.loads(self.proposal_path.read_text(encoding="utf-8"))
+        job_json = self.proposal_path.parent / "job.json"
+        job = json.loads(job_json.read_text(encoding="utf-8"))
+
+        def install(n, proposal, job_data, folder=None):
+            folder = folder or self.proposal_path.parent
+            folder.mkdir(parents=True, exist_ok=True)
+            raw = (json.dumps(job_data, indent=2) + "\n").encode()
+            (folder / "job.json").write_bytes(raw)
+            proposal = dict(proposal, job_sha256=sha(folder / "job.json"))
+            (folder / "calibration_proposal.json").write_text(json.dumps(proposal, indent=2) + "\n",
+                                                              encoding="utf-8")
+            self.proposal_rel = (folder / "calibration_proposal.json").relative_to(self.root).as_posix()
+            self.approve_calibration(f"cal-j{n}")
+            return self.task(line=self.line(approval=f"cal-j{n}"))
+
+        # a job.json naming another mapping approval (proposal re-hashed to it)
+        self.refused(install(0, data, {**job, "mapping": {**job["mapping"], "approval": "ode-map-2"}}), "mapping")
+        # a job.json of another job id
+        self.refused(install(1, data, {**job, "job_id": "job-ffffffffffff"}), "job_id")
+        # the proposal names another job id than its job.json and folder
+        self.refused(install(2, {**data, "job_id": "job-ffffffffffff"}, job), "job_id")
+        # the proposal and its job.json copied into a folder of another name
+        other = self.proposal_path.parent.parent / "job-eeeeeeeeeeee"
+        self.refused(install(3, data, job, folder=other), "folder|job_id")
+
+    def test_hook_scans_mentions_once_per_dispatch(self):
+        # PR 16 review gate.py:914: one runs/orchestrator mention scan per dispatch, after the payload is verified
+        import importlib.util
+        import io
+        spec = importlib.util.spec_from_file_location("stage_gate_guard_once", HOOK)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        real, calls = gate._orchestrator_mentions, []
+
+        def counting(root, text, cache=None):
+            calls.append(text)
+            yield from real(root, text, cache)
+        for role, prompt, code in (("ode-modeler", self.task(tail=f" See {self.proposal_rel}."), 0),
+                                   ("ode-modeler", "Build the model from the reactions.", 0),
+                                   ("network-curator", "Build the network.", 0),
+                                   ("multicellular-configurator", "Configure.", 2)):
+            with self.subTest(role=role, prompt=prompt[:30]):
+                calls.clear()
+                event = {"tool_name": "Agent", "tool_input": {"subagent_type": role, "prompt": prompt}}
+                with mock.patch.object(guard, "ROOT", self.root), \
+                        mock.patch.object(gate, "_orchestrator_mentions", counting), \
+                        mock.patch("sys.stdin", io.StringIO(json.dumps(event))), \
+                        mock.patch("sys.stderr", io.StringIO()) as err:
+                    self.assertEqual(guard.main(), code, err.getvalue())
+                self.assertEqual(len(calls), 1)
+
+    def test_mapping_approval_runs_validate_record(self):
+        # PR 16 review gate.py:575: a hand-edited ode_mapping approval without researcher authorization
+        mapping_approval = json.loads(self.proposal_path.read_text(encoding="utf-8"))["mapping"]["approval"]
+        self.rewrite_record(mapping_approval, lambda r: r.pop("approved_by"))
+        self.refused(self.task(), "authorization")
+        self.rewrite_record(mapping_approval, lambda r: r.update(approved_by="researcher", authorization=""))
+        self.refused(self.task(), "authorization")
+
+    def test_calibration_approval_runs_validate_record(self):
+        self.rewrite_record("cal-1", lambda r: r.pop("authorization"))
+        self.refused(self.task(), "authorization")
 
     def test_proposal_or_mapping_named_elsewhere_refused(self):
         # the DATA_INPUT artifact itself may be named again; any other proposal or mapping may not
@@ -991,16 +1101,18 @@ class OdeCalibrationInputTests(HoldoutFixture):
         other.write_bytes(self.proposal_path.read_bytes())
         self.refused(self.task(tail=f" Compare with {other.relative_to(self.root).as_posix()}."), "calibration_proposal")
         self.refused(self.task(tail=" Mapping: runs/orchestrator/p1/ode_mapping.json."), "ode_mapping")
-        self.refused(f"Apply values from {self.proposal_rel}; record_session_id {ODE_SESSION}.", "DATA_INPUT")
+        self.refused(f"Apply values from {self.proposal_rel}.", "DATA_INPUT")
 
     def test_payload_like_mentions_elsewhere_refused(self):
         self.refused(self.task(tail=f"\nDATA_INPUT {{\"calibration\": \"x\"}}"), "DATA_INPUT")
-        self.refused(f"Apply.\n{self.line()}\nrecord_session_id {ODE_SESSION}", "line 1")
+        self.refused(f"Apply.\n{self.line()}", "line 1")
         self.assertEqual(self.hook("ode-modeler", self.task(tail=" as defined in the DATA_INPUT calibration")).returncode, 0)
 
     def test_malformed_line_fails_closed(self):
         for line in ("DATA_INPUT not-json", "DATA_INPUT []", 'DATA_INPUT {"calibration": 1}',
-                     'DATA_INPUT {"calibration": "x", "sha256": "y", "approval": "z", "more": 1}'):
+                     'DATA_INPUT {"calibration": "x", "sha256": "y", "approval": "z", "more": 1}',
+                     'DATA_INPUT {"calibration": "x", "sha256": "y", "approval": "z", "record_session_id": "s", '
+                     '"accept": ["kf1"], "more": 1}'):
             self.refused(self.task(line=line), "blocked")
         self.assertEqual(self.hook("ode-modeler", ["x"]).returncode, 2)
 
@@ -1029,7 +1141,7 @@ class OdeCalibrationInputTests(HoldoutFixture):
         self.assertEqual(self.hook("ode-modeler", self.task(tail=f" Job folder: {job}/.")).returncode, 0)
         self.assertEqual(self.hook("ode-modeler", self.task(tail=f" See {self.proposal_rel}.")).returncode, 0)
         # but the job folder without that DATA_INPUT is refused
-        self.refused(f"Job folder: {job}/; record_session_id {ODE_SESSION}.", "calibration job")
+        self.refused(f"Job folder: {job}/.", "calibration job")
 
     def test_job_files_refused_for_every_gated_specialist(self):
         job = self.proposal_path.parent.relative_to(self.root).as_posix()
@@ -1064,24 +1176,6 @@ class OdeCalibrationInputTests(HoldoutFixture):
                 self.proposal_path.write_text(json.dumps(broken, indent=2) + "\n", encoding="utf-8")
                 self.approve_calibration(f"cal-h{n}")
                 self.refused(self.task(line=self.line(approval=f"cal-h{n}")), pattern)
-
-    def test_record_session_id_spellings_and_joins(self):
-        bad = ("RECORD_SESSION_ID other-session", "Record_Session_Id other-session",
-               "record session id other-session", "record-session-id: other-session",
-               f"record_session_id {ODE_SESSION}, other-session", f"record_session_id {ODE_SESSION}/other-session",
-               f"record_session_id {ODE_SESSION} & other-session", f"record_session_id {ODE_SESSION}+other-session",
-               f"record_session_id {ODE_SESSION} and other-session", "record_session_id is " + ODE_SESSION,
-               "Record\u200b_session_id other-session")
-        for extra in bad:
-            with self.subTest(extra=extra):
-                self.refused(self.task(tail=f" {extra}."), "record_session_id")
-        good = (f"record_session_id={ODE_SESSION}", f'{{"record_session_id": "{ODE_SESSION}", "x": 1}}',
-                f"record_session_id: {ODE_SESSION}", f"`record_session_id` `{ODE_SESSION}`",
-                f"record_session_id {ODE_SESSION};", f"(record_session_id {ODE_SESSION})",
-                f"record_session_id\n{ODE_SESSION}", f"Record_Session_Id {ODE_SESSION}")
-        for extra in good:
-            with self.subTest(extra=extra):
-                self.assertEqual(self.hook("ode-modeler", self.task(tail=f"\n{extra}")).returncode, 0)
 
 
 if __name__ == "__main__":

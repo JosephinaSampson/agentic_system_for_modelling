@@ -705,12 +705,26 @@ class ApprovalTests(OdeFixture):
         with self.assertRaisesRegex(ValueError, "ode_mapping"):
             approvals.require_ode_mapping_approval(self.root, "stg-1", MAP, digest)
 
-    def test_calibration_approval_binds_artifact(self):
+    def test_mapping_approval_runs_validate_record(self):
+        # PR 16 review gate.py:575: every caller (build, gate) gets validate_record
+        self.complete()
+        digest = sha(self.root / MAP)
+        good = ["M1", "M2", "M3", "M4", "M5", "M6", "kf1", "kf2"]
+        record = {"id": "raw-1", "kind": "stage_approval", "stage": "ode_mapping", "session_id": SESSION,
+                  "outputs": good, "artifact": {"path": MAP, "sha256": digest}}
+        decisions = self.root / "DECISIONS.md"  # hand-edited: no approved_by / authorization
+        decisions.write_text(decisions.read_text(encoding="utf-8") + "\n<!-- governance-record -->\n```json\n"
+                             + json.dumps(record, indent=2) + "\n```\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "authorization"):
+            approvals.require_ode_mapping_approval(self.root, "raw-1", MAP, digest)
+
+    def test_calibration_approval_binds_a_calibration_proposal(self):
         (self.root / "job.json").write_text("{}")
         digest = sha(self.root / "job.json")
         self.add({"id": "cal-1", "kind": "stage_approval", "stage": "ode_calibration", "session_id": SESSION,
                   "outputs": ["job"], "artifact": {"path": "job.json", "sha256": digest}})
-        self.assertEqual(approvals.require_calibration_approval(self.root, "cal-1", "job.json", digest)["id"], "cal-1")
+        with self.assertRaisesRegex(ValueError, "calibration_proposal"):
+            approvals.require_calibration_approval(self.root, "cal-1", "job.json", digest)
         with self.assertRaisesRegex(ValueError, "sha256"):
             approvals.require_calibration_approval(self.root, "cal-1", "job.json", "0" * 64)
 
