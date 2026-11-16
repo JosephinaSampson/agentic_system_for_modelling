@@ -67,6 +67,8 @@ READ_ONLY = frozenset({
 def structural(tool: str) -> bool:
     """A boundary: any physicell-agent tool outside READ_ONLY (unknown tools included)."""
     return tool not in READ_ONLY
+
+
 ITEM = re.compile(r"^- \*\*(.+?)\*\*: ?(.*)$")
 HEADING = re.compile(r"^###\s+(.+?)\s*$")
 
