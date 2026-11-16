@@ -11,7 +11,12 @@ Schema (schema_version 1; every key below is required):
                                  recorded configuration (settings_xml.capture verifies its hashes) with no input
                                  files (no capture dependencies: server 2.5.2 cannot reload a rules CSV, MaBoSS or
                                  initial-cell files into a new session); null = a new configuration
-  session: str                   the PhysiCell session; with a basis it must be the capture's session
+  session: str                   the design's lineage anchor, never a live session: the basis capture's session with
+                                 a basis, else the purpose <p> (this file's folder name). Every configurator run is
+                                 a new session; the stage-A capture is bound to this design by its dispatch lineage
+                                 (lineage.dispatched_with: its invocation task.txt line 2 is this design's
+                                 DATA_INPUT line), not by session. The physicell_design approval's session_id and
+                                 the DATA_INPUT record_session_id equal this anchor.
   domain: null | {x_min,x_max,y_min,y_max,z_min,z_max,dx,dy,dz, units: "micron", max_time, time_units: "min"}
                                  required (all numbers) when basis is null; must be null with a basis
   cycle_models: [str] | null     the server's cycle models, copied VERBATIM from the configurator's
@@ -125,11 +130,10 @@ def declare_inputs(root: Path, sources, data) -> tuple[list, list]:
     return declared, proposals
 
 
-def draft(root: Path, purpose: str, *, basis_capture: str | None, sources: list = (), data: list = (),
-          session: str | None = None) -> Path:
+def draft(root: Path, purpose: str, *, basis_capture: str | None, sources: list = (), data: list = ()) -> Path:
     """Write a skeleton design. With a basis, cell definitions and substrates are pre-filled from the capture
-    (description TODO, from "basis"); without one the domain is a TODO skeleton and `session` (optional here,
-    required by `check`) names the new PhysiCell session. `sources` = [(id, path under inputs/)],
+    (description TODO, from "basis") and the session is the capture's; without one the domain is a TODO skeleton
+    and the session is the purpose. `sources` = [(id, path under inputs/)],
     `data` = [(id, data session, proposal id, approval id)]."""
     root = Path(root)
     state.identifier(purpose)
@@ -137,7 +141,7 @@ def draft(root: Path, purpose: str, *, basis_capture: str | None, sources: list 
     if target.exists() or target.is_symlink():
         raise ValueError(f"{target.relative_to(root).as_posix()} exists; drafts never overwrite a design")
     declared, proposals = declare_inputs(root, sources, data)
-    cells, subs = [], []
+    cells, subs, session = [], [], purpose
     if basis_capture is not None:
         facts = _basis_facts(root, basis_capture)
         session = facts["session"]
@@ -149,7 +153,7 @@ def draft(root: Path, purpose: str, *, basis_capture: str | None, sources: list 
         **{k: None for k in DOMAIN_KEYS[:9]}, "units": "micron", "max_time": None, "time_units": "min"}
     design = {"kind": "physicell_design", "schema_version": 1,
               "basis": {"capture": basis_capture} if basis_capture is not None else None,
-              "session": session or TODO, "domain": domain, "cycle_models": None,
+              "session": session, "domain": domain, "cycle_models": None,
               "cell_definitions": cells, "substrates": subs, "intracellular": [], "coupling_plan": [],
               "sources": declared, "data": proposals, "unmapped": []}
     try:
@@ -232,7 +236,7 @@ class _Checker(Citations):
                 or data.get("schema_version") != 1:
             self.error('kind must be "physicell_design" and schema_version 1')
 
-    def basis_section(self, basis, session) -> None:
+    def basis_section(self, basis, session, purpose: str) -> None:
         if basis is not None:
             if not isinstance(basis, dict) or set(basis) != {"capture"}:
                 self.error("basis must be null or exactly {capture}")
@@ -250,9 +254,13 @@ class _Checker(Citations):
                 except (ValueError, OSError) as exc:
                     self.error(f"basis: {exc}")
         if not isinstance(session, str) or not state.ID.fullmatch(session):
-            self.error(f"session must be the PhysiCell session identifier, not {session!r} (TODO is refused)")
+            self.error(f"session must be the design's anchor (the basis capture's session, else the purpose "
+                       f"{purpose}), not {session!r}")
         elif self.basis is not None and session != self.basis["session"]:
             self.error(f"session {session} is not the basis capture's session {self.basis['session']}")
+        elif basis is None and session != purpose:
+            self.error(f"session {session} must be the purpose {purpose} for a design without a basis (a lineage "
+                       "anchor; the stage-A session is bound by its DATA_INPUT dispatch, not declared here)")
 
     def domain_section(self, domain) -> None:
         if self.has_basis:
@@ -486,7 +494,7 @@ def load_and_check(root: Path, rel: str) -> tuple[dict, str, list[str]]:
     if set(data) != set(KEYS):
         checker.error(f"design keys must be exactly {', '.join(KEYS)}")
     else:
-        checker.basis_section(data["basis"], data["session"])
+        checker.basis_section(data["basis"], data["session"], PurePosixPath(rel).parts[2])
         checker.domain_section(data["domain"])
         checker.cycle_models_section(data["cycle_models"])
         checker.sources.declare(data["sources"], "sources")
@@ -533,7 +541,6 @@ def main(argv: list[str] | None = None) -> int:
     d = sub.add_parser("draft")
     d.add_argument("--purpose", required=True)
     d.add_argument("--basis", metavar="CAPTURE", help="runs/multicellular-configurator/<session>/configs/<capture>")
-    d.add_argument("--session", help="PhysiCell session of a new configuration (no --basis)")
     d.add_argument("--source", action="append", default=[], metavar="ID:PATH")
     d.add_argument("--data", action="append", default=[], metavar="ID:SESSION:PROPOSAL:APPROVAL")
     c = sub.add_parser("check")
@@ -543,8 +550,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "draft":
             sources, data = parse_input_args(args.source, args.data)
-            path = draft(root, args.purpose, basis_capture=args.basis, sources=sources, data=data,
-                         session=args.session)
+            path = draft(root, args.purpose, basis_capture=args.basis, sources=sources, data=data)
             print(f"physicell design drafted: {path.relative_to(root).as_posix()} sha256={sha256_file(path)}")
             return 0
         errors = check(root, args.design)

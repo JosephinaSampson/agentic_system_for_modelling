@@ -42,7 +42,7 @@ from scripts.capture.record_physicell_config import record_physicell  # noqa: E4
 from scripts.physicell import build as physicell_build  # noqa: E402
 from scripts.physicell import physicell_projection as pp  # noqa: E402
 from scripts.physicell import settings_xml as sx  # noqa: E402
-from tests.data.test_physicell_design import CAPTURE, MABOSS, REL, SESSION, write_config  # noqa: E402
+from tests.data.test_physicell_design import CAPTURE, MABOSS, REL, SESSION, STAGE_A, write_config  # noqa: E402
 from tests.data.test_physicell_dictionary import INVOCATION, good_calls  # noqa: E402
 from tests.data.test_physicell_projection import PROJ, built_capture, q  # noqa: E402
 from tests.data.test_physicell_verify import VerifyBase, placeholder_rules  # noqa: E402
@@ -55,6 +55,7 @@ REAL = "p2"  # purpose of the real-server step
 REAL_DESIGN = f"runs/orchestrator/{REAL}/physicell_design.json"
 REAL_PROJ = f"runs/orchestrator/{REAL}/physicell_projection.json"
 PREFIX = "mcp__physicell-agent__"
+FIXTURE_GATE = 'STAGE_GATE {"upstream_session_id": "%s", "outputs": ["A", "B"]}' % MABOSS
 STARTED = time.monotonic()
 
 # Run inside `uv run --no-project --with mcp-biomodelling-servers==2.5.2 python -I`: the MaBoSS and PhysiCell
@@ -140,7 +141,6 @@ def configure(stage):
     from mcp_biomodelling_servers.PhysiCell import server as s
     from scripts.physicell import physicell_projection as pp
     physicell(s, "create_session", set_as_default=True)
-    cycle = physicell(s, "get_available_cycle_models")
     physicell(s, "create_simulation_domain", domain_x=200.0, domain_y=200.0, use_2d=True, dx=20.0, max_time=100.0)
     physicell(s, "add_single_substrate", substrate_name="oxygen", diffusion_coefficient=100000.0, decay_rate=0.1,
               initial_condition=38.0, units="mmHg")
@@ -177,12 +177,19 @@ def configure(stage):
     (invocation / "tool_calls.json").write_text(json.dumps(CALLS, indent=2))
     return {"session": session, "artifacts": str(folder),
             "capture": f"runs/multicellular-configurator/{session}/configs/{args['capture']}",
-            "invocation": (invocation / "tool_calls.json").relative_to(PROJECT).as_posix(),
-            "cycle_models": [m["key"] for m in cycle.structured_content["models"]]}
+            "invocation": (invocation / "tool_calls.json").relative_to(PROJECT).as_posix()}
+
+
+def discover():
+    """The configurator's discovery run before a new-configuration design: the server's cycle models."""
+    from mcp_biomodelling_servers.PhysiCell import server as s
+    invoke(s.create_session, set_as_default=True)
+    cycle = invoke(s.get_available_cycle_models)
+    return {"cycle_models": [m["key"] for m in cycle.structured_content["models"]]}
 
 
 mode = sys.argv[1]
-print("RESULT " + json.dumps(maboss() if mode == "maboss" else configure(mode)))
+print("RESULT " + json.dumps(maboss() if mode == "maboss" else discover() if mode == "discover" else configure(mode)))
 '''
 
 
@@ -268,6 +275,12 @@ class Smoke:
         proc.prompt = prompt
         return proc
 
+    def task_record(self, session: str, agent: str, prompt: str) -> None:
+        """The invocation recorder's task.txt of a configurator run: the dispatched brief, verbatim."""
+        task = self.root / f"runs/multicellular-configurator/{session}/invocation/{agent}/task.txt"
+        task.parent.mkdir(parents=True, exist_ok=True)
+        task.write_text(prompt + "\n", encoding="utf-8")
+
     def verify(self, projection: str, capture: str) -> tuple[int, dict, str]:
         proc = self.py("scripts/physicell/verify_export.py", projection, capture, check=False)
         assert proc.returncode in (0, 1), (proc.returncode, proc.stdout, proc.stderr)
@@ -349,10 +362,17 @@ class Smoke:
             data["cycle_models"] = ["Live"]
 
         self.check_refused_then_passes("scripts/physicell/physicell_design.py", REL, fill_design)
+        # the design is anchored on its basis capture's session; it is approved before stage A runs
         self.approve("design-1", "physicell_design", SESSION, ["default", "tumor", "tumor_hypoxic", "oxygen", "drug"],
                      REL)
-        # the configuration the configurator built from the design (stage A: the server's placeholder cell_rules)
-        h.capture = built_capture(self.root, SESSION, "cap-2", edit=placeholder_rules)
+        dispatched = self.hook(FIXTURE_GATE, {"design": REL, "sha256": sha256(self.root / REL),
+                                              "approval": "design-1", "record_session_id": SESSION},
+                               "Build the approved PhysiCell design.")
+        assert dispatched.returncode == 0, dispatched.stderr
+        # stage A: a new session (STAGE_A) built the design (the server's placeholder cell_rules); its recorded
+        # brief carries the design's DATA_INPUT line (the lineage binding the capture to the design)
+        self.task_record(STAGE_A, "agent-1", dispatched.prompt)
+        h.capture = built_capture(self.root, STAGE_A, "cap-2", edit=placeholder_rules)
         invocation = self.root / INVOCATION
         invocation.parent.mkdir(parents=True, exist_ok=True)
         invocation.write_text(json.dumps(good_calls(extra_behaviors=("necrosis", "apoptosis"))))
@@ -363,19 +383,20 @@ class Smoke:
         self.draft_projection("p1", h.capture, REL, "design-1")
         self.check_refused_then_passes("scripts/physicell/physicell_projection.py", PROJ,
                                        lambda data: data.update(entries=h.entries()))
-        self.approve("proj-1", "physicell_projection", SESSION, ["in1", "out1", "rule1", "set1"], PROJ)
-        step("fixtures: design drafted (refused), filled, check passed, design-1 approved; dictionary captured from "
-             "the fixture invocation record; projection drafted (refused), filled (in1 out1 rule1 set1), check "
-             "passed, proj-1 approved")
+        self.approve("proj-1", "physicell_projection", STAGE_A, ["in1", "out1", "rule1", "set1"], PROJ)
+        step(f"fixtures: design drafted (refused), filled, check passed, design-1 approved (anchor {SESSION}) and "
+             f"dispatched; stage A in session {STAGE_A}; dictionary captured from its invocation record (bound by the "
+             "design's DATA_INPUT line); projection drafted (refused), filled (in1 out1 rule1 set1), check passed, "
+             f"proj-1 approved (session {STAGE_A})")
 
     # -- 3. the real dispatch hook
 
     def hooks(self) -> None:
-        gate = 'STAGE_GATE {"upstream_session_id": "%s", "outputs": ["A", "B"]}' % MABOSS
+        gate = FIXTURE_GATE
         design = {"design": REL, "sha256": sha256(self.root / REL), "approval": "design-1",
                   "record_session_id": SESSION}
         projection = {"projection": PROJ, "sha256": sha256(self.root / PROJ), "approval": "proj-1",
-                      "record_session_id": SESSION}
+                      "record_session_id": STAGE_A}
         for payload, task in ((design, "Build the approved PhysiCell design."),
                               (projection, "Apply the approved projection.")):
             accepted = self.hook(gate, payload, task)
@@ -468,22 +489,16 @@ class Smoke:
         manifest = str(self.root / mab["handoff"])
         step(f"real MaBoSS handoff exported, captured ({mab['handoff']}), reviewed and approved")
 
-        # stage A: a new PhysiCell session builds the structure, imports the handoff, lists signals and behaviors
-        a = self.server("A", manifest=manifest, capture="capA", agent="agent-a")
-        bound = sx.capture(self.root, a["capture"])
-        assert bound["rules_path"] is None, bound
-        # SIMPLIFICATION (see the task report): the design is written after the stage-A run, declaring the
-        # stage-A session. The design, dictionary and projection checks require design.session == the stage-A
-        # capture's session, which a design approved before a new-session stage-A run cannot know.
-        self.py("scripts/physicell/physicell_design.py", "draft", "--purpose", REAL, "--session", a["session"],
-                "--source", "s1:inputs/paper.txt")
+        # the design of a new configuration, anchored on its purpose, approved before stage A runs
+        found = self.server("discover")
+        self.py("scripts/physicell/physicell_design.py", "draft", "--purpose", REAL, "--source", "s1:inputs/paper.txt")
         cite = {"source": "s1", "locator": "Methods"}
 
         def fill_design(data):
             data["domain"] = {"x_min": -100.0, "x_max": 100.0, "y_min": -100.0, "y_max": 100.0, "z_min": -10.0,
                               "z_max": 10.0, "dx": 20.0, "dy": 20.0, "dz": 20.0, "units": "micron",
                               "max_time": 100.0, "time_units": "min"}
-            data["cycle_models"] = a["cycle_models"]
+            data["cycle_models"] = found["cycle_models"]
             data["cell_definitions"] = [{"name": "tumor", "cycle_model": "Ki67_basic", "description": "tumor cells",
                                          "from": cite}]
             data["substrates"] = [{"name": "oxygen", "units": "mmHg", "description": "oxygen", "from": cite}]
@@ -496,15 +511,30 @@ class Smoke:
                  "notes": "pressure increases apoptosis"}]
 
         self.check_refused_then_passes("scripts/physicell/physicell_design.py", REAL_DESIGN, fill_design)
-        self.approve("design-2", "physicell_design", a["session"], ["tumor", "oxygen"], REAL_DESIGN)
+        assert json.loads((self.root / REAL_DESIGN).read_text())["session"] == REAL
+        self.approve("design-2", "physicell_design", REAL, ["tumor", "oxygen"], REAL_DESIGN)
+        gate = 'STAGE_GATE {"upstream_session_id": "%s", "outputs": ["B"]}' % mab["session"]
+        design_form = self.hook(gate, {"design": REAL_DESIGN, "sha256": sha256(self.root / REAL_DESIGN),
+                                       "approval": "design-2", "record_session_id": REAL},
+                                "Build the approved PhysiCell design.")
+        assert design_form.returncode == 0, design_form.stderr
+
+        # stage A: a new PhysiCell session builds the design, imports the handoff, lists signals and behaviors;
+        # the recorder keeps the dispatched brief (line 2: the design's DATA_INPUT line) as its task.txt
+        a = self.server("A", manifest=manifest, capture="capA", agent="agent-a")
+        assert a["session"] != REAL
+        self.task_record(a["session"], "agent-a", design_form.prompt)
+        bound = sx.capture(self.root, a["capture"])
+        assert bound["rules_path"] is None, bound
         out = self.py("scripts/physicell/capture_dictionary.py", a["invocation"], a["capture"],
                       REAL_DESIGN).stdout.strip()
         dictionary = json.loads((self.root / out).read_text())
         signals = [s["name"] for s in dictionary["signals"]]
         behaviors = [b["name"] for b in dictionary["behaviors"]["tumor"]]
         assert {"oxygen", "pressure"} <= set(signals) and "apoptosis" in behaviors, (signals, behaviors)
-        step(f"real stage A: session {a['session']} captured ({a['capture']}); design {REAL} checked and approved; "
-             f"dictionary from the real invocation record ({len(signals)} signals, {len(behaviors)} tumor behaviors)")
+        step(f"real design {REAL} (anchor {REAL}) checked, approved and dispatched (hook exit 0); stage A in session "
+             f"{a['session']} captured ({a['capture']}); dictionary from its real invocation record, bound by the "
+             f"design's DATA_INPUT line ({len(signals)} signals, {len(behaviors)} tumor behaviors)")
 
         self.draft_projection(REAL, a["capture"], REAL_DESIGN, "design-2")
         common = {"from": cite, "justification": "reported in the source"}
@@ -518,23 +548,17 @@ class Smoke:
         self.check_refused_then_passes("scripts/physicell/physicell_projection.py", REAL_PROJ,
                                        lambda data: data.update(entries=entries))
         self.approve("proj-2", "physicell_projection", a["session"], ["rule1", "in1"], REAL_PROJ)
-        gate = 'STAGE_GATE {"upstream_session_id": "%s", "outputs": ["B"]}' % mab["session"]
-        design_form = self.hook(gate, {"design": REAL_DESIGN, "sha256": sha256(self.root / REAL_DESIGN),
-                                       "approval": "design-2", "record_session_id": a["session"]},
-                                "Build the approved PhysiCell design.")
-        assert design_form.returncode == 0, design_form.stderr
         dispatched = self.hook(gate, {"projection": REAL_PROJ, "sha256": sha256(self.root / REAL_PROJ),
                                       "approval": "proj-2", "record_session_id": a["session"]},
                                "Replay the approved design, then apply the approved projection.")
         assert dispatched.returncode == 0, dispatched.stderr
         step("real projection (rule1: pressure increases apoptosis, 0.6 1/h -> 0.01 1/min; in1: oxygen -> A) "
-             "checked and approved; the hook accepts both DATA_INPUT forms for it")
+             "checked and approved; the hook accepts its DATA_INPUT line")
 
         # stage B: a new session replays the design, applies the entries, exports rules CSV then XML
         b = self.server("B", manifest=manifest, capture="capB", agent="agent-b", projection=REAL_PROJ)
         assert b["session"] != a["session"]
-        task = self.root / f"runs/multicellular-configurator/{b['session']}/invocation/agent-b/task.txt"
-        task.write_text(dispatched.prompt + "\n", encoding="utf-8")  # what the invocation recorder keeps
+        self.task_record(b["session"], "agent-b", dispatched.prompt)
         code, report, rel = self.verify(REAL_PROJ, b["capture"])
         assert code == 0 and report["passed"], json.dumps(report["entries"] + report["unexpected_changes"])
         step(f"real stage B: session {b['session']} replayed the design and applied rule1 and in1; "

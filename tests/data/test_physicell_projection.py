@@ -17,7 +17,8 @@ from scripts.capture.record_physicell_config import record_physicell
 from scripts.data import approvals
 from scripts.physicell import capture_dictionary as cd
 from scripts.physicell import physicell_projection as pp
-from tests.data.test_physicell_design import FIXTURES, MABOSS, REL, RULES_REFUSAL, SESSION, Base
+from tests.data.test_physicell_design import (FIXTURES, MABOSS, REL, RULES_REFUSAL, SESSION, STAGE_A, Base,
+                                              dispatch_design)
 from tests.data.test_physicell_dictionary import INVOCATION, good_calls
 
 PROJ = "runs/orchestrator/p1/physicell_projection.json"
@@ -73,9 +74,11 @@ class ProjectionBase(Base):
         super().setUp()
         self.design = self.complete()  # its basis is the fixture capture cap-1
         self.basis = self.capture
-        self.capture = built_capture(self.root, SESSION, "cap-2", edit=self.edit_capture)
+        # stage A: a new session (STAGE_A) dispatched with the design (anchored on the basis session SESSION)
+        self.capture = built_capture(self.root, STAGE_A, "cap-2", edit=self.edit_capture)
         self.write(self.design)
         self.design_sha = sha(self.root / REL)
+        dispatch_design(self.root)
         state.update(self.root, "record", {
             "id": "design-1", "kind": "stage_approval", "session_id": SESSION, "stage": "physicell_design",
             "outputs": ["default", "tumor", "tumor_hypoxic", "oxygen", "drug"], "approved_by": "researcher",
@@ -408,7 +411,7 @@ class BindingTests(ProjectionBase):
 
     def test_capture_with_enabled_rules_csv_refused(self):
         # Ruling T5-d(b): load_xml_configuration keeps no rules CSV rows, and no tool reloads one
-        rules = built_capture(self.root, SESSION, "cap-rules", rules=True)
+        rules = built_capture(self.root, STAGE_A, "cap-rules", rules=True)
         data = self.projection()
         data["capture"] = {"path": rules, "sha256": sha(self.root / rules / "capture.json")}
         self.assertRefused(data, RULES_REFUSAL, "apply projections to the stage-A capture (no rules), and revise "
@@ -515,12 +518,29 @@ class ReviewMinorTests(ProjectionBase):
         self.assertRefused(self.rewrite_dictionary(schema_version=1.0), "schema_version")
         self.assertRefused(self.rewrite_dictionary(schema_version=True), "schema_version")
 
-    def test_design_approval_session_differs_from_capture(self):
-        other = built_capture(self.root, "mc-session-2", "cap-9")
+    def other_capture(self, session="mc-session-9"):
+        """The projection rebound to a capture of another session (its dictionary rewritten to match)."""
+        other = built_capture(self.root, session, "cap-9")
         manifest = self.root / other / "capture.json"
-        data = self.rewrite_dictionary(session="mc-session-2", capture={"path": other, "sha256": sha(manifest)})
+        data = self.rewrite_dictionary(session=session, capture={"path": other, "sha256": sha(manifest)})
         data["capture"] = {"path": other, "sha256": sha(manifest)}
-        self.assertRefused(data, "design approval design-1 is for session 'mc-session-1'")
+        return data
+
+    def test_design_anchor_differs_from_capture_session(self):
+        # the design is anchored on the basis session; the stage-A capture is in a new session
+        self.assertNotEqual(SESSION, STAGE_A)
+        self.assertEqual(self.errors(self.projection()), [])
+
+    def test_capture_without_design_lineage_refused(self):
+        self.assertRefused(self.other_capture(), "capture's session mc-session-9 was not dispatched with it",
+                           "lineage: no invocation record")
+
+    def test_capture_dispatched_with_another_design_sha_refused(self):
+        data = self.other_capture()
+        dispatch_design(self.root, session="mc-session-9", digest="0" * 64)
+        self.assertRefused(data, "another sha256")
+        dispatch_design(self.root, session="mc-session-9")
+        self.assertEqual(self.errors(data), [])
 
     def test_justification_without_target_unit_refused(self):
         data, entry = self.entry("set1")
@@ -540,7 +560,7 @@ class ApprovalTests(ProjectionBase):
     def approve(self, **overrides):
         path = self.write_projection(self.projection())
         ref = {"path": PROJ, "sha256": sha(path)}
-        record = {"id": "proj-1", "kind": "stage_approval", "session_id": SESSION, "stage": "physicell_projection",
+        record = {"id": "proj-1", "kind": "stage_approval", "session_id": STAGE_A, "stage": "physicell_projection",
                   "outputs": ["in1", "out1", "rule1", "set1"], "approved_by": "researcher",
                   "authorization": "approved", "artifact": ref}
         record.update(overrides)

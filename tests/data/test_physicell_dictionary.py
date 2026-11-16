@@ -6,11 +6,12 @@ import unittest
 from pathlib import Path
 
 from scripts.physicell import capture_dictionary as cd
-from tests.data.test_physicell_design import CAPTURE, REL, SESSION, Base
+from scripts.capture.record_physicell_config import record_physicell
+from tests.data.test_physicell_design import REL, STAGE_A, Base, dispatch_design, write_config
 
 P = "mcp__physicell-agent__"
 FIXTURE = Path(__file__).parent / "fixtures" / "physicell" / "tool_calls.json"
-INVOCATION = f"runs/multicellular-configurator/{SESSION}/invocation/agent-1/tool_calls.json"
+INVOCATION = f"runs/multicellular-configurator/{STAGE_A}/invocation/agent-1/tool_calls.json"
 SIGNALS = [{"name": "oxygen", "signal_type": "substrate", "description": "o2", "requires": []},
            {"name": "pressure", "signal_type": "mechanics", "description": "p", "requires": []}]
 
@@ -26,7 +27,7 @@ def uniform(items, key):
     return [{"name": i["name"], "type": i[key]} for i in items]
 
 
-def structured(key, items, session=SESSION):
+def structured(key, items, session=STAGE_A):
     md = "".join(f"- **{i['name']}**: {i['description']}\n" for i in items)
     return [{"type": "text", "text": "### X\n" + md},
             {"type": "text", "text": json.dumps({"server": "PhysiCell", "session_id": session, key: items})}]
@@ -57,8 +58,8 @@ def good_calls(extra_before=(), cells=("default", "tumor", "tumor_hypoxic"), ext
     extra = [{"name": n, "behavior_type": "death", "aliases": [], "description": n, "requires": []}
              for n in extra_behaviors]
     return blocks(*extra_before,
-                  call(10, "list_all_available_signals", {"session_id": SESSION}, structured("signals", SIGNALS)),
-                  *[call(11 + i, "list_all_available_behaviors", {"session_id": SESSION, "cell_type": c},
+                  call(10, "list_all_available_signals", {"session_id": STAGE_A}, structured("signals", SIGNALS)),
+                  *[call(11 + i, "list_all_available_behaviors", {"session_id": STAGE_A, "cell_type": c},
                          structured("behaviors", behaviors(c) + extra))
                     for i, c in enumerate(cells)])
 
@@ -66,8 +67,13 @@ def good_calls(extra_before=(), cells=("default", "tumor", "tumor_hypoxic"), ext
 class DictionaryTests(Base):
     def setUp(self):
         super().setUp()
-        self.design = self.complete()
+        self.design = self.complete()  # anchored on the basis capture's session
         self.write(self.design)
+        # stage A: a new configurator session, dispatched with the design, built and captured the configuration
+        source = self.root.parent / "source-stage-a"
+        record_physicell(self.root, source, write_config(source / "config"), STAGE_A, "cap-a")
+        self.capture = f"runs/multicellular-configurator/{STAGE_A}/configs/cap-a"
+        dispatch_design(self.root)
 
     def invoke(self, content, rel=INVOCATION):
         path = self.root / rel
@@ -99,7 +105,7 @@ class DictionaryTests(Base):
         manifest = (self.root / self.capture / "capture.json").read_bytes()
         self.assertEqual(out["kind"], "physicell_dictionary")
         self.assertEqual(out["schema_version"], 1)
-        self.assertEqual(out["session"], SESSION)
+        self.assertEqual(out["session"], STAGE_A)
         self.assertEqual(out["invocation"], INVOCATION)
         self.assertEqual(out["capture"], {"path": self.capture, "sha256": hashlib.sha256(manifest).hexdigest()})
         self.assertEqual(out["design"], {"path": REL, "sha256": hashlib.sha256((self.root / REL).read_bytes()).hexdigest()})
@@ -131,7 +137,7 @@ class DictionaryTests(Base):
         self.refused(content, "signals")
 
     def test_list_before_last_add_cell_type_refused(self):
-        add = call(5, "add_single_cell_type", {"session_id": SESSION}, "ok")
+        add = call(5, "add_single_cell_type", {"session_id": STAGE_A}, "ok")
         content = blocks(*[call(1, "list_all_available_signals", {}, structured("signals", SIGNALS))],
                          add, *[call(11 + i, "list_all_available_behaviors", {"cell_type": c},
                                      structured("behaviors", behaviors(c)))
@@ -139,7 +145,7 @@ class DictionaryTests(Base):
         self.refused(content, "after the last structure-changing")
 
     def test_list_before_add_physiboss_model_refused(self):
-        content = self.good() + blocks(call(30, "add_physiboss_model", {"session_id": SESSION}, "ok"))
+        content = self.good() + blocks(call(30, "add_physiboss_model", {"session_id": STAGE_A}, "ok"))
         self.refused(content, "after the last structure-changing")
 
     def test_failed_structure_change_does_not_count(self):
@@ -186,7 +192,7 @@ class DictionaryTests(Base):
 
     def test_malformed_structured_payload_refused(self):
         content = self.good()
-        content[1]["content"] = json.dumps({"server": "PhysiCell", "session_id": SESSION,
+        content[1]["content"] = json.dumps({"server": "PhysiCell", "session_id": STAGE_A,
                                             "signals": [{"description": "no name"}]})
         content[1]["content"] = [{"type": "text", "text": "- **oxygen**: o2\n"}, {"type": "text", "text": content[1]["content"]}]
         self.refused(content, "malformed")
@@ -211,16 +217,30 @@ class DictionaryTests(Base):
         self.design["cell_definitions"][1]["cycle_model"] = "Live"
         self.design["cell_definitions"] = [c for c in self.design["cell_definitions"] if c["name"] != "tumor_hypoxic"]
         self.write(self.design)
+        dispatch_design(self.root)  # stage A was dispatched with this design
         content = blocks(call(1, "list_all_available_signals", {}, structured("signals", SIGNALS)),
                          *[call(2 + i, "list_all_available_behaviors", {"cell_type": c}, structured("behaviors", behaviors(c)))
                            for i, c in enumerate(("default", "Tumor_Cell"))])
         out = json.loads(self.run_capture(content).read_text())
         self.assertEqual(list(out["behaviors"]), ["default", "Tumor_Cell"])
 
-    def test_design_session_mismatch_refused(self):
-        self.design["session"] = "other-session"
-        self.write(self.design)
-        self.refused(self.good(), "session")
+    def test_design_anchor_is_not_the_capture_session(self):
+        # the design's session is its basis anchor; stage A is bound by dispatch lineage, not by session
+        self.assertNotEqual(self.design["session"], STAGE_A)
+        self.assertTrue(self.run_capture(self.good()).is_file())
+
+    def test_dispatch_naming_another_design_sha_refused(self):
+        dispatch_design(self.root, digest="0" * 64)
+        self.refused(self.good(), "lineage.*another sha256")
+
+    def test_missing_dispatch_refused(self):
+        (self.root / f"runs/multicellular-configurator/{STAGE_A}/invocation/agent-1/task.txt").unlink()
+        self.refused(self.good(), "lineage: no invocation record")
+
+    def test_changed_design_refused(self):
+        self.design["unmapped"] = [{"item": "fibroblast", "reason": "out of scope"}]
+        self.write(self.design)  # still a valid design, but not the one stage A was dispatched with
+        self.refused(self.good(), "lineage")
 
     def test_folder_form_accepted(self):
         content = self.good()

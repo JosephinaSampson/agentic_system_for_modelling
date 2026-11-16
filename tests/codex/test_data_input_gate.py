@@ -13,6 +13,7 @@ from scripts import gate, state
 from scripts.data import mapping
 from tests.data.test_jobs_holdout import HoldoutFixture
 from tests.data.test_physicell_design import MABOSS as MC_MABOSS, REL as DESIGN_REL, SESSION as MC_SESSION
+from tests.data.test_physicell_design import STAGE_A as MC_STAGE_A
 from tests.data.test_physicell_projection import DICT as MC_DICT, PROJ as MC_PROJ, ProjectionBase
 from tests.data.test_ode_mapping import SESSION as ODE_SESSION
 from tests.data.test_mapping import (BNET, BNET_TEXT, NEKO, SOURCE, STANDALONE_BNET, STANDALONE_OUTPUTS,
@@ -1205,13 +1206,14 @@ DESIGN_B = "runs/orchestrator/p2/physicell_design.json"
 
 class PhysiCellDataInputTests(ProjectionBase):
     """The multicellular-configurator DATA_INPUT (line 2, after STAGE_GATE): an approved stage-A design or an
-    approved stage-B projection, each re-checked at dispatch and bound to its PhysiCell session."""
+    approved stage-B projection, each re-checked at dispatch. The design is anchored on its basis session
+    (MC_SESSION); the projection is bound to its stage-A capture's session (MC_STAGE_A)."""
 
     def setUp(self):
         super().setUp()
         path = self.write_projection(self.projection())
         state.update(self.root, "record", {
-            "id": "proj-1", "kind": "stage_approval", "session_id": MC_SESSION, "stage": "physicell_projection",
+            "id": "proj-1", "kind": "stage_approval", "session_id": MC_STAGE_A, "stage": "physicell_projection",
             "outputs": ["in1", "out1", "rule1", "set1"], "approved_by": "researcher", "authorization": "approved",
             "artifact": {"path": MC_PROJ, "sha256": sha(path)}})
 
@@ -1222,7 +1224,7 @@ class PhysiCellDataInputTests(ProjectionBase):
                    "record_session_id": session, **extra}
         return "DATA_INPUT " + json.dumps(payload)
 
-    def projection_line(self, rel=MC_PROJ, digest=None, approval="proj-1", session=MC_SESSION, **extra):
+    def projection_line(self, rel=MC_PROJ, digest=None, approval="proj-1", session=MC_STAGE_A, **extra):
         payload = {"projection": rel, "sha256": digest or sha(self.root / rel), "approval": approval,
                    "record_session_id": session, **extra}
         return "DATA_INPUT " + json.dumps(payload)
@@ -1270,7 +1272,7 @@ class PhysiCellDataInputTests(ProjectionBase):
                          (DESIGN_REL, "design-1", MC_SESSION))
         found = gate.check_data_input(self.root, "multicellular_configurator", self.task(self.projection_line()))
         self.assertEqual((found["projection"], found["approval_id"], found["physicell_session"]),
-                         (MC_PROJ, "proj-1", MC_SESSION))
+                         (MC_PROJ, "proj-1", MC_STAGE_A))
 
     def test_stage_gate_only_briefs_unchanged(self):
         self.accepted(f"{MC_GATE}\nImport the approved MaBoSS handoff onto tumor and export.")
@@ -1360,7 +1362,7 @@ class PhysiCellDataInputTests(ProjectionBase):
         path.write_text(json.dumps(data, indent=2))
         rel = path.relative_to(self.root).as_posix()
         state.update(self.root, "record", {
-            "id": "proj-2", "kind": "stage_approval", "session_id": MC_SESSION, "stage": "physicell_projection",
+            "id": "proj-2", "kind": "stage_approval", "session_id": MC_STAGE_A, "stage": "physicell_projection",
             "outputs": ["in1", "out1", "rule1", "set1"], "approved_by": "researcher", "authorization": "approved",
             "artifact": {"path": rel, "sha256": sha(path)}})
         self.refused(self.task(self.projection_line(rel=rel, approval="proj-2")), "design approval nope")

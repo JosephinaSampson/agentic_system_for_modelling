@@ -298,7 +298,8 @@ def require_proposal_job(root: Path, rel: str, proposal: dict) -> dict:
 
 
 def _physicell_design_facts(root: Path, rel: str, sha256: str) -> tuple[str | None, list]:
-    """(PhysiCell session, cell definition and substrate names) of a physicell_design.json, tolerant of shape.
+    """(session anchor, cell definition and substrate names) of a physicell_design.json, tolerant of shape: the
+    basis capture's session, else the purpose <p> of runs/orchestrator/<p>/... (a lineage anchor).
 
     The bytes are read once; their digest must equal `sha256` and the facts come from those same bytes.
     """
@@ -315,7 +316,9 @@ def _physicell_design_facts(root: Path, rel: str, sha256: str) -> tuple[str | No
     basis = data.get("basis")
     capture = basis.get("capture") if isinstance(basis, dict) else None
     parts = capture.split("/") if isinstance(capture, str) else []
-    session = parts[2] if len(parts) == 5 else (data.get("session") if basis is None else None)
+    anchor = rel.split("/") if isinstance(rel, str) else []
+    purpose = anchor[2] if len(anchor) == 4 and anchor[:2] == ["runs", "orchestrator"] else None
+    session = parts[2] if len(parts) == 5 else (purpose if basis is None else None)
     names = []
     for key in ("cell_definitions", "substrates"):
         for item in data.get(key) if isinstance(data.get(key), list) else ():
@@ -328,7 +331,7 @@ def require_physicell_design_approval(root: Path, record_id: str, rel: str, sha2
     """The physicell_design stage_approval of exactly this physicell_design.json path and sha256.
 
     The record must pass `state.validate_record`; session_id is the PhysiCell session of the design's basis
-    capture (or the session the design declares for a new configuration) and outputs are exactly the cell
+    capture (for a new configuration, the design's purpose <p>: a lineage anchor) and outputs are exactly the cell
     definition and substrate names. This binds the approval to the bytes; run
     `scripts/physicell/physicell_design.py check` and have it pass before the researcher approves.
     """
@@ -337,7 +340,7 @@ def require_physicell_design_approval(root: Path, record_id: str, rel: str, sha2
     session, names = _physicell_design_facts(root, rel, sha256)
     if record.get("session_id") != session:
         raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
-                         f"but the design binds PhysiCell session {session!r}")
+                         f"but the design's session anchor is {session!r}")
     outputs = record.get("outputs")
     if not isinstance(outputs, list) or len(outputs) != len(set(outputs)) or set(outputs) != set(names) \
             or len(names) != len(set(names)):

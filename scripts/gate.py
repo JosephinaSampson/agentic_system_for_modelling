@@ -591,8 +591,9 @@ def _check_physicell_input(root, value, first_line):
 
     {"design", "sha256", "approval", "record_session_id"}: the physicell_design.json is re-checked
     (physicell_design.load_and_check, no problem allowed) on exactly the approved bytes, its physicell_design
-    approval binds path and sha256, record_session_id is the approval's session_id, and its MaBoSS handoffs are
-    the STAGE_GATE upstream's (_check_design_upstream).
+    approval binds path and sha256, record_session_id is the approval's session_id (the design's anchor: the basis
+    capture's session, else its purpose <p>), and its MaBoSS handoffs are the STAGE_GATE upstream's
+    (_check_design_upstream). The stage-A run is bound to the design later by this very line (lineage.py).
     {"projection", "sha256", "approval", "record_session_id"}: the physicell_projection.json is re-checked
     (physicell_projection.load_and_check: capture, dictionary, the design and its approval), its
     physicell_projection approval binds path and sha256, and record_session_id is the approval's session_id and
@@ -612,7 +613,7 @@ def _check_physicell_input(root, value, first_line):
         raise ValueError(f"DATA_INPUT {form}, sha256 and approval must be nonempty strings")
     if not isinstance(session, str) or not session:
         raise ValueError("DATA_INPUT record_session_id must be a nonempty string (the approved file's PhysiCell "
-                         "session, a lineage anchor; the configurator always starts a new session)")
+                         "session anchor; the configurator always starts a new session)")
     if not SHA256.fullmatch(digest):
         raise ValueError(f"DATA_INPUT {form} needs a lowercase hex sha256")
     if form == "design":
@@ -630,7 +631,7 @@ def _check_physicell_input(root, value, first_line):
         raise ValueError(f"{form} check failed for {rel}: " + "; ".join(errors))
     record = require(root, approval_id, rel, digest)  # runs validate_record
     if session != record.get("session_id"):
-        raise ValueError(f"DATA_INPUT record_session_id {session!r} must be the PhysiCell session "
+        raise ValueError(f"DATA_INPUT record_session_id {session!r} must be the session_id "
                          f"{record.get('session_id')} of approval {approval_id}")
     if form == "design":
         _check_design_upstream(root, data, first_line)

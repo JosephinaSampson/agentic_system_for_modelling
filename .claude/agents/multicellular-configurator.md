@@ -68,7 +68,8 @@ Only when line 2 of the brief, after `STAGE_GATE`, is
 `DATA_INPUT {"projection": ..., "sha256": ..., "approval": ..., "record_session_id": ...}` (an approved stage-B
 `physicell_projection.json`). The dispatch hook has verified that line: the approval, the file re-checked on
 exactly those bytes (for a projection, also its design and the design's approval), and `record_session_id` = the
-approval's PhysiCell session.
+approval's `session_id` (for a design, its anchor: the basis capture's session, else its purpose folder name; for a
+projection, its capture's session).
 
 - MCP sessions end with each run: `record_session_id` is a lineage anchor, never a live session.
   Create a new PhysiCell session for either form. Never pass `record_session_id` to any tool.

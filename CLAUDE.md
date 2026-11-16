@@ -254,10 +254,12 @@ docs/ode-workflow.md.
 
 Data reach PhysiCell in two researcher-approved stages, never through brief prose. Stage A:
 `scripts/physicell/physicell_design.py draft|check` (cell definitions, substrates, the MaBoSS handoff of each cell
-type, coupling plan; `physicell_design` approval) -> multicellular-configurator with line 2
-`DATA_INPUT {"design": "...physicell_design.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<PhysiCell session>"}`
+type, coupling plan; `physicell_design` approval whose `session_id` is the design's anchor: the basis capture's
+session, else `<p>`) -> multicellular-configurator with line 2
+`DATA_INPUT {"design": "...physicell_design.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<anchor>"}`
 (its handoffs come from the `STAGE_GATE` MaBoSS session; a standalone gate means none) -> `recover.py`, capture ->
-`scripts/physicell/capture_dictionary.py` (signal/behavior lists from the invocation record). Stage B:
+`scripts/physicell/capture_dictionary.py` (signal/behavior lists from the invocation record). Every run is a new
+session: the stage-A capture is bound to the design by that DATA_INPUT line in its recorded task.txt. Stage B:
 `physicell_projection.py draft|check` (`physicell_projection` approval: `session_id` = the capture's session,
 `outputs` = the entry ids) -> configurator with line 2
 `DATA_INPUT {"projection": "...physicell_projection.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<capture session>"}`

@@ -12,7 +12,9 @@ those whose tool_use comes after the tool_result of the last successful structur
 A structure-changing tool_use without a result refuses the capture; one whose result is an error is ignored (the
 server rejected it, so the configuration is unchanged). Items are {name, type} from either result form. Per-cell behaviors come only from calls
 whose cell_type equals that cell definition. Calls naming another session are ignored; calls without a session id
-belong to the invocation's session. Stdlib only.
+belong to the invocation's session. The invocation session must be the capture's session and must have been
+dispatched with this design (lineage.dispatched_with: an invocation task.txt of that session has the design's
+DATA_INPUT line, path and sha256, as its line 2). Stdlib only.
 """
 from __future__ import annotations
 
@@ -27,6 +29,7 @@ if __package__ in (None, ""):  # run as a script: make the repo importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.capture.exports import _structured  # noqa: E402
 from scripts.data.common import project_root, reject_symlinks, strict_json  # noqa: E402
+from scripts.physicell import lineage  # noqa: E402
 from scripts.physicell import physicell_design as pd  # noqa: E402
 from scripts.physicell import settings_xml as sx  # noqa: E402
 
@@ -181,8 +184,8 @@ def capture_dictionary(root: Path, invocation_rel: str, capture_rel: str, design
     design, design_sha, problems = pd.load_and_check(root, design_rel)
     if problems:
         raise ValueError("the design is not valid: " + "; ".join(problems))
-    if design["session"] != session:
-        raise ValueError(f"design session {design['session']} is not the invocation session {session}")
+    # the design's session is a lineage anchor; this run's session is bound to the design by its dispatch
+    lineage.dispatched_with(root, session, "design", design_rel, design_sha)
     manifest = root / capture_rel / "capture.json"
     reject_symlinks(manifest, root)
     manifest_sha = hashlib.sha256(manifest.read_bytes()).hexdigest()

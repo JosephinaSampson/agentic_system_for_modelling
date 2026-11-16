@@ -14,7 +14,7 @@ from scripts.capture.record_physicell_config import record_physicell
 from scripts.physicell import physicell_projection as pp
 from scripts.physicell import settings_xml as sx
 from scripts.physicell import verify_export as ve
-from tests.data.test_physicell_design import SESSION
+from tests.data.test_physicell_design import STAGE_A
 from tests.data.test_physicell_projection import APOPTOSIS, PROJ, SRC, ProjectionBase, q, sha
 
 AFTER = "mc-session-2"
@@ -64,9 +64,9 @@ def placeholder_rules(xml_root):
 
 
 class VerifyBase(ProjectionBase):
-    """The stage-A capture (cap-2 of mc-session-1, the server's placeholder cell_rules, no enabled rules) and an
-    approved-shape projection over it; `export` simulates the stage-B configurator run: a new session's capture with
-    the applied entries and its invocation."""
+    """The stage-A capture (cap-2 of the stage-A session mc-stage-a, the server's placeholder cell_rules, no enabled
+    rules) and an approved-shape projection over it; `export` simulates the stage-B configurator run: a new session's
+    capture with the applied entries and its invocation."""
 
     def edit_capture(self, xml_root):
         placeholder_rules(xml_root)
@@ -162,7 +162,7 @@ class VerifyBase(ProjectionBase):
         path = self.root / f"runs/multicellular-configurator/{session}/invocation/{agent}/task.txt"
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"projection": projection, "sha256": digest or sha(self.root / PROJ), "approval": "proj-1",
-                   "record_session_id": SESSION}
+                   "record_session_id": STAGE_A}
         path.write_text('STAGE_GATE {"upstream_session_id": "maboss-session", "outputs": ["A", "B"]}\n'
                         f"DATA_INPUT {json.dumps(payload)}\nApply the approved projection.\n")
         return path
@@ -186,7 +186,7 @@ class BriefTests(VerifyBase):
         self.assertEqual(result["projection"], {"path": PROJ, "sha256": sha(self.root / PROJ)})
         # before/after are the settings_xml.capture bindings verbatim (build.py re-binds `after` and compares)
         self.assertEqual(result["before"], sx.capture(self.root, self.capture))
-        self.assertEqual(result["before"]["session"], SESSION)
+        self.assertEqual(result["before"]["session"], STAGE_A)
         self.assertEqual(result["after"], sx.capture(self.root, after))
         self.assertEqual(result["after"]["session"], AFTER)
         self.assertEqual(result["lineage"], {"invocation": INVOCATION})
@@ -296,7 +296,7 @@ class RulingTests(VerifyBase):
         self.assertTrue(result["passed"], result)
 
     def test_same_session_refused(self):
-        after = self.export(session=SESSION, capture_id="cap-9")
+        after = self.export(session=STAGE_A, capture_id="cap-9", invocation=False)
         with self.assertRaisesRegex(ValueError, "session"):
             ve.verify(self.root, PROJ, after)
 

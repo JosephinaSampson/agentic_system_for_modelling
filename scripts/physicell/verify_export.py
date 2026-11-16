@@ -55,6 +55,7 @@ from pathlib import Path, PurePosixPath
 if __package__ in (None, ""):  # run as a script: make the repo importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.data.common import project_root, reject_symlinks, strict_json  # noqa: E402
+from scripts.physicell import lineage  # noqa: E402
 from scripts.physicell import physicell_design as pd  # noqa: E402
 from scripts.physicell import physicell_projection as pp  # noqa: E402
 from scripts.physicell import settings_xml as sx  # noqa: E402
@@ -96,32 +97,6 @@ def _bind(root: Path, rel: str):
     if _sha(xml_raw) != bound["xml_sha256"]:
         raise ValueError(f"capture {rel}: its settings XML changed while being read")
     return bound, sx.parse_bytes(xml_raw)
-
-
-def _lineage(root: Path, after_session: str, projection_rel: str, digest: str) -> str:
-    """The rel path of the first invocation task.txt whose line 2 is this projection's DATA_INPUT line."""
-    folder_rel = f"runs/{sx.SPECIALIST}/{after_session}/invocation"
-    folder = root / folder_rel
-    reject_symlinks(folder, root)
-    other_sha = []
-    for task in sorted(folder.glob("*/task.txt")) if folder.is_dir() else []:
-        reject_symlinks(task, root)
-        lines = task.read_text(encoding="utf-8", errors="replace").splitlines()
-        if len(lines) < 2 or not lines[1].startswith("DATA_INPUT "):
-            continue
-        try:
-            value = strict_json(lines[1][len("DATA_INPUT "):].encode("utf-8"))
-        except ValueError:
-            continue
-        if not isinstance(value, dict) or value.get("projection") != projection_rel:
-            continue
-        rel = task.relative_to(root).as_posix()
-        if value.get("sha256") == digest:
-            return rel
-        other_sha.append(f"{rel} (sha256 {value.get('sha256')})")
-    hint = f"; records naming it with another sha256: {', '.join(other_sha)}" if other_sha else ""
-    raise ValueError(f"lineage: no invocation record {folder_rel}/*/task.txt has as its line 2 the DATA_INPUT line "
-                     f"naming projection {projection_rel} with sha256 {digest}{hint}")
 
 
 # ---------------------------------------------------------------- entries
@@ -417,7 +392,7 @@ def verify(root: Path, projection_rel: str, new_capture_rel: str) -> Path:
     if after["session"] == before["session"]:
         raise ValueError(f"lineage: the new capture {new_capture_rel} is in session {after['session']}, the "
                          f"projection's capture session; stage B runs in a new session")
-    invocation = _lineage(root, after["session"], projection_rel, digest)
+    invocation = lineage.dispatched_with(root, after["session"], "projection", projection_rel, digest)
     purpose = PurePosixPath(projection_rel).parts[2]
     target = root / "runs" / "orchestrator" / purpose / \
         f"physicell_verification.{after['session']}.{after['capture']}.json"

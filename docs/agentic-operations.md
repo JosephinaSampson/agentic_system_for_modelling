@@ -202,7 +202,7 @@ multicellular-configurator only through a `DATA_INPUT` line, checked by
   `DATA_INPUT {"projection": "runs/orchestrator/<p>/physicell_projection.json", "sha256": "...", "approval": "<record id>", "record_session_id": "..."}`.
   The file passes its `check` on exactly those bytes, the approval (stage `physicell_design` or
   `physicell_projection`) binds its path and sha256, and `record_session_id` is the approval's
-  `session_id`. Design: every MaBoSS handoff it lists lives under
+  `session_id` (for a design, its anchor: the basis capture's session, else `<p>`). Design: every MaBoSS handoff it lists lives under
   `runs/boolean-dynamics-modeler/<STAGE_GATE upstream_session_id>/`; with a `standalone_decision_id` it lists
   none. Projection: `record_session_id` is also its capture's session, and its design and design approval are
   re-checked. `STAGE_GATE` stays the plain multicellular check. `record_session_id` is a lineage anchor: the
@@ -278,7 +278,7 @@ was predicted, any hold-out prediction failed or the score is the penalty.
 ### PhysiCell design, projection and verification
 
 ```
-python3 scripts/physicell/physicell_design.py draft --purpose P (--basis runs/multicellular-configurator/S/configs/C | --session S) [--source ID:inputs/FILE ...] [--data ID:SESSION:PROPOSAL:APPROVAL ...]
+python3 scripts/physicell/physicell_design.py draft --purpose P [--basis runs/multicellular-configurator/S/configs/C] [--source ID:inputs/FILE ...] [--data ID:SESSION:PROPOSAL:APPROVAL ...]
 python3 scripts/physicell/physicell_design.py check runs/orchestrator/P/physicell_design.json
 python3 scripts/physicell/capture_dictionary.py runs/multicellular-configurator/S/invocation/ID/tool_calls.json runs/multicellular-configurator/S/configs/C runs/orchestrator/P/physicell_design.json
 python3 scripts/physicell/physicell_projection.py draft --purpose P --capture runs/multicellular-configurator/S/configs/C --design runs/orchestrator/P/physicell_design.json --design-approval RECORD_ID [--dictionary FILE] [--source ...] [--data ...]
@@ -289,9 +289,11 @@ python3 scripts/physicell/build.py --template template|template_BM [--version 1.
 
 `physicell_design` and `physicell_projection` are governance stages of `state.py record`
 (`approvals.require_physicell_design_approval`, `require_physicell_projection_approval`): design approval
-`session_id` = the basis capture's session (or the declared session), `outputs` = the cell definition and
+`session_id` = the design's anchor (the basis capture's session, else `P`), `outputs` = the cell definition and
 substrate names; projection approval `session_id` = the capture's session, `outputs` = the entry ids. The
-dictionary is written once beside the design, from list calls made after the last structure-changing call.
+dictionary is written once beside the design, from list calls made after the last structure-changing call, and
+only for a capture whose session has the design's `DATA_INPUT` line as line 2 of an invocation `task.txt`
+(`scripts/physicell/lineage.py`; the projection check requires the same).
 `verify_export.py` writes `runs/orchestrator/P/physicell_verification.<session>.<capture>.json` (one file per
 attempt) and requires an invocation `task.txt` of the stage-B session whose line 2 is this projection's
 `DATA_INPUT` line. `build.py` copies settings only from a passed verification whose capture is unchanged, and

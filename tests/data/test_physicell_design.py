@@ -16,6 +16,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "physicell"
 SESSION = "mc-session-1"
 CAPTURE = "cap-1"
 MABOSS = "maboss-session"
+STAGE_A = "mc-stage-a"  # the new session the configurator built the design in (never the design's anchor)
 REL = "runs/orchestrator/p1/physicell_design.json"
 RULES_REFUSAL = "the PhysiCell server (2.5.2) cannot reload a captured rules CSV"
 INPUT_FILES_REFUSAL = ("the PhysiCell server (2.5.2) cannot reload a captured configuration's input files (rules, "
@@ -33,6 +34,19 @@ def write_config(folder, rules=False):
     (folder / "PhysiCell_settings.xml").write_text(text)
     shutil.copy(FIXTURES / "cell_rules.csv", folder)
     return folder / "PhysiCell_settings.xml"
+
+
+def dispatch_design(root, session=STAGE_A, rel=REL, approval="design-1", anchor=SESSION, agent="agent-1",
+                    digest=None):
+    """The invocation task.txt of the configurator run (session `session`) dispatched with the design `rel`: line 2
+    is its DATA_INPUT line (the dispatch lineage that binds the stage-A capture to the design)."""
+    payload = {"design": rel, "sha256": digest or state.digest(Path(root) / rel), "approval": approval,
+               "record_session_id": anchor}
+    path = Path(root) / f"runs/multicellular-configurator/{session}/invocation/{agent}/task.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'STAGE_GATE {{"upstream_session_id": "{MABOSS}", "outputs": ["A", "B"]}}\n'
+                    f"DATA_INPUT {json.dumps(payload)}\nBuild the approved PhysiCell design.\n")
+    return path
 
 
 def file_ref(root, path, server, session, role):
@@ -148,9 +162,10 @@ class DraftTests(Base):
             pd.draft(self.root, "p1", basis_capture=self.capture, sources=[], data=[])
 
     def test_draft_without_basis_has_domain_skeleton(self):
-        path = pd.draft(self.root, "p2", basis_capture=None, sources=[], data=[], session="mc-new")
+        path = pd.draft(self.root, "p2", basis_capture=None, sources=[], data=[])
         data = json.loads(path.read_text())
         self.assertIsNone(data["basis"])
+        self.assertEqual(data["session"], "p2")  # the anchor of a new configuration is its purpose
         self.assertEqual(data["domain"]["units"], "micron")
         self.assertEqual(data["domain"]["time_units"], "min")
         self.assertIsNone(data["domain"]["x_min"])
@@ -201,7 +216,7 @@ class CheckTests(Base):
 
     def test_no_basis_without_domain_refused(self):
         data = self.complete()
-        data.update(basis=None, domain=None, session="mc-new", cycle_models=["Live", "Flow cytometry model (separated)"])
+        data.update(basis=None, domain=None, session="p1", cycle_models=["Live", "Flow cytometry model (separated)"])
         for item in data["cell_definitions"]:
             item["from"] = {"source": "s1", "locator": "Fig. 2"}
         for item in data["substrates"]:
@@ -210,7 +225,7 @@ class CheckTests(Base):
 
     def test_domain_units_refused(self):
         data = self.complete()
-        data.update(basis=None, session="mc-new", cycle_models=["Live", "Flow cytometry model (separated)"])
+        data.update(basis=None, session="p1", cycle_models=["Live", "Flow cytometry model (separated)"])
         for item in data["cell_definitions"] + data["substrates"]:
             item["from"] = {"source": "s1", "locator": "Fig. 2"}
         data["domain"] = {"x_min": -400, "x_max": 400, "y_min": -400, "y_max": 400, "z_min": -10, "z_max": 10,
@@ -406,13 +421,29 @@ class ApprovalTests(Base):
 
     def test_new_configuration_uses_declared_session(self):
         data = self.complete()
+        data.update(basis=None, session="p1", cycle_models=["Live", "Flow cytometry model (separated)"],
+                    domain={"x_min": -400, "x_max": 400, "y_min": -400, "y_max": 400, "z_min": -10, "z_max": 10,
+                            "dx": 20, "dy": 20, "dz": 20, "units": "micron", "max_time": 100, "time_units": "min"})
+        for item in data["cell_definitions"] + data["substrates"]:
+            item["from"] = {"source": "s1", "locator": "Fig. 2"}
+        ref = self.approve(data, session_id="p1")
+        approvals.require_physicell_design_approval(self.root, "design-1", ref["path"], ref["sha256"])
+        ref = self.approve(data, id="design-2", session_id="mc-new")
+        with self.assertRaisesRegex(ValueError, "anchor is 'p1'"):
+            approvals.require_physicell_design_approval(self.root, "design-2", ref["path"], ref["sha256"])
+
+    def test_new_configuration_session_must_be_the_purpose(self):
+        data = self.complete()
         data.update(basis=None, session="mc-new", cycle_models=["Live", "Flow cytometry model (separated)"],
                     domain={"x_min": -400, "x_max": 400, "y_min": -400, "y_max": 400, "z_min": -10, "z_max": 10,
                             "dx": 20, "dy": 20, "dz": 20, "units": "micron", "max_time": 100, "time_units": "min"})
         for item in data["cell_definitions"] + data["substrates"]:
             item["from"] = {"source": "s1", "locator": "Fig. 2"}
-        ref = self.approve(data, session_id="mc-new")
-        approvals.require_physicell_design_approval(self.root, "design-1", ref["path"], ref["sha256"])
+        self.write(data)
+        self.assertTrue(any("must be the purpose p1" in e for e in pd.check(self.root, REL)))
+        data["session"] = "p1"
+        self.write(data)
+        self.assertEqual(pd.check(self.root, REL), [])
 
 
 if __name__ == "__main__":

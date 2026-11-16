@@ -8,7 +8,9 @@ input and output links, Hill rules and other settings of PhysiCell_settings.xml.
 Schema (schema_version 1; every key below is required):
   kind: "physicell_projection"
   capture: {path, sha256}        the configuration built from the design: runs/multicellular-configurator/<session>/
-                                 configs/<capture>, sha256 of its capture.json (settings_xml.capture verifies it)
+                                 configs/<capture>, sha256 of its capture.json (settings_xml.capture verifies it);
+                                 <session> must have been dispatched with the design (lineage.dispatched_with: an
+                                 invocation task.txt line 2 is the design's DATA_INPUT line, path and sha256)
   dictionary: {path, sha256}     the physicell_dictionary.json captured for exactly this capture and design
   design: {path, sha256, approval}  the stage-A design, its physicell_design stage_approval; it is re-checked
   sources: [{id, path, sha256}]  researcher files under inputs/
@@ -58,6 +60,7 @@ if __package__ in (None, ""):  # run as a script: make the repo importable
 from scripts import state  # noqa: E402
 from scripts.data import approvals  # noqa: E402
 from scripts.data.common import finite_number, project_root, reject_symlinks, sha256_file, strict_json  # noqa: E402
+from scripts.physicell import lineage  # noqa: E402
 from scripts.physicell import physicell_design as pd  # noqa: E402
 from scripts.physicell import settings_xml as sx  # noqa: E402
 
@@ -262,9 +265,12 @@ class _Checker(pd.Citations):
         except (ValueError, OSError) as exc:
             self.error(f"design approval {ref['approval']}: {exc}")
             return
-        if self.session is not None and record.get("session_id") != self.session:
-            self.error(f"design approval {ref['approval']} is for session {record.get('session_id')!r}, "
-                       f"not the capture's session {self.session}")
+        if self.session is not None:
+            try:  # the design's session is a lineage anchor: the capture's session must have been built from it
+                lineage.dispatched_with(self.root, self.session, "design", ref["path"], digest)
+            except (ValueError, OSError) as exc:
+                self.error(f"design {ref['path']}: the capture's session {self.session} was not dispatched with it: "
+                           f"{exc}")
         self.design_ref = ref
         self.maboss = {}
         for item in design["intracellular"]:

@@ -369,9 +369,9 @@ multicellular-configurator from a `DATA_INPUT` line (line 2, after `STAGE_GATE`)
 
 | Step | Command or dispatch | Output |
 |---|---|---|
-| design | `python3 scripts/physicell/physicell_design.py draft --purpose P (--basis CAPTURE \| --session S) [--source ID:inputs/FILE ...] [--data ID:SESSION:PROPOSAL:APPROVAL ...]`, then `check runs/orchestrator/P/physicell_design.json` | the stage-A design: cell definitions and variants, substrates with units, the MaBoSS handoff of each cell type, coupling plan |
-| design approval | `state.py record`: `stage_approval`, stage `physicell_design`, `artifact` the design path and sha256, `session_id` the basis capture's session (or the declared session), `outputs` the cell definition and substrate names | |
-| build | configurator, line 2 `DATA_INPUT {"design": "runs/orchestrator/P/physicell_design.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<the approval's session>"}` | a new PhysiCell session builds the design, lists signals and behaviors, exports |
+| design | `python3 scripts/physicell/physicell_design.py draft --purpose P [--basis CAPTURE] [--source ID:inputs/FILE ...] [--data ID:SESSION:PROPOSAL:APPROVAL ...]`, then `check runs/orchestrator/P/physicell_design.json` | the stage-A design: cell definitions and variants, substrates with units, the MaBoSS handoff of each cell type, coupling plan |
+| design approval | `state.py record`: `stage_approval`, stage `physicell_design`, `artifact` the design path and sha256, `session_id` the design's anchor (the basis capture's session, else `P`), `outputs` the cell definition and substrate names | |
+| build | configurator, line 2 `DATA_INPUT {"design": "runs/orchestrator/P/physicell_design.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<the design's anchor>"}` | a new PhysiCell session builds the design, lists signals and behaviors, exports |
 | capture | `scripts/capture/recover.py`, `scripts/capture/record_physicell_config.py` | `runs/multicellular-configurator/<session>/configs/<capture>` |
 | dictionary | `python3 scripts/physicell/capture_dictionary.py runs/multicellular-configurator/<session>/invocation/<id>/tool_calls.json CAPTURE runs/orchestrator/P/physicell_design.json` | `runs/orchestrator/P/physicell_dictionary.json` (write-new) |
 | projection | `python3 scripts/physicell/physicell_projection.py draft --purpose P --capture CAPTURE --design DESIGN --design-approval RECORD_ID [--dictionary FILE] [--source ...] [--data ...]`, then `check runs/orchestrator/P/physicell_projection.json` | entries: `physiboss_input`, `physiboss_output`, `rule`, `setting` |
@@ -381,12 +381,24 @@ multicellular-configurator from a `DATA_INPUT` line (line 2, after `STAGE_GATE`)
 | verify | `python3 scripts/physicell/verify_export.py runs/orchestrator/P/physicell_projection.json CAPTURE` | `runs/orchestrator/P/physicell_verification.<session>.<capture>.json`; exit 0 passed, 1 failed, 2 refused |
 | build (optional) | `physicell-build` skill: `python3 scripts/physicell/build.py --template template\|template_BM [--version 1.14.2] [--dest DIR] [--verification runs/orchestrator/P/physicell_verification.<session>.<capture>.json] [--jobs N]` | report `runs/orchestrator/physicell-build/<UTC>-<template>/report.{json,md}`; the run command is printed, never executed |
 
+**Session anchor and dispatch lineage.** The design's `session` is a lineage anchor, never a live session: the
+basis capture's session when the design has a basis, otherwise the purpose `P`. Every configurator run is a new
+session, so the stage-A capture is bound to the design by its dispatch: an invocation record
+`runs/multicellular-configurator/<session>/invocation/*/task.txt` of the capture's session has the design's
+`DATA_INPUT` line (path and sha256) as its line 2 (`scripts/physicell/lineage.py`). `capture_dictionary.py` and the
+projection check refuse a capture without that lineage; `verify_export.py` binds the stage-B capture to the
+projection the same way.
+
 **Values.** A quantity is `{value, value_unit, transform, factor, target_unit?}`. The model value is `value*factor`
 (`identity`, `unit_factor`), `factor/value` (`reciprocal`) or `factor*ln(2)/value` (`ln2_over`). Units are never
 inferred: `target_unit` is required when the factor is not 1, for `unit_factor` and for compound units, and a
 setting's converted unit must equal the XML `units` attribute exactly. Names must match the captured dictionary
 and, for PhysiBoSS links, the cell definition's MaBoSS handoff. One writer per (cell definition, behavior): one rule,
 or one output link, never both, counting what the capture already has.
+
+**Modelling Python.** The design check and the hook validate each MaBoSS 2.x handoff with the backend contract
+package, through the configured modelling Python (`.setup/local.json` `env_prefix`, or `.setup/dispatcher.local.json`
+`python_executable`); without one, an otherwise valid handoff is refused ("v2 contract validation failed").
 
 **Gate.** The hook re-checks the file on exactly the approved bytes and the approval. Design form: every MaBoSS
 handoff of the design comes from the `STAGE_GATE` upstream MaBoSS session; with a `standalone_decision_id` the
