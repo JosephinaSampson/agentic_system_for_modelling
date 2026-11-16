@@ -4,9 +4,7 @@
 sub-project 3 brainstorm). This document records it, plus the details fixed while
 writing it, for review before planning. **Builds on:** the
 [data-to-model handoffs](../../data-to-model-handoffs-architecture.md) and
-[data-to-ODE calibration](../../data-to-ode-calibration-architecture.md) designs. The
-branch stacks on `feature/data-to-ode-calibration` (PR #16) because it extends the same
-gate and approval code.
+[data-to-ODE calibration](../../data-to-ode-calibration-architecture.md) designs (PR #16, merged); it extends the same gate and approval code.
 
 ## 1. Purpose and scope
 
