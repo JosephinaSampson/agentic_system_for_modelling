@@ -1,16 +1,28 @@
 """Read the names a BioMASS Text2Model export exposes, without importing it.
 
-The package under `model/` of an export zip is untrusted code: names are taken from the
-syntax tree with ast.literal_eval and nothing is executed.
+Export layout (BioMASS server 2.5.x `export_bundle`): `model/` holds the files of the exported revision
+folder (`integrity.json`, which seals every other file of it, `model_summary.json`, `snapshot.json`, ...)
+and the Text2Model package under `model/generated_model/`; saved runs sit under `simulate_<id>/` and
+`graph_<id>/`, plus `requirements.txt` and `run_simulation.py`. The package is the single directory under
+`model/` that holds `ode.py` and `name2idx/` (a flat package directly in `model/` is found the same way).
+
+The package is untrusted code: names are taken from the syntax tree with ast.literal_eval and nothing
+is executed.
 """
 
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
 import zipfile
 from pathlib import Path
 
 REQUIREMENTS = "biomass==0.14.0\n"
+MODEL = "model/"
+# files of the Text2Model package (relative to it) that the calibration runner needs
+PACKAGE_FILES = ("__init__.py", "ode.py", "observable.py", "name2idx/__init__.py", "name2idx/parameters.py",
+                 "name2idx/species.py")
 MAX_MEMBER_BYTES = 4 * 1024 * 1024
 
 
@@ -61,19 +73,68 @@ def _literal_names(source: str, label: str, name: str, attr: str | None) -> list
     return names
 
 
+def find_package(names) -> str:
+    """The prefix ("model/.../") of the single Text2Model package among zip member names; ValueError on zero
+    or several (a package = a directory under model/ holding ode.py and name2idx/; __pycache__ ignored)."""
+    names = [n for n in names if n.startswith(MODEL) and "__pycache__" not in n.split("/")]
+    found = sorted({n[:-len("ode.py")] for n in names if n.endswith("/ode.py") or n == MODEL + "ode.py"}
+                   & {n[:n.index("name2idx/")] for n in names if "name2idx/" in n
+                      and (n.index("name2idx/") == 0 or n[n.index("name2idx/") - 1] == "/")})
+    if not found:
+        raise ValueError("export zip has no Text2Model package under model/ (a folder with ode.py and name2idx/)")
+    if len(found) > 1:
+        raise ValueError(f"export zip has several Text2Model packages under model/: {', '.join(found)}")
+    return found[0]
+
+
+def package_prefix(zip_path: Path) -> str:
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            return find_package(zf.namelist())
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"not a zip file: {exc}") from exc
+
+
+def verify_inventory(zip_path: Path) -> None:
+    """The model/ files of the zip are exactly the ones model/integrity.json seals, with those sha256
+    (__pycache__ excluded, as the server seals); ValueError naming the first differences otherwise."""
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            inventory = json.loads(_read(zf, MODEL + "integrity.json"))
+            if not isinstance(inventory, dict):
+                raise ValueError("model/integrity.json must be an object of path -> sha256")
+            members = {info.filename[len(MODEL):]: info for info in zf.infolist()
+                       if info.filename.startswith(MODEL) and not info.is_dir()
+                       and "__pycache__" not in info.filename.split("/")
+                       and info.filename != MODEL + "integrity.json"}
+            differ = sorted(set(members) ^ set(inventory))
+            for rel in sorted(set(members) & set(inventory)):
+                info = members[rel]
+                if info.file_size > MAX_MEMBER_BYTES * 16 or \
+                        hashlib.sha256(zf.read(info)).hexdigest() != inventory[rel]:
+                    differ.append(rel)
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"not a zip file: {exc}") from exc
+    if differ:
+        raise ValueError("export zip files differ from its model/integrity.json: "
+                         + ", ".join(sorted(differ)[:10]))
+
+
 def introspect(zip_path: Path) -> dict:
     """{"parameters", "species", "observables"} of an export zip; ValueError if it is not a BioMASS 0.14.0 export."""
     try:
         with zipfile.ZipFile(zip_path) as zf:
             if _read(zf, "requirements.txt") != REQUIREMENTS:
                 raise ValueError(f"requirements.txt must be exactly {REQUIREMENTS!r}")
+            pkg = find_package(zf.namelist())
+            files = {rel: pkg + rel for rel in ("name2idx/parameters.py", "name2idx/species.py", "observable.py")}
             return {
-                "parameters": _literal_names(_read(zf, "model/name2idx/parameters.py"),
-                                             "model/name2idx/parameters.py", "NAMES", None),
-                "species": _literal_names(_read(zf, "model/name2idx/species.py"),
-                                          "model/name2idx/species.py", "NAMES", None),
-                "observables": _literal_names(_read(zf, "model/observable.py"),
-                                              "model/observable.py", "obs_names", "self"),
+                "parameters": _literal_names(_read(zf, files["name2idx/parameters.py"]),
+                                             files["name2idx/parameters.py"], "NAMES", None),
+                "species": _literal_names(_read(zf, files["name2idx/species.py"]),
+                                          files["name2idx/species.py"], "NAMES", None),
+                "observables": _literal_names(_read(zf, files["observable.py"]),
+                                              files["observable.py"], "obs_names", "self"),
             }
     except zipfile.BadZipFile as exc:
         raise ValueError(f"not a zip file: {exc}") from exc

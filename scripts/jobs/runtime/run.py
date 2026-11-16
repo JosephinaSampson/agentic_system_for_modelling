@@ -6,14 +6,16 @@
   python run.py calibrate --restart N
   python run.py collect
   python run.py status
-  python run.py parallel [--requested K]   the number of restarts to run at a time on this machine
+  python run.py parallel [--requested K]   restarts to run at a time here (effective_parallel, os.cpu_count())
   python run.py env-report --uv-version V --uv-platform T --uv-sha256 S --selftest-exit CODE
 
-Layout (the bundle root is this file's folder): job.json, model/ (the exported BioMASS Text2Model
-package), calibration/{compare.py, spec.json}, env/, launch/. Outputs go to out/ and results.tar.gz.
+Layout (the bundle root is this file's folder): job.json, model/<package>/ (the exported BioMASS Text2Model
+package at its export path, model/generated_model/ for BioMASS 2.5.x exports), calibration/{compare.py,
+spec.json}, env/, launch/. Outputs go to out/ and results.tar.gz.
 
 How a parameter vector is scored (no biomass.optimize, no generated data files):
-  * the model package is imported as `model` with the bundle root on sys.path;
+  * the model package (the single folder under model/ holding ode.py and name2idx/, see find_package) is
+    imported by its own name with its parent folder on sys.path (its modules import each other relatively);
   * every simulated condition starts from the model defaults (`param_values()`, `initial_values()`),
     then the fitted values (fit kind parameter -> x, initial -> y0), then the condition's absolute
     overrides from compare.condition_overrides, then its `scales` (multiplying the current value);
@@ -34,8 +36,8 @@ for use=fit rows (and fit-needed times) only, and `validate --use U` reports onl
 A restart folder is deleted (and the restart run again) only when its owner (owner.json: host, pid, and the
 SLURM array job/task when run under SLURM) is gone. An interrupted restart (Ctrl-C, SIGTERM, SystemExit)
 writes no result.json, so a rerun starts it again from its seed; only real errors and the selftest cap write
-a `failed` result. Whenever a restart uses more than one scipy worker (effective_workers != 1), restarts run
-one at a time (effective_parallel).
+a `failed` result. Restarts run K at a time with K = effective_parallel (workers -1: 1; otherwise
+min(parallel, cores // workers), locally cores = os.cpu_count()).
 
 Calibration follows BioMASS 0.14.0: scipy differential_evolution in gene space [0, 1]^n with the
 optimizer_options of job.json, gene -> value = 10 ** (log10(lb) + g * (log10(ub) - log10(lb))),
@@ -128,6 +130,22 @@ def write_json(path: Path, data) -> None:
 
 def _finite_or_none(value):
     return value if isinstance(value, (int, float)) and math.isfinite(value) else None
+
+
+def find_package(root: Path = ROOT) -> Path:
+    """The single Text2Model package folder under root/model (a folder with ode.py and name2idx/, the
+    folder model/ itself included); ValueError on zero or several."""
+    base = Path(root) / "model"
+    found = []
+    for dirpath, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        if "ode.py" in files and "name2idx" in dirs:
+            found.append(Path(dirpath))
+    if not found:
+        raise ValueError("no Text2Model package under model/ (a folder with ode.py and name2idx/)")
+    if len(found) > 1:
+        raise ValueError(f"several Text2Model packages under model/: {', '.join(sorted(map(str, found)))}")
+    return found[0]
 
 
 def load_compare(root: Path = ROOT):
@@ -270,12 +288,13 @@ class Problem:
         self.np = np
         self.spec = read_json(self.root / "calibration" / "spec.json")
         self.compare = load_compare(self.root)
-        if str(self.root) not in sys.path:
-            sys.path.insert(0, str(self.root))
-        importlib.import_module("model")
-        ode = importlib.import_module("model.ode")
-        names = importlib.import_module("model.name2idx")
-        observable = importlib.import_module("model.observable")
+        package = find_package(self.root)
+        if str(package.parent) not in sys.path:
+            sys.path.insert(0, str(package.parent))
+        importlib.import_module(package.name)
+        ode = importlib.import_module(f"{package.name}.ode")
+        names = importlib.import_module(f"{package.name}.name2idx")
+        observable = importlib.import_module(f"{package.name}.observable")
         self.p_index = {name: i for i, name in enumerate(names.C.NAMES)}
         self.s_index = {name: i for i, name in enumerate(names.V.NAMES)}
         self.x_default = list(ode.param_values())
@@ -485,11 +504,20 @@ def effective_workers(workers: int) -> int:
     return workers
 
 
-def effective_parallel(settings: dict, requested: int | None = None) -> int:
-    """Restarts to run at a time: `requested` (or settings parallel), but 1 whenever one restart uses more
-    than one scipy worker (effective_workers != 1), so restarts never oversubscribe the cores."""
-    k = int(requested) if requested else int(settings["parallel"])
-    return 1 if effective_workers(int(settings["workers"])) != 1 else max(1, k)
+def effective_parallel(settings: dict, requested: int | None = None, max_cores: int | None = None) -> int:
+    """Restarts to run at a time, K, so restarts never oversubscribe the cores (one rule for every launcher):
+    with workers = effective_workers(settings workers) and P = `requested` or settings parallel,
+      workers -1 (every core)          K = 1
+      max_cores known, workers >= 1    K = min(P, max_cores // workers), at least 1
+      max_cores unknown                K = P when workers is 1, else 1
+    max_cores: a configured host's max_cores, os.cpu_count() locally, None for a printed unconfigured host."""
+    k = max(1, int(requested) if requested else int(settings["parallel"]))
+    workers = effective_workers(int(settings["workers"]))
+    if workers == -1:
+        return 1
+    if max_cores is None:
+        return k if workers == 1 else 1
+    return max(1, min(k, int(max_cores) // max(1, workers)))
 
 
 def cmd_calibrate(root: Path, restart: int) -> int:
@@ -858,7 +886,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.requested is not None and args.requested < 1:
             print("error: --requested must be >= 1", file=sys.stderr)
             return 2
-        print(effective_parallel(read_json(ROOT / "job.json")["settings"], args.requested))
+        print(effective_parallel(read_json(ROOT / "job.json")["settings"], args.requested, os.cpu_count()))
         return 0
     return cmd_env_report(ROOT, args)
 

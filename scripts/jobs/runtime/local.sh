@@ -4,8 +4,9 @@
 #   bash launch/local.sh [--parallel K]
 #
 # Sets up the environment first if needed (env/bootstrap.sh). K restarts run at the same time
-# (default: "parallel" in job.json; always 1 when one restart uses more than one scipy worker, see
-# `run.py parallel`). Finished restarts are skipped and live ones are never touched, so rerunning resumes.
+# (default: "parallel" in job.json), capped so restarts never oversubscribe this machine: `run.py parallel`
+# gives min(K, cores // workers), and 1 for workers -1. Finished restarts are skipped and live ones are never
+# touched, so rerunning resumes.
 # Ends by writing results.tar.gz in the job folder.
 set -euo pipefail
 
@@ -33,7 +34,7 @@ if [ "$GIVEN" = 1 ]; then
   esac
   PARALLEL="$("$PY" run.py parallel --requested "$PARALLEL")"
 else
-  PARALLEL="$("$PY" run.py parallel)"  # settings parallel; 1 when a restart uses more than one worker
+  PARALLEL="$("$PY" run.py parallel)"  # settings parallel, capped by this machine's cores and workers
 fi
 RESTARTS="$(setting restarts)"
 

@@ -132,8 +132,7 @@ class HostsTests(LauncherFixture):
         s = self.job_settings()
         self.assertEqual(launch.cores_parallel(s, 10 ** 6), 1 if s["workers"] == -1 else
                          max(1, min(s["parallel"], 10 ** 6 // s["workers"])))
-        # central rule (review launch.py:294): more than one worker per restart means one restart at a time
-        self.assertEqual(launch.cores_parallel({"parallel": 8, "workers": 4}, 8), 1)
+        self.assertEqual(launch.cores_parallel({"parallel": 8, "workers": 4}, 8), 2)
         self.assertEqual(launch.cores_parallel({"parallel": 8, "workers": 4}, 2), 1)
         self.assertEqual(launch.cores_parallel({"parallel": 8, "workers": 1}, 2), 2)
         self.assertEqual(launch.cores_parallel({"parallel": 3, "workers": 1}, 64), 3)
@@ -142,7 +141,8 @@ class HostsTests(LauncherFixture):
 
 
 class ParallelRuleTests(LauncherFixture):
-    """review launch.py:294: workers != 1 means one restart at a time for every host type and local mode."""
+    """R-A3: K = min(parallel, max_cores // workers) for workers >= 1, K = 1 for workers -1; local mode uses
+    os.cpu_count(); an unconfigured (printed) host has unknown cores: K = 1 unless workers is 1."""
 
     def set_workers(self, workers):
         job = json.loads((self.job_dir / "job.json").read_text())
@@ -150,20 +150,28 @@ class ParallelRuleTests(LauncherFixture):
         return job["settings"]
 
     def test_unconfigured_host_and_print_use_the_rule(self):
-        settings = self.set_workers(-1)
-        self.assertEqual(launch.resolve_host("somebox", settings, configured_only=False)["parallel"], 1)
+        for workers in (-1, 2):
+            settings = self.set_workers(workers)
+            self.assertEqual(launch.resolve_host("somebox", settings, configured_only=False)["parallel"], 1)
         settings = self.set_workers(1)
         self.assertEqual(launch.resolve_host("somebox", settings, configured_only=False)["parallel"],
                          settings["parallel"])
 
-    def test_local_start_passes_the_effective_parallel(self):
-        settings = self.set_workers(-1)
+    def start_command(self, workers, requested, cores):
+        settings = self.set_workers(workers)
         with mock.patch.object(launch, "_job_and_settings", return_value=(self.job_dir, settings)), \
                 mock.patch.object(launch, "unpack", return_value=self.fake.tmp), \
+                mock.patch.object(launch.os, "cpu_count", return_value=cores), \
                 mock.patch.object(launch.subprocess, "Popen") as popen:
             popen.return_value.pid = 12345
-            launch.start(self.root, self.job_id, 4)
-        self.assertIn("--parallel 1", popen.call_args.args[0][-1])
+            launch.start(self.root, self.job_id, requested)
+        return popen.call_args.args[0][-1]
+
+    def test_local_start_passes_the_effective_parallel(self):
+        self.assertIn("--parallel 1", self.start_command(-1, 4, 16))
+        self.assertIn("--parallel 4", self.start_command(2, 4, 16))
+        self.assertIn("--parallel 2", self.start_command(2, 4, 4))
+        self.assertIn("--parallel 3", self.start_command(1, 3, 16))
 
 
 class SlurmReviewTests(LauncherFixture):

@@ -140,7 +140,7 @@ def start(root: Path, job_id: str, parallel: int | None = None) -> dict:
     if _pid(target):
         raise ValueError(f"job {job_id} is already running (pid {_pid(target)})")
     # local.sh applies the same rule; passing the effective value keeps the launch log honest
-    extra = f" --parallel {runtime.effective_parallel(settings, parallel)}" if parallel else ""
+    extra = f" --parallel {runtime.effective_parallel(settings, parallel, os.cpu_count())}" if parallel else ""
     command = f"bash env/bootstrap.sh && exec bash launch/local.sh{extra}"
     with (target / "launch.log").open("ab") as log:
         proc = subprocess.Popen(["bash", "-c", command], cwd=target, stdin=subprocess.DEVNULL, stdout=log,
@@ -272,9 +272,9 @@ def load_hosts() -> dict:
 
 
 def cores_parallel(settings: dict, max_cores: int) -> int:
-    """K restarts at a time on a host with max_cores: run.effective_parallel (1 whenever a restart uses more
-    than one scipy worker, e.g. workers -1 = every core), capped at max_cores."""
-    return max(1, min(runtime.effective_parallel(settings), int(max_cores)))
+    """K restarts at a time on a configured host: run.effective_parallel with its max_cores, i.e.
+    min(parallel, max_cores // workers) for workers >= 1 and 1 for workers -1 (every core)."""
+    return runtime.effective_parallel(settings, max_cores=int(max_cores))
 
 
 def resolve_host(name: str, settings: dict, configured_only: bool) -> dict:

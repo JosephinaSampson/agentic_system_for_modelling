@@ -47,7 +47,9 @@ and use, so hold-out rows never change a fit target or a fit prediction:
                           ValueError otherwise); the rows of the test condition are predicted as ratio v_test(T)/v_ref(T) or
                           difference v_test(T)-v_ref(T); their target is the same contrast of the data
                           (test value vs the mean of the reference rows of the same readout AND the same
-                          `use`, so fit targets never see hold-out references; none gives a nan target). Reference
+                          `use`, so fit targets never see hold-out references; none gives a nan target); a
+                          difference target is then converted into the model unit with the values.readouts
+                          factor (as for absolute; the group shares one value_unit), a ratio is unitless. Reference
                           rows are role "reference": no prediction, no term in the objective.
   dose_response           viability = obs(treated at dose D, T) / obs(untreated, T), T = viability.time;
                           target = value * mapping["values"]["viability"]["factors"][value_unit] (a fraction;
@@ -158,6 +160,7 @@ def resolve(mapping: dict, rows: list[dict]) -> dict:
                   for c in mapping["conditions"]}
     dose_conditions: dict = {}
     meas: dict = {}
+    unit_factor: dict = {}  # measurement id -> values.readouts factor (difference contrasts)
     for rule in mapping["rules"]:
         kind, rid = rule["type"], rule["rule_id"]
         entries = []
@@ -176,6 +179,8 @@ def resolve(mapping: dict, rows: list[dict]) -> dict:
                                      f"{rule['test']!r} nor the reference {rule['reference']!r} of rule {rid}")
                 _same_time(mid, entry["time"], float(rule["time"]), "the rule time")
                 entry["time"] = float(rule["time"])
+                if rule["method"] == "difference":  # a difference keeps the data unit: convert it
+                    unit_factor[mid] = _readout_factor(mapping, row)
                 if row["condition"] == rule["reference"]:
                     entry["role"] = "reference"
             else:
@@ -198,11 +203,11 @@ def resolve(mapping: dict, rows: list[dict]) -> dict:
         if kind == "time_course":
             _normalise_time_course(rule, entries)
         elif kind == "endpoint_contrast":
-            for e in entries:
+            for mid, e in zip(rule["measurements"], entries):
                 if e["role"] == "fit_target":
                     refs = [o["value"] for o in entries if o["role"] == "reference"
                             and o["readout"] == e["readout"] and o["use"] == e["use"]]
-                    e["target"] = _contrast(rule["method"], e["value"], _mean(refs))
+                    e["target"] = _contrast(rule["method"], e["value"], _mean(refs)) * unit_factor.get(mid, 1.0)
     fit = [{"name": f["name"], "kind": f["kind"], "lower": float(f["lower"]), "upper": float(f["upper"]),
             "log10_lower": math.log10(f["lower"]), "log10_upper": math.log10(f["upper"])} for f in mapping["fit"]]
     spec = {"time_model_unit": mapping["time"]["model_unit"], "dose_model_unit": mapping["dose"]["model_unit"],

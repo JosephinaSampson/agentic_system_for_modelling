@@ -165,34 +165,46 @@ def run(scratch: Path) -> None:
         write_json(file, record_)
         py("scripts/state.py", "record", "--input", str(file))
 
-    # 1. the tiny Text2Model model in a uv environment
+    # 1. the tiny Text2Model model in a uv environment, generated like the BioMASS server worker does:
+    #    the description is written as generated_model.txt, so the package is generated_model/
     work = scratch / "model-build"
     work.mkdir()
     sh("uv", "venv", "-q", str(work / "venv"), cwd=work)
     venv_python = str(work / "venv" / "bin" / "python")
     sh("uv", "pip", "install", "-q", "--python", venv_python, "biomass==0.14.0", cwd=work)
-    (work / "tiny.txt").write_text(TINY, encoding="utf-8")
-    sh(venv_python, "-c", "from biomass import Text2Model; Text2Model('tiny.txt').convert()", cwd=work)
-    assert (work / "tiny" / "name2idx" / "parameters.py").is_file()
-    step("Text2Model generated the tiny model with biomass==0.14.0 (params kf1 kr1 kf2 kf3, observable pR)")
+    revision_src = work / REVISION  # the server's revision folder
+    revision_src.mkdir()
+    (revision_src / "model.txt").write_text(TINY, encoding="utf-8")
+    (revision_src / "generated_model.txt").write_text(TINY, encoding="utf-8")
+    sh(venv_python, "-c", "from biomass import Text2Model; Text2Model('generated_model.txt').convert()",
+       cwd=revision_src)
+    assert (revision_src / "generated_model" / "name2idx" / "parameters.py").is_file()
+    (revision_src / "model_summary.json").write_text(json.dumps({"biomass_version": "0.14.0"}, indent=2),
+                                                     encoding="utf-8")
+    for cache in list(revision_src.rglob("__pycache__")):
+        shutil.rmtree(cache)
+    step("Text2Model generated generated_model/ with biomass==0.14.0 (params kf1 kr1 kf2 kf3, observable pR)")
 
-    # 2. zipped like a captured export, with requirements.txt and the revision's integrity.json, which is also
-    #    captured as runs/ode-modeler/<session>/captures/c1/<revision>/integrity.json (the revision binding)
-    export_rel = f"runs/ode-modeler/{SESSION}/captures/c1/export.zip"
+    # 2. sealed and exported like BioMASS 2.5.2 (services/artifacts.py seal + export_bundle): integrity.json
+    #    = {relative path: sha256} of every other file of the revision folder (json indent 2); the zip holds
+    #    that folder under model/, requirements.txt (from model_summary.json) and run_simulation.py. The
+    #    revision folder is captured as runs/ode-modeler/<session>/captures/c1/<revision>/ (record_ode_artifacts).
+    sealed = sorted(path for path in revision_src.rglob("*") if path.is_file())
+    (revision_src / "integrity.json").write_text(json.dumps(
+        {str(path.relative_to(revision_src)): sha256(path) for path in sealed}, indent=2), encoding="utf-8")
+    capture_dir = root / "runs" / "ode-modeler" / SESSION / "captures" / "c1"
+    capture_dir.mkdir(parents=True)
+    shutil.copytree(revision_src, capture_dir / REVISION)
+    export_rel = f"runs/ode-modeler/{SESSION}/captures/c1/export_{'e' * 32}.zip"
     export = root / export_rel
-    export.parent.mkdir(parents=True)
-    files = sorted(path for path in (work / "tiny").rglob("*") if path.is_file() and "__pycache__" not in path.parts)
-    integrity = json.dumps({path.relative_to(work / "tiny").as_posix(): sha256(path) for path in files},
-                           indent=2) + "\n"
-    revision_dir = export.parent / REVISION
-    revision_dir.mkdir()
-    (revision_dir / "integrity.json").write_text(integrity, encoding="utf-8")
-    with zipfile.ZipFile(export, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path in files:
-            zf.write(path, "model/" + path.relative_to(work / "tiny").as_posix())
-        zf.writestr("model/integrity.json", integrity)
+    with zipfile.ZipFile(export, "x", zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(p for p in revision_src.rglob("*") if p.is_file()):
+            zf.write(path, f"model/{path.relative_to(revision_src).as_posix()}")
         zf.writestr("requirements.txt", "biomass==0.14.0\n")
-    step(f"export zipped as {export_rel}; revision {REVISION} captured beside it")
+        zf.writestr("run_simulation.py", '"""Run an explicitly configured scenario from this exported bundle."""\n')
+    with zipfile.ZipFile(export) as zf:
+        assert "model/generated_model/name2idx/parameters.py" in zf.namelist(), zf.namelist()
+    step(f"export zipped as {export_rel} (model/generated_model/...); revision {REVISION} captured")
 
     # 3. synthetic measurements generated with a known kf2 (including 7.5 min and one hold-out row)
     truth = json.loads(sh(venv_python, "-c", SIMULATE, str(TRUE_KF2), str(TRUE_KF3), cwd=work).stdout)

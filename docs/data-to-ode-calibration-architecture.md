@@ -40,8 +40,8 @@ one-time hold-out scoring.
 | **Fit/hold-out split; hold-out scored once (RD)** | Calibration sees only `use=fit` rows: it simulates only what they need, and `collect` writes predictions, simulations and figures for them only, so the researcher does not see hold-out agreement before approving. Hold-out rows are scored once, on the bundled model with the accepted values. That model equals the applied one, so the score does not depend on when the modeler applies. `holdout_score.json` is never overwritten. |
 | **Explicit time, dose and value unit blocks (S2-ode, U)** | Units are never inferred. The mapping has `time` and `dose` blocks with a model unit and a factor per measurement unit, and a `values` block: per readout the observable's model unit and a factor per `value_unit` (for `absolute` rows), and the factors that turn viability into a fraction. A missing factor fails `check`, and the runner raises rather than default. |
 | **Data and predictions normalised the same way (N)** | Tables hold raw values. Each rule divides the data exactly as it divides the predictions: by the t0 row (`fold_change_vs_t0`), the reference condition at the same time (`relative_to_condition`), the max over the rows of the same `use` (`max_normalized`) or the reference mean (`endpoint_contrast`). `check` requires every divisor row, non-zero, and one `value_unit` per normalisation group. |
-| **Revision bound to the fitted export; checked before applying** | `inputs.model.revision` is the captured revision whose `integrity.json` equals the export zip's `model/integrity.json` (`draft` derives it, `check` refuses any other). The modeler applies only when the session's current revision equals `proposal.model.revision`; otherwise it returns `blocked`. |
-| **Restarts: no double runs, no oversubscription** | An interrupt writes no result, so a rerun resumes. A restart folder with a live owner (or an active SLURM task) is never deleted. More than one scipy worker per restart means one restart at a time, on every launcher. |
+| **Real export layout; revision bound to the fitted export; checked before applying** | The bundle is the export zip exactly as BioMASS 2.5.x writes it: `model/` is the revision folder, the Text2Model package is `model/generated_model/` (found as the single folder with `ode.py` and `name2idx/`), and the calibration bundle keeps it at that path; the runner imports it by its own name. `inputs.model.revision` is the captured revision whose `integrity.json` equals the export zip's `model/integrity.json`, and the zip's `model/` files must match that inventory (`draft` derives it, `check` refuses any other). The modeler applies only when the session's current revision equals `proposal.model.revision`; otherwise it returns `blocked`. |
+| **Restarts: no double runs, no oversubscription** | An interrupt writes no result, so a rerun resumes. A restart folder with a live owner (or an active SLURM task) is never deleted. Every launcher runs K = min(parallel, cores // workers) restarts at a time (1 for `workers: -1`; cores = a host's `max_cores` or the local CPU count; an unconfigured printed host runs one at a time unless `workers` is 1). |
 | **Gate binds proposal, mapping, `job.json` and `record_session_id`** | The ode-modeler `DATA_INPUT` names the proposal. The gate checks the `ode_calibration` approval, the proposal hash, accepted outputs, the proposal's `mapping` approval, `job_sha256` against `job.json`, and that the brief carries the proposal's ODE session as `record_session_id` and no other value. |
 | **Job-folder and results mentions refused outside `DATA_INPUT`** | Job folders and returned results hold remote-derived values. They reach a specialist only as the approved proposal, so a brief naming them is refused. |
 
@@ -50,7 +50,7 @@ one-time hold-out scoring.
 | Component | Role |
 |---|---|
 | `scripts/ode/measurements.py` | Reads and checks the measurement table: columns, units, sources, `use`. |
-| `scripts/ode/model_zip.py` | Introspects an export zip (parameters, species, observables) with `ast`; never imports it. |
+| `scripts/ode/model_zip.py` | Finds the Text2Model package of an export zip, introspects it (parameters, species, observables) with `ast` without importing it, and checks the zip's `model/` files against its `integrity.json`. |
 | `scripts/ode/ode_mapping.py` | `draft` and `check` for `ode_mapping.json`: model binding, readouts, conditions, rules, fitted bounds, coverage, unit blocks. |
 | `scripts/data/approvals.py` | Finds and verifies `ode_mapping` and `ode_calibration` approvals in `DECISIONS.md`. |
 | `scripts/jobs/settings.py` | Settings schema and digest; BioMASS defaults written out explicitly. |
@@ -94,7 +94,8 @@ The procedure is in [ODE workflow](ode-workflow.md). In outline:
 - **`values` block:** `{"readouts": {readout: {"model_unit": str, "factors": {value_unit:
   positive factor}}}, "viability": {"factors": {value_unit: positive factor}}}`. An `absolute`
   row's target is value x its readout factor (in the observable's model unit); a dose-response
-  row's target is value x its viability factor (a fraction, e.g. `"%": 0.01`).
+  row's target is value x its viability factor (a fraction, e.g. `"%": 0.01`); a `difference`
+  contrast target (a difference of values) is converted with the readout factor too; a ratio is unitless.
 - **Comparison rules:** time course `fold_change_vs_t0`, `relative_to_condition`,
   `max_normalized`, `absolute`; endpoint `ratio` and `difference`; dose-response drug entry
   `target_activity_scaling` or `inhibitor_species` with a viability readout. Data and
@@ -103,7 +104,7 @@ The procedure is in [ODE workflow](ode-workflow.md). In outline:
 - **Mapping approval:** `ode_mapping` `stage_approval`, `session_id` = the ODE session,
   `outputs` = measurement ids used plus fitted names, `artifact` = path and sha256.
 - **Settings:** restarts, seed per restart, `optimizer_options`, `workers`, parallel
-  restarts (forced to 1 whenever a restart uses more than one worker), SLURM limits, good-fit margin and `reproduce_rtol` (default 1e-3). BioMASS
+  restarts (capped at cores // workers, 1 for `workers: -1`), SLURM limits, good-fit margin and `reproduce_rtol` (default 1e-3). BioMASS
   defaults: `best1bin`, `maxiter=50`, `popsize=3`, `tol=1e-4`, `mutation=0.1`,
   `recombination=0.5`, `polish=False`, `workers=1`.
 - **Objective:** the unweighted sum of squared differences over `use=fit` rows. `error` is

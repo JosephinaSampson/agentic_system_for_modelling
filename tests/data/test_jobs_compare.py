@@ -149,6 +149,19 @@ class CompareTests(unittest.TestCase):
             self.assertNotIn("b", pred)  # the reference row only defines the data contrast
             self.assertEqual(spec["measurements"]["a"]["target"], data)
 
+    def test_difference_contrast_is_converted_into_the_model_unit(self):
+        # R-A2: a difference keeps the data unit, so it is converted like an absolute value; a ratio is unitless
+        rows = [row("a", "drug", 60.0, 6.0, value_unit="kau"), row("b", "ref", 60.0, 2.0, value_unit="kau")]
+        rule = {"rule_id": "ec", "type": "endpoint_contrast", "method": "difference", "test": "drug",
+                "reference": "ref", "time": 60.0, "measurements": ["a", "b"]}
+        self.assertEqual(compare.resolve(mapping([rule]), rows)["measurements"]["a"]["target"], 4000.0)
+        m = mapping([dict(rule, method="ratio")])
+        m["values"]["readouts"] = {}
+        self.assertEqual(compare.resolve(m, rows)["measurements"]["a"]["target"], 3.0)
+        m["rules"] = [rule]
+        with self.assertRaisesRegex(ValueError, "a.*kau.*values.readouts"):
+            compare.resolve(m, rows)
+
     def test_time_conversion_hours_to_minutes(self):
         spec = compare.resolve(mapping([tc("absolute", ["m1"])]), [row("m1", "ctrl", 1.5, 1.0, unit="h")])
         self.assertEqual(spec["times_model"]["ctrl"], [0.0, 90.0])

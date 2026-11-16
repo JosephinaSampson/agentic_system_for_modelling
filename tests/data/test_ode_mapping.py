@@ -30,7 +30,7 @@ ROWS = [
 ]
 REV = "rev_" + "a" * 32  # the captured revision the export zip carries (model/integrity.json)
 REV_DIR = f"runs/ode-modeler/ode-1/captures/c1/{REV}"
-INTEGRITY = '{"generated_model/ode.py": "' + "0" * 64 + '"}\n'
+PACKAGE = "model/generated_model/"  # BioMASS 2.5.2 exports: the revision folder under model/, the package inside it
 PARAMS = ["kf1", "kr1", "kf2", "kf3"]
 SPECIES = ["E", "R", "ER", "pER"]
 
@@ -47,16 +47,38 @@ def sha(path):
 
 
 def make_zip(path, parameters=PARAMETERS_PY, species=SPECIES_PY, observable=OBSERVABLE_PY,
-             requirements="biomass==0.14.0\n", integrity=INTEGRITY):
+             requirements="biomass==0.14.0\n", integrity=True, extra=None, package=PACKAGE):
+    """An export zip shaped like BioMASS 2.5.2 export_bundle: model/ = the revision folder (integrity.json
+    sealing every other file but __pycache__, model_summary.json, the Text2Model package), requirements.txt
+    and run_simulation.py. integrity=True seals the model/ files; a string is written as is; None omits it."""
+    files = {f"{package}__init__.py": "from .name2idx import C, V\n",
+             f"{package}name2idx/__init__.py": "from .parameters import C\nfrom .species import V\n",
+             f"{package}name2idx/parameters.py": parameters, f"{package}name2idx/species.py": species,
+             f"{package}observable.py": observable,
+             f"{package}ode.py": "from .name2idx import C, V\n\n\ndef param_values():\n    return [1, 1, 1, 1]\n",
+             "model/model_summary.json": '{"biomass_version": "0.14.0"}\n', "model/model.txt": "E --> R\n"}
+    files.update(extra or {})
+    if integrity is True:
+        integrity = json.dumps({name[len("model/"):]: hashlib.sha256(text if isinstance(text, bytes) else
+                                                                       text.encode()).hexdigest()
+                                for name, text in sorted(files.items())
+                                if name.startswith("model/") and "__pycache__" not in name}, indent=2)
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w") as zf:
         if integrity is not None:
             zf.writestr("model/integrity.json", integrity)
-        zf.writestr("model/name2idx/parameters.py", parameters)
-        zf.writestr("model/name2idx/species.py", species)
-        zf.writestr("model/observable.py", observable)
+        for name, text in files.items():
+            zf.writestr(name, text)
         zf.writestr("requirements.txt", requirements)
         zf.writestr("run_simulation.py", "print('x')\n")
+
+
+def capture(root, bundle=BUNDLE, rev_dir=REV_DIR):
+    """Capture the revision the export was made from: its integrity.json, as record_ode_artifacts does."""
+    folder = Path(root) / rev_dir
+    folder.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(Path(root) / bundle) as zf:
+        (folder / "integrity.json").write_bytes(zf.read("model/integrity.json"))
 
 
 class OdeFixture(unittest.TestCase):
@@ -66,8 +88,7 @@ class OdeFixture(unittest.TestCase):
         self.root = Path(tmp.name).resolve()
         shutil.copyfile(state.ROOT / "templates" / "DECISIONS.md", self.root / "DECISIONS.md")
         make_zip(self.root / BUNDLE)
-        (self.root / REV_DIR).mkdir(parents=True)
-        (self.root / REV_DIR / "integrity.json").write_text(INTEGRITY, encoding="utf-8")
+        capture(self.root)
         self.write_rows(ROWS)
         src = self.root / SOURCE
         src.parent.mkdir(parents=True)
@@ -145,6 +166,37 @@ class IntrospectTests(OdeFixture):
         make_zip(path, observable="class O:\n    pass\n")
         with self.assertRaisesRegex(ValueError, "obs_names"):
             model_zip.introspect(path)
+
+
+class ExportLayoutTests(OdeFixture):
+    """R-A1: the real BioMASS 2.5.2 export layout is the contract (package under model/generated_model/)."""
+
+    def test_the_package_is_found_under_the_revision_folder(self):
+        self.assertEqual(model_zip.package_prefix(self.root / BUNDLE), PACKAGE)
+        flat = self.root / "flat.zip"
+        make_zip(flat, package="model/")
+        self.assertEqual(model_zip.package_prefix(flat), "model/")
+        self.assertEqual(model_zip.introspect(flat)["species"], SPECIES)
+
+    def test_zero_or_several_packages_refused(self):
+        none = self.root / "none.zip"
+        with zipfile.ZipFile(none, "w") as zf:
+            zf.writestr("model/model_summary.json", "{}")
+            zf.writestr("requirements.txt", "biomass==0.14.0\n")
+        with self.assertRaisesRegex(ValueError, "no Text2Model package"):
+            model_zip.introspect(none)
+        two = self.root / "two.zip"
+        make_zip(two, extra={"model/other/ode.py": "x = 1\n", "model/other/name2idx/__init__.py": ""})
+        with self.assertRaisesRegex(ValueError, "several.*generated_model.*other"):
+            model_zip.introspect(two)
+
+    def test_check_refuses_an_export_whose_files_do_not_match_its_integrity_json(self):
+        data = self.complete()
+        self.assertEqual(self.errors(), [])
+        sealed = zipfile.ZipFile(self.root / BUNDLE).read("model/integrity.json").decode()
+        make_zip(self.root / BUNDLE, observable=OBSERVABLE_PY + "# edited after export\n", integrity=sealed)
+        data["inputs"]["model"]["sha256"] = sha(self.root / BUNDLE)
+        self.assertError(self.errors(data), "inputs.model", "generated_model/observable.py", "integrity.json")
 
 
 class DraftTests(OdeFixture):
@@ -256,6 +308,20 @@ class CheckTests(OdeFixture):
             zero(d)
             d["rules"][1]["method"] = "difference"
         self.assertEqual(self.mutated(difference), [])
+
+    def test_difference_contrast_needs_a_value_factor_and_ratio_does_not(self):
+        # R-A2
+        def difference(d):
+            d["rules"][1]["method"] = "difference"
+            d["values"]["readouts"] = {}
+        errors = self.mutated(difference)
+        self.assertError(errors, "R2", "M3", "a.u.", "values.readouts")
+        self.assertError(errors, "R2", "M4", "a.u.", "values.readouts")
+
+        def ratio(d):
+            d["values"]["readouts"] = {}
+            d["rules"][0]["method"] = "max_normalized"
+        self.assertEqual(self.mutated(ratio), [])
 
     def test_values_block_shape(self):
         self.assertError(self.mutated(lambda d: d.pop("values")), "keys")
@@ -493,6 +559,7 @@ class CheckTests(OdeFixture):
     def test_dose_response_readout_must_map_to_viability_observable(self):
         two = OBSERVABLE_PY.replace("'pR',\n", "'pR',\n            'pS',\n")
         make_zip(self.root / BUNDLE, observable=two)
+        capture(self.root, rev_dir=REV_DIR.replace("captures/c1", "captures/c2"))  # that revision, captured too
 
         def viability_ps(d):
             d["inputs"]["model"]["sha256"] = sha(self.root / BUNDLE)

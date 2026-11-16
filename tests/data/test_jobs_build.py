@@ -18,9 +18,9 @@ from unittest import mock
 from scripts import state
 
 try:
-    from tests.data.test_ode_mapping import BUNDLE, MAP, ROWS, SESSION, OdeFixture
+    from tests.data.test_ode_mapping import BUNDLE, MAP, PACKAGE, ROWS, SESSION, OdeFixture, capture, make_zip
 except ImportError:  # discovered with -s tests/data
-    from test_ode_mapping import BUNDLE, MAP, ROWS, SESSION, OdeFixture
+    from test_ode_mapping import BUNDLE, MAP, PACKAGE, ROWS, SESSION, OdeFixture, capture, make_zip
 
 from scripts.jobs import build, launch, settings
 from scripts.jobs.runtime import run
@@ -106,13 +106,9 @@ class SettingsTests(unittest.TestCase):
 class JobFixture(OdeFixture):
     def setUp(self):
         super().setUp()
-        import zipfile
-        with zipfile.ZipFile(self.root / BUNDLE, "a") as zf:
-            zf.writestr("model/__init__.py", "from .name2idx import C, V\n")
-            zf.writestr("model/ode.py", "def param_values():\n    return [1, 1, 1, 1]\n")
-            zf.writestr("model/name2idx/__init__.py", "from .parameters import C\nfrom .species import V\n")
-            zf.writestr("model/__pycache__/ode.cpython-312.pyc", b"junk")
-            zf.writestr("simulate_1/out.csv", "1,2\n")
+        make_zip(self.root / BUNDLE, extra={f"{PACKAGE}__pycache__/ode.cpython-312.pyc": b"junk",
+                                            "model/worker.log": "log\n", "simulate_1/out.csv": "1,2\n"})
+        capture(self.root)
         self.write_rows(ROWS + ["M7,pR,ctrl,60,min,,,9.9,a.u.,,,,fit,s1,Fig. 3"])
         data = self.complete()
         data["unmapped"] = [{"measurement_id": "M7", "reason": "readout outside the model scope"}]
@@ -227,8 +223,13 @@ class BuildTests(JobFixture):
             self.assertEqual(sha(files[rel]), digest, rel)
         for rel in ("run.py", "env/requirements.lock", "env/bootstrap.sh", "launch/local.sh", "launch/remote.sh",
                     "launch/slurm.sbatch", "README.txt", "calibration/compare.py", "calibration/spec.json",
-                    "model/name2idx/parameters.py", "model/observable.py"):
+                    "model/generated_model/name2idx/parameters.py", "model/generated_model/observable.py",
+                    "model/generated_model/ode.py"):
             self.assertIn(rel, files)
+        # only the Text2Model package of the revision folder: not its json/log/txt files
+        self.assertEqual({rel for rel in files if rel.startswith("model/")},
+                         {f"model/generated_model/{rel}" for rel in ("__init__.py", "ode.py", "observable.py",
+                          "name2idx/__init__.py", "name2idx/parameters.py", "name2idx/species.py")})
         self.assertEqual(files["calibration/compare.py"], (RUNTIME / "compare.py").read_bytes())
         self.assertEqual(files["run.py"], (RUNTIME / "run.py").read_bytes())
         self.assertEqual(files["env/requirements.lock"], (REPO / "setup" / "biomass-calibration.lock").read_bytes())
@@ -389,11 +390,14 @@ class RuntimeConcurrencyTests(unittest.TestCase):
         self.assertFalse(issubclass(run.SelftestTimeout, Exception))
 
 
-FAKE_MODEL = {
-    "model/__init__.py": "",
-    "model/ode.py": "def param_values():\n    return [1.0, 3.0]\n\n\ndef initial_values():\n    return [2.0]\n",
-    "model/name2idx/__init__.py": "class C:\n    NAMES = ['k1', 'k2']\n\n\nclass V:\n    NAMES = ['S']\n",
-    "model/observable.py": "class Observable:\n    def __init__(self):\n        self.obs_names = ['obs']\n",
+FAKE_MODEL = {  # the bundle keeps the export layout: model/generated_model/ (relative imports, like Text2Model)
+    "model/generated_model/__init__.py": "from .name2idx import C, V\n",
+    "model/generated_model/ode.py": ("from .name2idx import C, V\n\n\ndef param_values():\n    return [1.0, 3.0]\n"
+                                     "\n\ndef initial_values():\n    return [2.0]\n"),
+    "model/generated_model/name2idx/__init__.py": ("class C:\n    NAMES = ['k1', 'k2']\n\n\n"
+                                                   "class V:\n    NAMES = ['S']\n"),
+    "model/generated_model/observable.py": ("from .ode import param_values\n\n\nclass Observable:\n"
+                                            "    def __init__(self):\n        self.obs_names = ['obs']\n"),
 }
 
 
@@ -518,10 +522,11 @@ class RuntimeReviewTests(unittest.TestCase):
         (self.root / "calibration" / "spec.json").write_text(json.dumps(spec))
 
         def forget():
-            for name in [m for m in sys.modules if m == "model" or m.startswith("model.")]:
+            for name in [m for m in sys.modules if m.split(".")[0] in ("model", "generated_model")]:
                 del sys.modules[name]
-            if str(self.root) in sys.path:
-                sys.path.remove(str(self.root))
+            for entry in (str(self.root), str(self.root / "model")):
+                while entry in sys.path:
+                    sys.path.remove(entry)
         forget()
         self.addCleanup(forget)
 
@@ -536,6 +541,20 @@ class RuntimeReviewTests(unittest.TestCase):
             self.assertEqual(second.nominal(), {"k1": 1.0})
             self.assertEqual(run.Problem(self.root).nominal(), {"k1": 1.0})
         self.assertEqual(loads.call_count, 1)
+        # R-A1: the package is imported by its real name from the bundled folder
+        self.assertIn("generated_model.observable", sys.modules)
+        self.assertNotIn("model", sys.modules)
+
+    def test_runner_refuses_zero_or_several_packages(self):
+        self.fake_numpy()
+        self.bundle()
+        shutil.copytree(self.root / "model" / "generated_model", self.root / "model" / "second_model")
+        with self.assertRaisesRegex(ValueError, "several"):
+            run.Problem(self.root).nominal()
+        shutil.rmtree(self.root / "model")
+        run._LOADED.clear()
+        with self.assertRaisesRegex(ValueError, "no Text2Model package"):
+            run.Problem(self.root).nominal()
 
     # run.py:593, compare.py:197, compare.py:93
     def fake_problem(self, spec):
@@ -591,14 +610,25 @@ class RuntimeReviewTests(unittest.TestCase):
             self.assertEqual(sorted(run.validate(self.root, {"k1": 1.0}, "holdout")["predictions"]), ["h1", "h2"])
             self.assertEqual(sorted(run.validate(self.root, {"k1": 1.0}, "all")["predictions"]), ["h1", "h2", "m1"])
 
-    # launch.py:294 + run.py:525
-    def test_parallel_is_one_whenever_a_restart_uses_more_than_one_worker(self):
-        self.assertEqual(run.effective_parallel({"workers": 1, "parallel": 4}), 4)
-        self.assertEqual(run.effective_parallel({"workers": 1, "parallel": 4}, 2), 2)
-        for workers in (-1, 2, 8):
-            self.assertEqual(run.effective_parallel({"workers": workers, "parallel": 4}, 3), 1, workers)
+    # launch.py:294 + run.py:525 (controller ruling R-A3)
+    def test_parallel_rule(self):
+        rule = run.effective_parallel
+        self.assertEqual(rule({"workers": 1, "parallel": 4}), 4)                    # cores unknown, 1 worker
+        self.assertEqual(rule({"workers": 1, "parallel": 4}, 3), 3)
+        self.assertEqual(rule({"workers": 1, "parallel": 4}, max_cores=2), 2)       # min(parallel, cores // 1)
+        self.assertEqual(rule({"workers": 2, "parallel": 8}, max_cores=8), 4)       # min(8, 8 // 2)
+        self.assertEqual(rule({"workers": 4, "parallel": 8}, 3, max_cores=8), 2)
+        self.assertEqual(rule({"workers": 16, "parallel": 8}, max_cores=8), 1)      # at least 1
+        self.assertEqual(rule({"workers": 2, "parallel": 8}), 1)                    # cores unknown: K = 1
+        for cores in (None, 64):
+            self.assertEqual(rule({"workers": -1, "parallel": 4}, 3, max_cores=cores), 1)  # every core
         with mock.patch.dict(os.environ, {"SLURM_CPUS_PER_TASK": "1"}):  # -1 under a 1-cpu allocation is 1 worker
-            self.assertEqual(run.effective_parallel({"workers": -1, "parallel": 4}), 4)
+            self.assertEqual(rule({"workers": -1, "parallel": 4}), 4)
+        with mock.patch.object(run.os, "cpu_count", return_value=6), mock.patch("sys.stdout", io.StringIO()) as out:
+            self.job(workers=2, parallel=8)
+            with mock.patch.object(run, "ROOT", self.root):
+                self.assertEqual(run.main(["parallel", "--requested", "5"]), 0)
+        self.assertEqual(out.getvalue().strip(), "3")  # local: os.cpu_count() cores, min(5, 6 // 2)
 
     def test_selftest_runs_one_worker(self):
         self.job(workers=-1)

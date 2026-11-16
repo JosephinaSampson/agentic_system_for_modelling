@@ -8,10 +8,13 @@ fitted within which bounds, and why any measurement is left out.
 
 Schema (schema_version 1; every key below is required unless marked optional):
   kind: "ode_mapping"
-  inputs.model: {ode_session, revision, bundle, sha256}  bundle = .zip under runs/ode-modeler/<ode_session>/;
+  inputs.model: {ode_session, revision, bundle, sha256}  bundle = a BioMASS export .zip under
+                                                         runs/ode-modeler/<ode_session>/ (model/ = the revision
+                                                         folder, the Text2Model package in model/generated_model/);
                                                          revision = the captured revision (rev_<32 hex>) whose
                                                          integrity.json, under runs/ode-modeler/<ode_session>/, is
-                                                         byte-identical to the zip's model/integrity.json
+                                                         byte-identical to the zip's model/integrity.json, and the
+                                                         zip's model/ files must match that inventory
   inputs.measurements: {path, sha256}                    a .csv under runs/orchestrator/ (orchestrator route; each
                                                          row's `source` is a declared source id)
                     or {session, proposal, approval}     an approved data-analyst `ode_measurements` proposal
@@ -27,7 +30,8 @@ Schema (schema_version 1; every key below is required unless marked optional):
                                                          measurement value_unit -> multiplier: an `absolute`
                                                          time_course row becomes value x factor in the observable's
                                                          model_unit; a dose_response row becomes value x factor as a
-                                                         fraction (e.g. "%": 0.01, "fraction": 1). Never inferred: a
+                                                         fraction (e.g. "%": 0.01, "fraction": 1); a difference
+                                                         contrast is converted like `absolute`. Never inferred: a
                                                          row without its factor fails the check. Normalised rules
                                                          need no factor (units cancel), but every row of one
                                                          normalisation group must share one value_unit.
@@ -54,7 +58,9 @@ Schema (schema_version 1; every key below is required unless marked optional):
                      every dose row's time, converted, must equal viability.time (dose rows are evaluated there),
                      and every row's readout must map (readouts) to viability.observable
       endpoint_contrast: every row's condition is the test or the reference; every test row needs a reference
-                     row of the same readout and the same `use`; a ratio needs a non-zero reference mean; every
+                     row of the same readout and the same `use`; a ratio needs a non-zero reference mean (and is
+                     unitless); a difference needs a values.readouts factor (its target, value differences, is
+                     converted into the model unit like an absolute value); every
                      row's time, converted, must equal the rule time
       (times are compared with math.isclose, rel_tol 1e-9: 0.03 h x 60 = 1.7999999999999998 is 1.8 min)
   fit: [{name, kind: parameter|initial, lower, upper, unit, justification: {source, locator} | {text}}]
@@ -193,20 +199,21 @@ def captured_revisions(root: Path, session: str, integrity: bytes) -> set[str]:
 
 def bundle_revision(root: Path, session: str, bundle: Path, revision=None) -> str:
     """The captured revision the export zip was made from (its model/integrity.json); ValueError when there is
-    none, when `revision` is given and is not it, or when several captured revisions match and none is given."""
+    none, when `revision` is given and is not it, when several captured revisions match and none is given, or
+    when the zip's model/ files are not exactly the ones that integrity.json seals."""
     names = captured_revisions(root, session, model_zip.integrity(bundle))
     shown = ", ".join(sorted(names)) or "none"
     if revision is not None:
         if revision not in names:
             raise ValueError(f"revision {revision!r} is not the captured revision of the export zip (captured "
                              f"revisions under runs/ode-modeler/{session}/ with its model/integrity.json: {shown})")
-        return revision
-    if not names:
+    elif not names:
         raise ValueError(f"no captured revision under runs/ode-modeler/{session}/ has the export zip's "
                          "model/integrity.json; capture the revision the bundle was exported from first")
-    if len(names) > 1:
+    elif len(names) > 1:
         raise ValueError(f"several captured revisions match the export zip ({shown}); pass --revision")
-    return names.pop()
+    model_zip.verify_inventory(bundle)  # the sealed inventory binds the package files too
+    return revision if revision is not None else names.pop()
 
 
 # ---------------------------------------------------------------- draft
@@ -671,14 +678,18 @@ class _Checker:
         self.forbid_dose(label, rows)
         self.scored.update(row["measurement_id"] for row in rows)
         if method == "absolute":
-            for row in rows:
-                factors = self.value_factors.get(row["readout"], {})
-                if row["value_unit"] and row["value_unit"] not in factors:
-                    self.error(f"{label}: measurement {row['measurement_id']} value_unit {row['value_unit']!r} has no "
-                               f"positive factor in values.readouts[{row['readout']!r}].factors (absolute values are "
-                               "converted into the observable's model unit; units are never inferred)")
+            self.value_factor(label, rows, "absolute values")
         elif reference_ok:
             self.normalised(label, method, rows, item.get("reference"))
+
+    def value_factor(self, label: str, rows: list[dict], what: str) -> None:
+        """Every row needs a values.readouts factor for its value_unit (decision U: never inferred)."""
+        for row in rows:
+            factors = self.value_factors.get(row["readout"], {})
+            if row["value_unit"] and row["value_unit"] not in factors:
+                self.error(f"{label}: measurement {row['measurement_id']} value_unit {row['value_unit']!r} has no "
+                           f"positive factor in values.readouts[{row['readout']!r}].factors ({what} are converted "
+                           "into the observable's model unit; units are never inferred)")
 
     def converted(self, row: dict):
         """The row's time in the model unit, or None when its unit or time is reported elsewhere."""
@@ -777,6 +788,8 @@ class _Checker:
                     self.error(f"{label}: measurement {row['measurement_id']} condition {row['condition']!r} is "
                                f"neither the test {item['test']!r} nor the reference {item['reference']!r}")
             paired = [row for row in rows if row["condition"] in (item["test"], item["reference"])]
+            if method == "difference":  # a difference keeps the data unit; a ratio is unitless
+                self.value_factor(label, paired, "difference contrasts")
             for (readout, use), group in self._groups(paired, "readout", "use").items():
                 self.one_unit(label, group, f"readout {readout} (use={use})")
                 refs = [row["value"] for row in group if row["condition"] == item["reference"]]

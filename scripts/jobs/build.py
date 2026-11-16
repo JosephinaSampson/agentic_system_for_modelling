@@ -16,7 +16,8 @@ bundle.tar.gz holds one directory `<job-id>/` with:
   job.json                {"kind": "biomass-calibration", "job_id", "mapping": {path, sha256, approval},
                            "export_sha256", "settings", "framework_commit", "files": {relpath: sha256}}
                           (`files` lists every other bundle file; the same bytes are written beside the bundle)
-  model/...               the .py files of the export zip's `model/` package, byte for byte
+  model/<package>/...     the .py files of the export's Text2Model package, at their export path (BioMASS
+                          2.5.x: model/generated_model/...), byte for byte; nothing else of the revision folder
   calibration/compare.py  scripts/jobs/runtime/compare.py verbatim
   calibration/spec.json   compare.resolve(mapping, rows): only the measurement rows the rules use
   run.py, README.txt, env/requirements.lock, env/bootstrap.sh, launch/{local.sh,remote.sh,slurm.sbatch}
@@ -76,8 +77,7 @@ RUNTIME_FILES = {
 EXECUTABLE = {"run.py", "env/bootstrap.sh", "launch/local.sh", "launch/remote.sh", "launch/slurm.sbatch"}
 # framework paths whose uncommitted changes mark the framework commit "-dirty" (ruling S3-ode)
 DIRTY_PATHS = ("scripts/jobs", "scripts/ode", "setup/biomass-calibration.lock")
-REQUIRED_MODEL = ("model/__init__.py", "model/ode.py", "model/observable.py", "model/name2idx/__init__.py",
-                  "model/name2idx/parameters.py", "model/name2idx/species.py")
+REQUIRED_MODEL = model_zip.PACKAGE_FILES  # relative to the package folder (model_zip.find_package)
 
 
 def framework_commit(repo: Path = FRAMEWORK) -> str:
@@ -98,20 +98,25 @@ def _sha(data: bytes) -> str:
 
 
 def model_files(export: bytes) -> dict[str, bytes]:
-    """The .py files of the export's `model/` package; ValueError on any unsafe or missing member."""
+    """The .py files of the export's Text2Model package (model_zip.find_package), at their zip paths;
+    ValueError on any unsafe member, on zero or several packages, or on a missing package file."""
     files: dict[str, bytes] = {}
     try:
         zf = zipfile.ZipFile(io.BytesIO(export))
     except zipfile.BadZipFile as exc:
         raise ValueError(f"export is not a zip file: {exc}") from exc
     with zf:
-        for info in zf.infolist():
+        for info in zf.infolist():  # every member must be safe, even the ones not bundled
             name = info.filename
             parts = PurePosixPath(name).parts
             if (name.startswith("/") or "\\" in name or ".." in parts or "." in name.split("/")
                     or any(p == "" for p in name.rstrip("/").split("/"))):
                 raise ValueError(f"export zip member {name!r} has an unsafe path")
-            if not parts or parts[0] != "model" or info.is_dir():
+        package = model_zip.find_package(zf.namelist())
+        for info in zf.infolist():
+            name = info.filename
+            parts = PurePosixPath(name).parts
+            if not name.startswith(package) or info.is_dir():
                 continue
             if stat.S_ISLNK(info.external_attr >> 16):
                 raise ValueError(f"export zip member {name!r} is a symlink")
@@ -120,7 +125,7 @@ def model_files(export: bytes) -> dict[str, bytes]:
             if info.file_size > model_zip.MAX_MEMBER_BYTES:
                 raise ValueError(f"export zip member {name!r} is larger than {model_zip.MAX_MEMBER_BYTES} bytes")
             files[name] = zf.read(info)
-    missing = [name for name in REQUIRED_MODEL if name not in files]
+    missing = [package + rel for rel in REQUIRED_MODEL if package + rel not in files]
     if missing:
         raise ValueError(f"export zip lacks the model package files: {', '.join(missing)}")
     return files
