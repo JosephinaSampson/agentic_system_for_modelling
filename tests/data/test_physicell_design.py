@@ -43,7 +43,7 @@ class Base(unittest.TestCase):
             shutil.copyfile(state.ROOT / "templates" / name, self.root / name)
         self.handoff = self.make_handoff()
 
-    def make_handoff(self, session=MABOSS, nodes=("A", "B"), export=True):
+    def make_handoff(self, session=MABOSS, nodes=("A", "B"), export=True, cell_type="tumor"):
         folder = self.root / "runs/boolean-dynamics-modeler" / session
         folder.mkdir(parents=True)
         bnd = folder / "model.bnd"
@@ -55,7 +55,7 @@ class Base(unittest.TestCase):
                     "network": {"nodes": list(nodes), "output_nodes": list(nodes)},
                     "bnd_file": file_ref(self.root, bnd, "MaBoSS", session, "maboss_bnd"),
                     "cfg_file": file_ref(self.root, cfg, "MaBoSS", session, "maboss_cfg"),
-                    "lineage": [], "simulation": {}, "target": {"cell_type": "tumor"}}
+                    "lineage": [], "simulation": {}, "target": {"cell_type": cell_type}}
         path = folder / "handoff.json"
         path.write_text(json.dumps(manifest))
         ref = {"path": str(path.relative_to(self.root)), "sha256": state.digest(path)}
@@ -250,6 +250,68 @@ class CheckTests(Base):
         (self.root / REL).write_text('{"kind": "a", "kind": "b"}')
         with self.assertRaises(ValueError):
             pd.check(self.root, REL)
+
+
+class HandoffBindingTests(Base):
+    def test_target_cell_type_must_match_cell_definition(self):
+        data = self.complete()
+        ref = self.make_handoff("maboss-fibro", cell_type="fibroblast")
+        data["intracellular"][0]["maboss"] = {"handoff": ref["path"], "sha256": ref["sha256"]}
+        self.assertRefused(data, "re-export the MaBoSS handoff for that cell type")
+        data["cell_definitions"][2]["name"] = "fibroblast"
+        data["intracellular"][0]["cell_definition"] = "fibroblast"
+        data["coupling_plan"] = [{"cell_definition": "fibroblast", "behavior_group": "g", "route": "physiboss",
+                                  "notes": "n"}]
+        data["cell_definitions"][2].pop("variant_of")
+        self.assertEqual(self.errors(data), [])
+
+    def second_artifact(self, session=MABOSS):
+        """A second approved artifact (outputs A only) of the same MaBoSS session, review before approval."""
+        folder = self.root / "runs/boolean-dynamics-modeler" / session
+        manifest = json.loads((self.root / self.handoff["path"]).read_text())
+        manifest["network"] = {"nodes": ["A"], "output_nodes": ["A"]}
+        bnd = folder / "model2.bnd"
+        bnd.write_text("Node A { logic = A; }\n")
+        manifest["bnd_file"] = file_ref(self.root, bnd, "MaBoSS", session, "maboss_bnd")
+        path = folder / "handoff2.json"
+        path.write_text(json.dumps(manifest))
+        ref = {"path": str(path.relative_to(self.root)), "sha256": state.digest(path)}
+        review = json.loads(json.dumps(state.records((self.root / "DECISIONS.md").read_text())[0]))
+        review.update(id="review-2", artifact=ref)
+        state.update(self.root, "record", review)
+        approval = {"id": "approval-2", "kind": "stage_approval", "session_id": session, "stage": "boolean-dynamics",
+                    "downstream_stage": "multicellular", "outputs": ["A"], "approved_by": "researcher",
+                    "authorization": "approved", "artifact": ref}
+        state.update(self.root, "record", approval)
+        return ref
+
+    def test_named_artifact_of_session_with_two_approvals(self):
+        data = self.complete()
+        ref2 = self.second_artifact()
+        # the later review covers handoff2 only: the originally named handoff is refused, handoff2 is used
+        self.assertRefused(data, "different artifact")
+        data["intracellular"][0]["maboss"] = {"handoff": ref2["path"], "sha256": ref2["sha256"]}
+        self.assertEqual(self.errors(data), [])
+
+    def test_reexport_in_new_session_supersedes_named_handoff(self):
+        data = self.complete()
+        ref = self.make_handoff("maboss-v2")
+        state.update(self.root, "registry-supersede", {"session_id": MABOSS})
+        self.assertRefused(data, "active")
+        data["intracellular"][0]["maboss"] = {"handoff": ref["path"], "sha256": ref["sha256"]}
+        self.assertEqual(self.errors(data), [])
+
+
+class VariantTests(Base):
+    def test_variant_cycles_refused(self):
+        data = self.complete()
+        data["cell_definitions"].append({"name": "t3", "cycle_model": "Live", "description": "d",
+                                         "from": {"source": "s1", "locator": "Fig. 2"}, "variant_of": "tumor_hypoxic"})
+        data["cell_definitions"][2]["variant_of"] = "t3"
+        self.assertRefused(data, "cycle")
+        data = self.complete()
+        data["cell_definitions"][2]["variant_of"] = "tumor_hypoxic"
+        self.assertRefused(data, "variant_of")
 
 
 class ApprovalTests(Base):

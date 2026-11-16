@@ -13,7 +13,8 @@ Schema (schema_version 1; every key below is required):
   session: str                   the PhysiCell session; with a basis it must be the capture's session
   domain: null | {x_min,x_max,y_min,y_max,z_min,z_max,dx,dy,dz, units: "micron", max_time, time_units: "min"}
                                  required (all numbers) when basis is null; must be null with a basis
-  cycle_models: [str] | null     the server's cycle models (configurator get_available_cycle_models); required
+  cycle_models: [str] | null     the server's cycle models, copied VERBATIM from the configurator's
+                                 get_available_cycle_models discovery output (never typed from memory); required
                                  when basis is null (check refuses: record the server's cycle models first);
                                  with a basis the cycle models of the captured XML are also accepted
   cell_definitions: [{name, cycle_model, description, from, variant_of?}]
@@ -25,6 +26,8 @@ Schema (schema_version 1; every key below is required):
   sources: [{id, path, sha256}]  researcher files under inputs/
   data: [{id, session, proposal, approval}]  approved data-analyst proposals
   unmapped: [{item, reason}]
+  variant_of: a variant is created from its base cell definition; how it differs from the base is NOT part of
+  this design, it is the later stage-B patches. variant_of chains must not form a cycle.
   `from` is "basis" (the name exists in the capture and keeps its cycle model/units), a citation
   {source, locator} or {data, locator} of a declared source / data proposal.
 A "TODO" in any reason, description, units or note is refused. Units are never inferred: substrate units are
@@ -284,10 +287,20 @@ class _Checker:
                     self.error(f'{label}: {name} is already in the basis; use from "basis" (change it by a patch later)')
             elif item["from"] == BASIS_FROM:
                 pass  # already reported by cite
+        bases = {}
         for n, item in enumerate(items):
             variant = item.get("variant_of") if isinstance(item, dict) else None
             if variant is not None and (variant not in self.cells or variant == item.get("name")):
                 self.error(f"cell_definitions[{n}]: variant_of {variant!r} must name another declared cell definition")
+            elif variant is not None:
+                bases[item["name"]] = variant
+        for name in bases:
+            seen, node = [], name
+            while node in bases and node not in seen:
+                seen.append(node)
+                node = bases[node]
+            if node == name:
+                self.error(f"cell_definitions ({name}): variant_of forms a cycle: {' -> '.join(seen + [name])}")
 
     def substrate_section(self, items) -> None:
         if not isinstance(items, list) or not items:
@@ -323,7 +336,7 @@ class _Checker:
                 elif name in base:
                     self.error(f'{label}: {name} is already in the basis; use from "basis"')
 
-    def maboss_handoff(self, label: str, maboss) -> None:
+    def maboss_handoff(self, label: str, maboss, cell) -> None:
         if not isinstance(maboss, dict) or set(maboss) != {"handoff", "sha256"} \
                 or not all(_is_text(v) for v in maboss.values()):
             self.error(f"{label}: maboss must be exactly {{handoff, sha256}}")
@@ -348,6 +361,12 @@ class _Checker:
             result = gate.check(self.root, "multicellular", session, candidates[-1]["outputs"])
             if result["artifact"] != {"path": rel, "sha256": digest}:
                 raise ValueError("the gate's approved handoff is a different artifact (superseded re-export?)")
+            # The gate verified these exact bytes; import attaches the model to the manifest's target cell type.
+            manifest = json.loads((self.root / result["artifact"]["path"]).read_bytes())
+            target = (manifest.get("target") or {}).get("cell_type")
+            if target != cell:
+                raise ValueError(f"its target cell_type is {target!r} but it is bound to cell definition {cell!r}; "
+                                 f"re-export the MaBoSS handoff for that cell type")
         except (ValueError, OSError, KeyError, TypeError) as exc:
             self.error(f"{label}: MaBoSS handoff {rel} is not an exported, approved maboss-to-physicell "
                        f"handoff: {exc}")
@@ -368,7 +387,7 @@ class _Checker:
                 self.error(f"{label}: cell definition {cell} carries two MaBoSS models")
             else:
                 self.intracellular.add(cell)
-            self.maboss_handoff(label, item["maboss"])
+            self.maboss_handoff(label, item["maboss"], cell)
 
     def coupling_section(self, items) -> None:
         if not isinstance(items, list):
