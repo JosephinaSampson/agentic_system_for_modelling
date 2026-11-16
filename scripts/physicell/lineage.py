@@ -19,8 +19,7 @@ from scripts.data.common import reject_symlinks, strict_json
 from scripts.physicell import settings_xml as sx
 
 PREFIX = "DATA_INPUT "
-FORMS = {"design": {"design", "sha256", "approval", "record_session_id"},
-         "projection": {"projection", "sha256", "approval", "record_session_id"}}
+FORMS = gate.PHYSICELL_FORMS  # the multicellular-configurator DATA_INPUT forms the dispatch hook verifies
 REQUIRE = {"design": approvals.require_physicell_design_approval,
            "projection": approvals.require_physicell_projection_approval}
 

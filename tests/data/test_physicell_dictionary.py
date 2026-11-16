@@ -324,6 +324,12 @@ class DictionaryTests(Base):
         task.write_text("\n".join(lines) + "\n")
         self.assertTrue(lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest).endswith("task.txt"))
 
+    def test_lineage_forms_are_the_gate_forms(self):
+        # PR #17 review 4586112855: one definition of the DATA_INPUT forms, shared with the gate
+        from scripts import gate
+        from scripts.physicell import lineage
+        self.assertIs(lineage.FORMS, gate.PHYSICELL_FORMS)
+
     def test_lineage_session_must_be_an_identifier(self):
         # parked minor 1: the session is validated locally, never used as a path fragment
         from scripts.physicell import lineage
