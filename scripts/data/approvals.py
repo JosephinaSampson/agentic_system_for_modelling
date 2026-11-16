@@ -124,8 +124,9 @@ def require_proposal_approved(root: Path, record: dict, session_id: str, proposa
     return entry
 
 
-def _require_artifact_approval(root: Path, record_id: str, stage: str, rel: str, sha256: str) -> dict:
-    """The `stage` stage_approval of exactly this artifact path and sha256, unchanged on disk."""
+def _artifact_approval(root: Path, record_id: str, stage: str, rel: str, sha256: str) -> tuple[dict, bytes]:
+    """(the `stage` stage_approval of exactly this artifact path and sha256, the artifact's bytes): read once, and
+    those bytes hash to sha256 (unchanged on disk), so a caller can use them without reading the file again."""
     state = _state()
     root = Path(root)
     record = load_record(root, record_id)
@@ -135,9 +136,15 @@ def _require_artifact_approval(root: Path, record_id: str, stage: str, rel: str,
         raise ValueError(f"decision {record_id} artifact must be {rel}")
     if approved.get("sha256") != sha256:
         raise ValueError(f"decision {record_id} approves a different sha256 than {sha256}")
-    if state.digest(state.artifact(root, rel)) != sha256:
+    raw = state.artifact(root, rel).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != sha256:
         raise ValueError(f"{rel} changed since approval {record_id} (sha256 mismatch)")
-    return record
+    return record, raw
+
+
+def _require_artifact_approval(root: Path, record_id: str, stage: str, rel: str, sha256: str) -> dict:
+    """The `stage` stage_approval of exactly this artifact path and sha256, unchanged on disk."""
+    return _artifact_approval(root, record_id, stage, rel, sha256)[0]
 
 
 def require_mapping_approval(root: Path, record_id: str, mapping_rel: str, sha256: str) -> dict:
@@ -297,12 +304,9 @@ def require_proposal_job(root: Path, rel: str, proposal: dict) -> dict:
     return job
 
 
-def _read_bound_json(root: Path, rel: str, sha256: str) -> dict:
-    """The JSON object of `rel`, read once: its digest must equal `sha256` and the object comes from those bytes."""
+def _json_object(rel: str, raw: bytes) -> dict:
+    """The JSON object parsed (strict_json) from the bytes of `rel` already read and hashed by the caller."""
     from scripts.data.common import strict_json
-    raw = _state().artifact(Path(root), rel).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != sha256:
-        raise ValueError(f"{rel} changed during approval check (sha256 mismatch)")
     try:
         data = strict_json(raw)
     except (ValueError, RecursionError) as exc:
@@ -341,34 +345,24 @@ def _physicell_projection_facts(rel: str, data: dict) -> tuple[str | None, list]
     return session, ids
 
 
-def _require_physicell_approval(stage: str, facts_fn, what: tuple[str, str]):
-    """The require_<stage>_approval check: the `stage` stage_approval of exactly this path and sha256, validated
-    (state.validate_record), whose session_id is the file's session and whose outputs are exactly its names.
-    `facts_fn(rel, data)` gives (session, names) from the bytes read once (_read_bound_json); `what` words the
-    refusals: (how the file's session is named, what the outputs must equal)."""
+def _require_physicell_approval(root: Path, record_id: str, rel: str, sha256: str, stage: str, facts_fn,
+                                what: tuple[str, str]) -> dict:
+    """The `stage` stage_approval of exactly this path and sha256, validated (state.validate_record), whose
+    session_id is the file's session and whose outputs are exactly its names. The file is read and hashed once
+    (_artifact_approval): those bytes bind the approval and `facts_fn(rel, data)` takes (session, names) from them.
+    `what` words the refusals: (how the file's session is named, what the outputs must equal)."""
     session_words, outputs_words = what
-
-    def require(root: Path, record_id: str, rel: str, sha256: str) -> dict:
-        record = _require_artifact_approval(root, record_id, stage, rel, sha256)
-        _state().validate_record(Path(root), record)
-        session, names = facts_fn(rel, _read_bound_json(root, rel, sha256))
-        if record.get("session_id") != session:
-            raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
-                             f"but {session_words} {session!r}")
-        outputs = record.get("outputs")
-        if not isinstance(outputs, list) or len(outputs) != len(set(outputs)) or set(outputs) != set(names) \
-                or len(names) != len(set(names)):
-            raise ValueError(f"decision {record_id} outputs must equal {outputs_words}: {sorted(set(names))}")
-        return record
-    return require
-
-
-_require_physicell_design = _require_physicell_approval(
-    "physicell_design", _physicell_design_facts,
-    ("the design's session anchor is", "the cell definition and substrate names of the design"))
-_require_physicell_projection = _require_physicell_approval(
-    "physicell_projection", _physicell_projection_facts,
-    ("the projection's capture is of PhysiCell session", "the entry ids of the projection"))
+    record, raw = _artifact_approval(root, record_id, stage, rel, sha256)
+    _state().validate_record(Path(root), record)
+    session, names = facts_fn(rel, _json_object(rel, raw))
+    if record.get("session_id") != session:
+        raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
+                         f"but {session_words} {session!r}")
+    outputs = record.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) != len(set(outputs)) or set(outputs) != set(names) \
+            or len(names) != len(set(names)):
+        raise ValueError(f"decision {record_id} outputs must equal {outputs_words}: {sorted(set(names))}")
+    return record
 
 
 def require_physicell_design_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
@@ -379,7 +373,9 @@ def require_physicell_design_approval(root: Path, record_id: str, rel: str, sha2
     definition and substrate names. This binds the approval to the bytes; run
     `scripts/physicell/physicell_design.py check` and have it pass before the researcher approves.
     """
-    return _require_physicell_design(root, record_id, rel, sha256)
+    return _require_physicell_approval(
+        root, record_id, rel, sha256, "physicell_design", _physicell_design_facts,
+        ("the design's session anchor is", "the cell definition and substrate names of the design"))
 
 
 def require_physicell_projection_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
@@ -389,4 +385,6 @@ def require_physicell_projection_approval(root: Path, record_id: str, rel: str, 
     and outputs are exactly the entry ids. This binds the approval to the bytes; run
     `scripts/physicell/physicell_projection.py check` and have it pass before the researcher approves.
     """
-    return _require_physicell_projection(root, record_id, rel, sha256)
+    return _require_physicell_approval(
+        root, record_id, rel, sha256, "physicell_projection", _physicell_projection_facts,
+        ("the projection's capture is of PhysiCell session", "the entry ids of the projection"))

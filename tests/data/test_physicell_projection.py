@@ -270,6 +270,34 @@ class PhysiCellApprovalMessageTests(ProjectionBase):
                                                 r"projection: \['in1', 'out1', 'rule1', 'set1'\]$"):
             approvals.require_physicell_projection_approval(self.root, "p-outputs", PROJ, sha(path))
 
+    def test_approved_file_read_once_per_check(self):
+        # PR #17 review 4587429309: the approved file is read and hashed once; the same bytes bind the approval and
+        # give the facts
+        path = self.write_projection(self.projection())
+        self.approve("proj-1", "physicell_projection", PROJ, STAGE_A, ["in1", "out1", "rule1", "set1"])
+        digest = sha(path)
+        reads, validating = [], []
+        original, validate = Path.read_bytes, state.validate_record
+
+        def counting(where):
+            if where.name in ("physicell_design.json", "physicell_projection.json") and not validating:
+                reads.append(where.name)
+            return original(where)
+
+        def validate_record(*args):  # state.validate_record re-hashes every record's artifact itself (not counted)
+            validating.append(1)
+            try:
+                return validate(*args)
+            finally:
+                validating.pop()
+        with mock.patch.object(Path, "read_bytes", counting), \
+                mock.patch.object(state, "validate_record", validate_record):
+            approvals.require_physicell_design_approval(self.root, "design-1", REL, self.design_sha)
+            approvals.require_physicell_projection_approval(self.root, "proj-1", PROJ, digest)
+        self.assertEqual(reads, ["physicell_design.json", "physicell_projection.json"])
+        self.assertFalse(hasattr(approvals, "_require_physicell_design"))
+        self.assertFalse(hasattr(approvals, "_require_physicell_projection"))
+
 
 class NameTests(ProjectionBase):
     def test_unknown_signal_lists_close_matches(self):
