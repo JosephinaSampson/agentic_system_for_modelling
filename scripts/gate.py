@@ -622,7 +622,8 @@ def _check_physicell_input(root, value, first_line):
     (physicell_projection.load_and_check: capture, dictionary, the design and its approval), its
     physicell_projection approval binds path and sha256, and record_session_id is the approval's session_id and
     the projection's capture session; stage B replays the projection's design, so its MaBoSS handoffs are bound to the
-    STAGE_GATE upstream exactly as for the design form (_check_design_upstream on the re-checked design).
+    STAGE_GATE upstream exactly as for the design form (_check_design_upstream on the design the projection check
+    re-checked, physicell_projection.load_and_check_with_design; it is not read again).
     record_session_id is a lineage anchor, never a live session: the configurator starts a new PhysiCell session,
     builds the design (loading a design's basis XML, if any; for a projection, replaying the projection's design)
     and never passes record_session_id to a tool.
@@ -641,14 +642,17 @@ def _check_physicell_input(root, value, first_line):
                          "session anchor; the configurator always starts a new session)")
     if not SHA256.fullmatch(digest):
         raise ValueError(f"DATA_INPUT {form} needs a lowercase hex sha256")
+    # Check exactly the approved bytes: one read gives both the parsed file and its hash. The projection check also
+    # yields the design it re-checked (its pinned path and sha256), which stage B replays.
     if form == "design":
-        from scripts.physicell import physicell_design as module
+        from scripts.physicell import physicell_design
         require = approvals.require_physicell_design_approval
+        data, actual, errors = physicell_design.load_and_check(root, rel)
+        design = data
     else:
-        from scripts.physicell import physicell_projection as module
+        from scripts.physicell import physicell_projection
         require = approvals.require_physicell_projection_approval
-    # Check exactly the approved bytes: one read gives both the parsed file and its hash.
-    data, actual, errors = module.load_and_check(root, rel)
+        data, actual, errors, design = physicell_projection.load_and_check_with_design(root, rel)
     if actual != digest:
         raise ValueError(f"{rel} has sha256 {actual[:12]}, not the DATA_INPUT sha256 {digest[:12]} "
                          f"(changed since approval {approval_id}?)")
@@ -658,21 +662,14 @@ def _check_physicell_input(root, value, first_line):
     if session != record.get("session_id"):
         raise ValueError(f"DATA_INPUT record_session_id {session!r} must be the session_id "
                          f"{record.get('session_id')} of approval {approval_id}")
-    if form == "design":
-        gate_result = _check_design_upstream(root, data, first_line)
-    else:
+    if form == "projection":
         capture = PurePosixPath(data["capture"]["path"]).parts[2]
         if session != capture:
             raise ValueError(f"DATA_INPUT record_session_id {session!r} must be the session {capture} of the "
                              f"projection's capture {data['capture']['path']}")
-        # Stage B replays the projection's design, importing its MaBoSS handoffs: they must be the STAGE_GATE
-        # upstream's, exactly as for the design form. The design is the one the projection check just re-checked
-        # (same path, same sha256).
-        from scripts.physicell import physicell_design
-        design, design_sha = physicell_design._load(root, data["design"]["path"])
-        if design_sha != data["design"]["sha256"]:
-            raise ValueError(f"design {data['design']['path']} changed since the projection check")
-        gate_result = _check_design_upstream(root, design, first_line)
+    # Stage B replays the projection's design, importing its MaBoSS handoffs: they must be the STAGE_GATE upstream's,
+    # exactly as for the design form. For a projection the design is the one its check just re-checked (no new read).
+    gate_result = _check_design_upstream(root, design, first_line)
     return {form: rel, "sha256": digest, "approval_id": approval_id, "physicell_session": session}, set(), gate_result
 
 

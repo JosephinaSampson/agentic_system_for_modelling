@@ -1372,6 +1372,19 @@ class PhysiCellDataInputTests(ProjectionBase):
         self.refused(self.task(self.projection_line(), gate_line=self.standalone_gate()), "standalone.*MaBoSS")
         self.accepted(self.task(self.projection_line()))
 
+    def test_projection_dispatch_reuses_the_checked_design(self):
+        # PR #17 review 4587428496: the projection branch binds the design its projection check loaded and checked;
+        # the design is loaded once per projection dispatch (by that check), never again by the gate
+        from scripts.physicell import physicell_design, physicell_projection
+        hook = load_hook()
+        with mock.patch.object(physicell_design, "_load", wraps=physicell_design._load) as loads:
+            status, err = run_hook(hook, self.root, "multicellular-configurator", self.task(self.projection_line()))
+        self.assertEqual(status, 0, err)
+        self.assertEqual([c.args[1] for c in loads.call_args_list], [DESIGN_REL])
+        data, digest, errors, design = physicell_projection.load_and_check_with_design(self.root, MC_PROJ)
+        self.assertEqual((errors, design), ([], json.loads((self.root / DESIGN_REL).read_text())))
+        self.assertEqual(physicell_projection.load_and_check(self.root, MC_PROJ), (data, digest, errors))
+
     def errors_at(self, rel):
         from scripts.physicell import physicell_design
         return physicell_design.check(self.root, rel)

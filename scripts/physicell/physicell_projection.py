@@ -221,6 +221,7 @@ class _Checker(pd.Citations):
         self.xml = None
         self.parents: dict = {}
         self.design_ref: dict | None = None
+        self.design: dict | None = None        # the design design_section loaded and checked (None if it failed)
         self.design_cells: list | None = None
         self.maboss: dict | None = None        # cell -> {"inputs": [...], "outputs": [...]}
         self.signals: list | None = None
@@ -292,6 +293,7 @@ class _Checker(pd.Citations):
         except (ValueError, OSError) as exc:
             self.error(f"design approval {ref['approval']}: {exc}")
             return
+        self.design = design  # exactly the bytes the projection pins (digest == ref["sha256"]), checked and approved
         if self.session is not None:
             try:  # the design's session is a lineage anchor: the capture's session must have been built from it
                 lineage.dispatched_with(self.root, self.session, "design", ref["path"], digest)
@@ -640,6 +642,13 @@ def _load(root: Path, rel: str) -> tuple[dict, str]:
 
 def load_and_check(root: Path, rel: str) -> tuple[dict, str, list[str]]:
     """(projection, sha256 of exactly those bytes, every problem); ValueError if it cannot be read at all."""
+    return load_and_check_with_design(root, rel)[:3]
+
+
+def load_and_check_with_design(root: Path, rel: str) -> tuple[dict, str, list[str], dict | None]:
+    """load_and_check, plus the projection's design as its check loaded, re-checked and approval-bound it (the
+    bytes of design.path whose sha256 is design.sha256); None when the design section failed (then a problem is
+    listed). Callers needing the design use it instead of reading the design again."""
     root = Path(root)
     data, digest = _load(root, rel)
     checker = _Checker(root)
@@ -656,7 +665,7 @@ def load_and_check(root: Path, rel: str) -> tuple[dict, str, list[str]]:
         checker.unmapped_section(data["unmapped"])
         checker.sources.uncited()
         checker.uncited_data()
-    return data, digest, checker.errors
+    return data, digest, checker.errors, checker.design
 
 
 def check(root: Path, rel: str) -> list[str]:
