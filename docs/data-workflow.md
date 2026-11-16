@@ -362,6 +362,60 @@ For every gated specialist it refuses any path under a calibration job folder (`
 Hold-out scoring uses the bundled model with the accepted values, so it does not depend on when the
 ode-modeler applies them: run it once, after the calibration approval.
 
+## Data to PhysiCell
+
+Approved data reach the PhysiCell settings in two stages, each researcher-approved and applied by the
+multicellular-configurator from a `DATA_INPUT` line (line 2, after `STAGE_GATE`). Briefs never carry the values.
+
+| Step | Command or dispatch | Output |
+|---|---|---|
+| design | `python3 scripts/physicell/physicell_design.py draft --purpose P (--basis CAPTURE \| --session S) [--source ID:inputs/FILE ...] [--data ID:SESSION:PROPOSAL:APPROVAL ...]`, then `check runs/orchestrator/P/physicell_design.json` | the stage-A design: cell definitions and variants, substrates with units, the MaBoSS handoff of each cell type, coupling plan |
+| design approval | `state.py record`: `stage_approval`, stage `physicell_design`, `artifact` the design path and sha256, `session_id` the basis capture's session (or the declared session), `outputs` the cell definition and substrate names | |
+| build | configurator, line 2 `DATA_INPUT {"design": "runs/orchestrator/P/physicell_design.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<the approval's session>"}` | a new PhysiCell session builds the design, lists signals and behaviors, exports |
+| capture | `scripts/capture/recover.py`, `scripts/capture/record_physicell_config.py` | `runs/multicellular-configurator/<session>/configs/<capture>` |
+| dictionary | `python3 scripts/physicell/capture_dictionary.py runs/multicellular-configurator/<session>/invocation/<id>/tool_calls.json CAPTURE runs/orchestrator/P/physicell_design.json` | `runs/orchestrator/P/physicell_dictionary.json` (write-new) |
+| projection | `python3 scripts/physicell/physicell_projection.py draft --purpose P --capture CAPTURE --design DESIGN --design-approval RECORD_ID [--dictionary FILE] [--source ...] [--data ...]`, then `check runs/orchestrator/P/physicell_projection.json` | entries: `physiboss_input`, `physiboss_output`, `rule`, `setting` |
+| projection approval | `stage_approval`, stage `physicell_projection`, `artifact` the projection path and sha256, `session_id` the capture's session, `outputs` the entry ids | |
+| apply | configurator, line 2 `DATA_INPUT {"projection": "runs/orchestrator/P/physicell_projection.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<the capture's session>"}` | a new session replays the projection's design exactly, applies only the entries, exports the rules CSV before the XML |
+| capture | `recover.py`, `record_physicell_config.py` | the stage-B capture |
+| verify | `python3 scripts/physicell/verify_export.py runs/orchestrator/P/physicell_projection.json CAPTURE` | `runs/orchestrator/P/physicell_verification.<session>.<capture>.json`; exit 0 passed, 1 failed, 2 refused |
+| build (optional) | `physicell-build` skill: `python3 scripts/physicell/build.py --template template\|template_BM [--version 1.14.2] [--dest DIR] [--verification runs/orchestrator/P/physicell_verification.<session>.<capture>.json] [--jobs N]` | report `runs/orchestrator/physicell-build/<UTC>-<template>/report.{json,md}`; the run command is printed, never executed |
+
+**Values.** A quantity is `{value, value_unit, transform, factor, target_unit?}`. The model value is `value*factor`
+(`identity`, `unit_factor`), `factor/value` (`reciprocal`) or `factor*ln(2)/value` (`ln2_over`). Units are never
+inferred: `target_unit` is required when the factor is not 1, for `unit_factor` and for compound units, and a
+setting's converted unit must equal the XML `units` attribute exactly. Names must match the captured dictionary
+and, for PhysiBoSS links, the cell definition's MaBoSS handoff. One writer per (cell definition, behavior): one rule,
+or one output link, never both, counting what the capture already has.
+
+**Gate.** The hook re-checks the file on exactly the approved bytes and the approval. Design form: every MaBoSS
+handoff of the design comes from the `STAGE_GATE` upstream MaBoSS session; with a `standalone_decision_id` the
+design has none. Projection form: `record_session_id` = the approval's session = the projection's capture session,
+and the projection's design and its approval are re-checked. The design, projection and dictionary may be named
+only on the `DATA_INPUT` line.
+
+**Verification.** `verify_export.py` re-checks the projection, requires the stage-B capture to come from a new
+session whose invocation record (`runs/multicellular-configurator/<session>/invocation/*/task.txt`) has this
+projection's `DATA_INPUT` line as its line 2, and compares the stage-A and stage-B captures: only the entries'
+changes are allowed (setting values, the added links, the rules CSV rows and its enabled ruleset). Any other
+difference fails. A failed or retried attempt keeps its own file.
+
+**Limitations.** Server 2.5.2 cannot reload a captured configuration's input files into a new session, so a
+design basis may have no input files (rules CSV, MaBoSS models, initial cells) and a projection's capture no
+enabled rules; a revised projection is re-applied from the stage-A capture. A design takes its MaBoSS models from
+one MaBoSS session (the `STAGE_GATE` upstream).
+
+**Registry and tags.** Each configurator run is a new session, registered with `Derived from` =
+`record_session_id`. Applied values are tagged `data-derived`, citing the projection path, short sha256 and
+approval id.
+
+**Smoke test.** `python3 tests/integration/physicell_smoke.py` runs the chain in a temporary repo copy under
+`~/.cache`: fixture design, dictionary, projection and approvals, the real dispatch hook, `verify_export.py`, and,
+when `uv` can run `mcp-biomodelling-servers==2.5.2`, the real MaBoSS and PhysiCell servers in-process (stage A,
+stage B by replay, verification, tampered captures failing). It also downloads and compiles PhysiCell
+(`build.py --template template`) and copies the verified settings into it; that part prints `SKIP` without
+network or an OpenMP compiler, or with `PHYSICELL_SMOKE_SKIP_BUILD=1`.
+
 ## Provenance checks
 
 - `sources.jsonl` paths are project-root-relative (`data-cache/sha256/<hex>`,

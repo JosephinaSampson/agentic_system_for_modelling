@@ -251,3 +251,18 @@ refused, except the ode-modeler's `DATA_INPUT` proposal and its own job folder. 
 uses the bundled model with only the accepted values (the rest keep the model defaults), writes nothing when a
 hold-out prediction fails, and is independent of when the ode-modeler applies them. See
 docs/ode-workflow.md.
+
+Data reach PhysiCell in two researcher-approved stages, never through brief prose. Stage A:
+`scripts/physicell/physicell_design.py draft|check` (cell definitions, substrates, the MaBoSS handoff of each cell
+type, coupling plan; `physicell_design` approval) -> multicellular-configurator with line 2
+`DATA_INPUT {"design": "...physicell_design.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<PhysiCell session>"}`
+(its handoffs come from the `STAGE_GATE` MaBoSS session; a standalone gate means none) -> `recover.py`, capture ->
+`scripts/physicell/capture_dictionary.py` (signal/behavior lists from the invocation record). Stage B:
+`physicell_projection.py draft|check` (`physicell_projection` approval: `session_id` = the capture's session,
+`outputs` = the entry ids) -> configurator with line 2
+`DATA_INPUT {"projection": "...physicell_projection.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<capture session>"}`
+(a new session replays the design, then applies only the entries) -> `recover.py`, capture ->
+`scripts/physicell/verify_export.py <projection> <capture>`; use only a passed verification, optionally with the
+`physicell-build` skill. Limitations: a design basis may have no input files (rules, MaBoSS, initial cells), since
+the server cannot reload them; a design takes its MaBoSS models from one MaBoSS session. Applied values are tagged
+`data-derived` (projection path, short sha256, approval id). See docs/data-workflow.md.

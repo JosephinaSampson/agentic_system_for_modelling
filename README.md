@@ -16,7 +16,8 @@ state lives in version-controlled files, not in chat history.
 
 Release **1.0.3**, tested with `mcp-biomodelling-servers` **2.5.2** (NeKo
 `nekomata` 1.10.3, PhysiCell Settings 0.6.3, bundled cmaboss, BioMASS 0.14). See
-[`CHANGELOG.md`](CHANGELOG.md) for changes and known limitations.
+[`CHANGELOG.md`](CHANGELOG.md) for changes and known limitations, and
+[`ROADMAP.md`](ROADMAP.md) for planned releases.
 
 ## What it can help you do
 

@@ -21,10 +21,12 @@ reordered as work progresses. Released changes are listed in
   - substrates;
   - which cell type carries which MaBoSS model;
   - how signals drive behaviors (PhysiBoSS links or Hill-function rules).
-- Data are then projected into the PhysiCell settings and checked against the live
+- You then approve the data projection: each value is checked against the live
   signal/behavior dictionary and the settings file's own units.
-- A build skill compiles a PhysiCell project (plain or PhysiBoSS template) ready to run
-  your approved settings.
+- The exported configuration is verified against the approved projection: only the
+  approved values may change.
+- A build skill compiles a PhysiCell project (plain or PhysiBoSS template) and copies
+  in your verified settings, ready to run.
 
 ## 1.3.0: spatial data as initial conditions
 
@@ -45,3 +47,6 @@ reordered as work progresses. Released changes are listed in
 - Offline installation of calibration environments.
 - OS-level sandboxing of specialists.
 - Direct ODE–PhysiCell coupling through libRoadRunner, once BioMASS can export SBML.
+- Start from an existing PhysiCell project with input files (rules, MaBoSS models,
+  initial cells), once the server can reload them.
+- Combine MaBoSS models from several MaBoSS sessions in one PhysiCell design.
