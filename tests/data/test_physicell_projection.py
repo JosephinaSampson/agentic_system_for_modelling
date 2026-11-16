@@ -36,10 +36,11 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def built_capture(root, session, capture_id, rules=False):
+def built_capture(root, session, capture_id, rules=False, edit=None):
     """Record a capture of the fixture configuration whose tumor carries the PhysiBoSS fixture fragment (the
     configuration the configurator built from the design): captured input link pressure -> B, output A -> apoptosis.
-    Its rules ruleset is removed unless `rules` (ruling T5-d: server 2.5.2 cannot reload a captured rules CSV)."""
+    Its rules ruleset is removed unless `rules` (ruling T5-d: server 2.5.2 cannot reload a captured rules CSV).
+    `edit(xml_root)`, if given, changes the XML before it is recorded."""
     source = root.parent / f"source-{session}-{capture_id}"
     (source / "config").mkdir(parents=True)
     tree = ET.parse(FIXTURES / "PhysiCell_settings.xml")
@@ -47,6 +48,8 @@ def built_capture(root, session, capture_id, rules=False):
         tree.getroot().remove(tree.getroot().find("cell_rules"))
     tumor = tree.getroot().find("cell_definitions/cell_definition[@name='tumor']/phenotype")
     tumor.append(ET.parse(FIXTURES / "intracellular_tumor.xml").getroot())
+    if edit is not None:
+        edit(tree.getroot())
     tree.write(source / "config/PhysiCell_settings.xml", encoding="utf-8", xml_declaration=True)
     (source / "config/cell_rules.csv").write_bytes((FIXTURES / "cell_rules.csv").read_bytes())
     (source / "config/tumor.bnd").write_text("Node A { logic = A; }\nNode B { logic = B; }\nNode C { logic = C; }\n")
@@ -63,11 +66,14 @@ class ProjectionBase(Base):
     def make_handoff(self, session=MABOSS, nodes=("A", "B", "C"), outputs=("A", "B"), **kw):
         return super().make_handoff(session, nodes=nodes, outputs=outputs, **kw)
 
+    def edit_capture(self, xml_root):
+        """Hook: change the built capture's XML before it is recorded (default: unchanged)."""
+
     def setUp(self):
         super().setUp()
         self.design = self.complete()  # its basis is the fixture capture cap-1
         self.basis = self.capture
-        self.capture = built_capture(self.root, SESSION, "cap-2")
+        self.capture = built_capture(self.root, SESSION, "cap-2", edit=self.edit_capture)
         self.write(self.design)
         self.design_sha = sha(self.root / REL)
         state.update(self.root, "record", {
