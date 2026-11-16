@@ -264,7 +264,7 @@ session, else `<p>`) -> multicellular-configurator with line 2
 invocation record) -> validate-stage on the stage-A capture before the projection is drafted against it. Every run is a new
 session: the stage-A capture is bound to the design by that DATA_INPUT line in its recorded task.txt. Stage B:
 `physicell_projection.py draft|check` (`physicell_projection` approval: `session_id` = the capture's session,
-`outputs` = the entry ids) -> configurator with line 2
+`outputs` = the entry ids) -> configurator with `STAGE_GATE` naming the design's MaBoSS upstream and line 2
 `DATA_INPUT {"projection": "...physicell_projection.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<capture session>"}`
 (a new session replays the design, then applies only the entries) -> `recover.py`, capture ->
 `scripts/physicell/verify_export.py <projection> <capture>` -> validate-stage on the verified capture before build

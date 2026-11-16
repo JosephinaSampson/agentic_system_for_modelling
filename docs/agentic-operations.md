@@ -205,7 +205,7 @@ multicellular-configurator only through a `DATA_INPUT` line, checked by
   `session_id` (for a design, its anchor: the basis capture's session, else `<p>`). Design: every MaBoSS handoff it lists lives under
   `runs/boolean-dynamics-modeler/<STAGE_GATE upstream_session_id>/`; with a `standalone_decision_id` it lists
   none. Projection: `record_session_id` is also its capture's session, and its design and design approval are
-  re-checked. `STAGE_GATE` stays the plain multicellular check. `record_session_id` is a lineage anchor: the
+  re-checked, and its `STAGE_GATE` must name the design's MaBoSS upstream (as for a design). `record_session_id` is a lineage anchor: the
   configurator starts a new session.
 
 NeKo data approvals are cumulative: a proposal is approved if any valid `data` approval of the
@@ -299,8 +299,9 @@ python3 scripts/physicell/build.py --template template|template_BM [--version 1.
 `session_id` = the design's anchor (the basis capture's session, else `P`), `outputs` = the cell definition and
 substrate names; projection approval `session_id` = the capture's session, `outputs` = the entry ids. The
 dictionary is written once beside the design, from list calls made after the last structure-changing call, and
-only for a capture whose session has the design's `DATA_INPUT` line as line 2 of an invocation `task.txt`
-(`scripts/physicell/lineage.py`; the projection check requires the same).
+only for a capture whose session has an invocation `task.txt` with a well-formed `STAGE_GATE` line 1 and the
+design's `DATA_INPUT` line as line 2, naming a real approval of that design whose `session_id` equals its
+`record_session_id` (`scripts/physicell/lineage.py`; the projection check and `verify_export.py` require the same).
 `verify_export.py` writes `runs/orchestrator/P/physicell_verification.<session>.<capture>.json` (one file per
 attempt) and requires an invocation `task.txt` of the stage-B session whose line 2 is this projection's
 `DATA_INPUT` line. `build.py` copies settings only from a passed verification whose capture is unchanged and
