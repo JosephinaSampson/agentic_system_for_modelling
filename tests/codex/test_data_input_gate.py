@@ -1523,6 +1523,10 @@ class HookRoleTests(unittest.TestCase):
     def test_hook_does_not_import_check_job_mentions(self):
         self.assertNotIn("check_job_mentions", HOOK.read_text())
 
+    def test_check_job_mentions_is_gone(self):
+        # PR #17 review 4587429015: no caller remained; check_data_input runs the job-file rule for every gated role
+        self.assertFalse(hasattr(gate, "check_job_mentions"))
+
 
 if __name__ == "__main__":
     unittest.main()

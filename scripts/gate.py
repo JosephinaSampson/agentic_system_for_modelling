@@ -885,12 +885,12 @@ def _job_area(root, path):
         or parts[:2] == ["inputs", "calibration-results"]
 
 
-def _check_mentions(root, text, artifact_rel, model_inputs=True):
+def _check_mentions(root, text, artifact_rel):
     """One scan of the (normalised) brief: every runs/orchestrator mention is resolved once (shared cache).
 
     Job rule (every gated specialist): no calibration job file or returned result, except the ode-modeler's
     verified DATA_INPUT proposal (`artifact_rel` when it is a calibration_proposal.json) and its own job folder.
-    Model-input rule (`model_inputs`, the DATA_INPUT roles): no seeds, mapping, ode_mapping, calibration
+    Model-input rule (every gated specialist: all take DATA_INPUT): no seeds, mapping, ode_mapping, calibration
     proposal or PhysiCell design, projection or dictionary file other than `artifact_rel`
     (see _check_orchestrator_mentions).
     """
@@ -916,20 +916,7 @@ def _check_mentions(root, text, artifact_rel, model_inputs=True):
             if path not in allowed and _job_area(root, path):
                 raise ValueError(f"brief mentions {mention!r}, which is inside a calibration job folder or the "
                                  f"returned results ({path.relative_to(root).as_posix()}); {JOB_RULE}")
-    if model_inputs:
-        _check_orchestrator_mentions(root, mentions, artifact_rel)
-
-
-def check_job_mentions(root, specialist, task):
-    """The job-file rule for a gated specialist without a DATA_INPUT line (the dispatch hook runs it for those;
-    check_data_input runs the same rule, once, for the DATA_INPUT roles after verifying their line)."""
-    if specialist in DATA_INPUT_LINE:
-        raise ValueError(f"{specialist} takes DATA_INPUT: its job-file rule runs inside check_data_input")
-    if task is None:
-        task = ""
-    if not isinstance(task, str):
-        raise ValueError("dispatch prompt must be a string")
-    _check_mentions(root, _detection_text(task), None, model_inputs=False)
+    _check_orchestrator_mentions(root, mentions, artifact_rel)
 
 
 def _quote(line, match):
