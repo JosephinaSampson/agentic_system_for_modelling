@@ -471,7 +471,10 @@ class Smoke:
         venv = self.scratch / "modelling-venv"
         python = venv / "bin" / "python"
         for argv in (["uv", "venv", "-q", str(venv)], ["uv", "pip", "install", "-q", "--python", str(python), SERVERS]):
-            done = subprocess.run(argv, cwd=probe, env=self.env, text=True, capture_output=True, timeout=900)
+            try:
+                done = subprocess.run(argv, cwd=probe, env=self.env, text=True, capture_output=True, timeout=900)
+            except (OSError, subprocess.SubprocessError) as exc:  # e.g. TimeoutExpired: SKIP this step, no crash
+                return f"`{' '.join(argv[:3])}` failed: {type(exc).__name__}: {exc}"
             if done.returncode != 0:
                 return f"`{' '.join(argv[:3])}` failed: " + (done.stderr.strip().splitlines() or ["?"])[-1]
         write_json(self.root / ".setup" / "dispatcher.local.json", {"python_executable": str(python)})
@@ -641,7 +644,10 @@ class Smoke:
     def settings(self) -> None:
         if self.project is None:
             return skip("settings copy (step 5)", "step 1 (build) was skipped")
-        rel, data, _ = physicell_build._verification(self.root, self.fixture_verification)
+        rel, data, _ = physicell_build._verification(self.root, self.fixture_verification)  # recomputes (T9-d)
+        # build.py refuses these MaBoSS-bearing settings with --template template (review M5); the copy mechanism is
+        # exercised directly on the built template project here
+        assert physicell_build._physiboss(self.root, data["after"]), "the fixture capture carries a MaBoSS model"
         template_xml = (self.project / "config" / sx.XML_NAME).read_bytes()
         copied = physicell_build.copy_settings(self.root, self.project, rel, data)
         package = self.root / Path(data["after"]["xml_path"]).parent
@@ -649,8 +655,9 @@ class Smoke:
             assert (self.project / "config" / item["name"]).read_bytes() == (package / item["name"]).read_bytes()
         backup = self.project / "config" / f"{sx.XML_NAME}.template-backup"
         assert backup.read_bytes() == template_xml, "the template settings must be kept as a backup"
-        step(f"verified capture copied into the built project's config/ ({', '.join(c['name'] for c in copied)}); "
-             "the template PhysiCell_settings.xml kept as .template-backup")
+        step(f"verification recomputed by build.py and agreed; verified capture copied into the built project's config/ "
+             f"({', '.join(c['name'] for c in copied)}); the template PhysiCell_settings.xml kept as .template-backup "
+             "(build.py itself would require template_BM for these MaBoSS settings)")
 
 
 def main() -> int:

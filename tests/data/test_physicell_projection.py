@@ -579,6 +579,23 @@ class ReviewMinorTests(ProjectionBase):
         data["dictionary"]["sha256"] = sha(self.root / DICT)
         return data
 
+    def test_dictionary_lists_rederived_from_the_invocation_record(self):
+        # review M1: the dictionary's lists must be what the hashed invocation record yields
+        original = json.loads((self.root / DICT).read_text())
+        data = self.rewrite_dictionary(signals=[{"name": "oxygen", "type": "substrate"},
+                                                {"name": "made up", "type": "substrate"}])
+        self.assertRefused(data, "its signals are not the lists its invocation record yields")
+        behaviors = {**original["behaviors"], "tumor": original["behaviors"]["tumor"][:1]}
+        self.assertRefused(self.rewrite_dictionary(signals=original["signals"], behaviors=behaviors),
+                           "its behaviors are not the lists its invocation record yields")
+
+    def test_dictionary_invocation_outside_the_capture_session_refused(self):
+        # review M1: the invocation record lies in the capture's session
+        other = "runs/multicellular-configurator/mc-other/invocation/agent-1/tool_calls.json"
+        (self.root / other).parent.mkdir(parents=True)
+        (self.root / other).write_bytes((self.root / INVOCATION).read_bytes())
+        self.assertRefused(self.rewrite_dictionary(invocation=other), "is not in the capture's session")
+
     def test_dictionary_session_mismatch_refused(self):
         self.assertRefused(self.rewrite_dictionary(session="other-session"), "other-session", "capture's session")
 
@@ -594,7 +611,11 @@ class ReviewMinorTests(ProjectionBase):
         """The projection rebound to a capture of another session (its dictionary rewritten to match)."""
         other = built_capture(self.root, session, "cap-9")
         manifest = self.root / other / "capture.json"
-        data = self.rewrite_dictionary(session=session, capture={"path": other, "sha256": sha(manifest)})
+        invocation = INVOCATION.replace(STAGE_A, session)  # that session's own invocation record (review M1)
+        (self.root / invocation).parent.mkdir(parents=True)
+        (self.root / invocation).write_text((self.root / INVOCATION).read_text().replace(STAGE_A, session))
+        data = self.rewrite_dictionary(session=session, capture={"path": other, "sha256": sha(manifest)},
+                                       invocation=invocation, source_sha256=sha(self.root / invocation))
         data["capture"] = {"path": other, "sha256": sha(manifest)}
         return data
 

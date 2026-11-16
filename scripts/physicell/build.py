@@ -9,7 +9,8 @@ Steps, in order (the toolchain and the verification are checked before anything 
   download   https://github.com/MathCancer/PhysiCell/archive/refs/tags/<version>.tar.gz extracted with Python
              tarfile to <dest>/PhysiCell-<version>-<template>/ (default dest ~/PhysiCell). A member pre-scan refuses
              absolute or `..` names, links leaving the folder and special files; then filter="data". An existing
-             folder is refused, nothing is overwritten. The archive sha256 is recorded (trust on first use).
+             folder is refused, nothing is overwritten. The archive sha256 is recorded (trust on first use); with
+             the git fallback (no curl), the clone's `git rev-parse HEAD` commit is recorded instead.
   template   `make <template>` in the extracted folder (template_BM fetches MaBoSS: needs internet).
   settings   optional, --verification runs/orchestrator/<p>/physicell_verification.*.json: it must be a
              physicell_verification, schema_version 1, passed true, and its `after` capture must re-bind byte for
@@ -17,7 +18,8 @@ Steps, in order (the toolchain and the verification are checked before anything 
              projection path and after capture: projection check, lineage, comparison); it must pass and its
              entries, unexpected_changes, before, after and projection must equal the file's. The packaged PhysiCell_settings.xml and every package/config
              dependency are copied into the project's config/; a file that would be replaced is first renamed
-             <name>.template-backup (an existing backup is refused).
+             <name>.template-backup (an existing backup is refused). Settings carrying an intracellular
+             type="maboss" model are refused with --template template (they need template_BM).
   compile    `make -j N` (default os.cpu_count()); `project` must exist and its sha256 is recorded.
 
 Report: runs/orchestrator/physicell-build/<UTC>-<template>/report.{json,md}. On a failed step the report is still
@@ -193,6 +195,14 @@ def _verification(root: Path, given: str) -> tuple[str, dict, bytes]:
     return rel_text, data, raw
 
 
+def _physiboss(root: Path, after: dict) -> bool:
+    """The verified package XML (re-hashed) carries an intracellular MaBoSS model (review M5)."""
+    raw = (root / after["xml_path"]).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != after["xml_sha256"]:
+        raise ValueError("the verified settings XML changed while being read")
+    return any(e.get("type") == "maboss" for e in sx.parse_bytes(raw).iter("intracellular"))
+
+
 def _package_files(root: Path, after: dict) -> dict[str, bytes]:
     """The XML and every dependency of the verified capture, re-verified byte by byte: {name: bytes}."""
     parents = PurePosixPath(after["xml_path"]).parents  # <capture>/package/config, <capture>/package, <capture>
@@ -279,7 +289,8 @@ def _extract(archive_path: Path, stage: Path) -> None:
         archive.extractall(stage, filter="data")
 
 
-def download(tool: dict, env: dict, version: str, template: str, dest: Path) -> tuple[Path, str | None]:
+def download(tool: dict, env: dict, version: str, template: str, dest: Path) -> tuple[Path, str | None, str | None]:
+    """(project folder, archive sha256 (curl) or None, cloned commit (git fallback, `git rev-parse HEAD`) or None)."""
     final = dest / f"PhysiCell-{version}-{template}"
     if final.exists() or final.is_symlink():
         raise ValueError(f"{final} already exists: it is never overwritten (choose another --dest)")
@@ -289,7 +300,7 @@ def download(tool: dict, env: dict, version: str, template: str, dest: Path) -> 
     except OSError as exc:
         raise StepFailed("download", f"cannot create {dest}: {exc}") from exc
     try:
-        digest = None
+        digest = commit = None
         archive = stage / "PhysiCell.tar.gz"
         if tool["fetch"] == "curl":
             argv = ["curl", "-fsSL", "--retry", "3", "-o", str(archive), URL.format(version=version)]
@@ -307,11 +318,15 @@ def download(tool: dict, env: dict, version: str, template: str, dest: Path) -> 
             done = _run(argv, env)
             if done.returncode != 0:
                 raise StepFailed("download", f"git clone failed ({done.returncode})", _tail(_output(done)))
+            head = _run(["git", "-C", str(stage / f"PhysiCell-{version}"), "rev-parse", "HEAD"], env)
+            commit = (head.stdout or "").strip()
+            if head.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}([0-9a-f]{24})?", commit):
+                raise StepFailed("download", f"git rev-parse HEAD failed ({head.returncode})", _tail(_output(head)))
         top = stage / f"PhysiCell-{version}"
         if not top.is_dir() or top.is_symlink():
             raise StepFailed("download", f"the archive has no top folder PhysiCell-{version}/")
         top.rename(final)
-        return final, digest
+        return final, digest, commit
     except OSError as exc:
         raise StepFailed("download", f"{type(exc).__name__}: {exc}") from exc
     finally:
@@ -337,7 +352,7 @@ def _markdown(report: dict) -> str:
     lines = [f"# PhysiCell build: {report['template']} {report['version']} ({report['status']})", "",
              f"- started: {report['started_at']}", f"- duration: {report['duration_seconds']} s",
              f"- folder: {report.get('project_dir')}", f"- archive: {report['url']}",
-             f"- archive sha256: {report.get('archive_sha256')}",
+             f"- archive sha256: {report.get('archive_sha256')}", f"- git commit: {report.get('git_commit')}",
              f"- compiler: {tool.get('compiler')} ({tool.get('compiler_version')})",
              f"- project sha256: {report.get('project_sha256')}",
              f"- run command (not executed): `{report['run_command']}` from the project folder"]
@@ -388,17 +403,20 @@ def build(root: Path, template: str, version: str = DEFAULT_VERSION, dest: str |
     started, began = datetime.now(timezone.utc), time.monotonic()
     tool = toolchain(env, template)
     verified = _verification(root, verification) if verification else None
+    if verified and template == "template" and _physiboss(root, verified[1]["after"]):
+        raise ValueError('the verified settings carry intracellular type="maboss" (PhysiBoSS), which the plain '
+                         "template project cannot run: build them with --template template_BM")
     dest = Path(dest).expanduser().resolve()
     final = dest / f"PhysiCell-{version}-{template}"
     if final.exists() or final.is_symlink():
         raise ValueError(f"{final} already exists: it is never overwritten (choose another --dest)")
     report = {"kind": "physicell_build", "schema_version": 1, "status": "ok", "template": template,
               "version": version, "url": URL.format(version=version), "started_at": utc_now(),
-              "toolchain": tool, "jobs": jobs, "project_dir": str(final), "archive_sha256": None,
+              "toolchain": tool, "jobs": jobs, "project_dir": str(final), "archive_sha256": None, "git_commit": None,
               "project_sha256": None, "steps": [], "run_command": RUN_COMMAND, "settings": None}
     make_env = dict(env, PHYSICELL_CPP=tool["compiler"])
     try:
-        project, report["archive_sha256"] = download(tool, env, version, template, dest)
+        project, report["archive_sha256"], report["git_commit"] = download(tool, env, version, template, dest)
         _make("make " + template, ["make", template], project, make_env, report["steps"])
         if verified:
             try:

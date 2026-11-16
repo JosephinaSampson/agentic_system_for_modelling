@@ -73,8 +73,9 @@ def _step(child: ET.Element, siblings: list[ET.Element]) -> str:
 
 
 def normalise(root: ET.Element) -> list[tuple[str, dict, str]]:
-    """Canonical (path, attributes, stripped text) records in document order."""
-    records: list[tuple[str, dict, str]] = []
+    """Canonical (path, attributes, stripped text) records in document order; the first is the root element itself
+    (path ".", review M7), so a change of its attributes is a difference too."""
+    records: list[tuple[str, dict, str]] = [(".", dict(root.attrib), (root.text or "").strip())]
 
     def walk(element: ET.Element, prefix: str) -> None:
         children = list(element)

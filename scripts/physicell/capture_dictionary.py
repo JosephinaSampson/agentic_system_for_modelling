@@ -13,8 +13,8 @@ A structure-changing tool_use without a result refuses the capture; one whose re
 server rejected it, so the configuration is unchanged). Items are {name, type} from either result form. Per-cell behaviors come only from calls
 whose cell_type equals that cell definition. Calls naming another session are ignored; calls without a session id
 belong to the invocation's session. The invocation session must be the capture's session and must have been
-dispatched with this design (lineage.dispatched_with: an invocation task.txt of that session has the design's
-DATA_INPUT line, path and sha256, as its line 2). Before anything is written the capture must conform to the design
+dispatched with this design: the task.txt in the same invocation folder as the tool_calls.json has the design's
+DATA_INPUT line, path and sha256, as its line 2 (lineage.dispatched_with). Before anything is written the capture must conform to the design
 (conformance, ruling T9-b): every mismatch is named. Stdlib only.
 """
 from __future__ import annotations
@@ -178,7 +178,7 @@ def collect(blocks: list, session: str, cells: list[str]) -> tuple[list, dict]:
 
 # ---------------------------------------------------------------- stage-A conformance (ruling T9-b)
 
-def _num(label: str, element, expected: float, problems: list, unit: str | None = None, attribute=True) -> None:
+def _num(label: str, element, expected: float, problems: list, unit: str | None = None) -> None:
     """`element` holds `expected` (rel 1e-9) and, when `unit` is given, carries units="<unit>" exactly."""
     if element is None:
         problems.append(f"{label}: missing in the capture")
@@ -186,7 +186,7 @@ def _num(label: str, element, expected: float, problems: list, unit: str | None 
     text = (element.text or "").strip()
     if not sx.close(sx.number(text), expected):
         problems.append(f"{label}: the capture holds {text!r}, the design {expected!r}")
-    if unit is not None and attribute and element.get("units") != unit:
+    if unit is not None and element.get("units") != unit:
         problems.append(f"{label}: the capture's units {element.get('units')!r} are not the design's {unit!r}")
 
 
@@ -203,8 +203,7 @@ def _domain(design: dict, tree, basis_tree, problems: list) -> None:
             return
         for path in ("domain", "overall/max_time", "overall/space_units", "overall/time_units"):
             mine, theirs = tree.find(path), basis_tree.find(path)
-            if mine is None or theirs is None or sx.diff(_wrap(mine), _wrap(theirs)) \
-                    or mine.attrib != theirs.attrib or (mine.text or "").strip() != (theirs.text or "").strip():
+            if mine is None or theirs is None or sx.diff(_wrap(mine), _wrap(theirs)):
                 problems.append(f"{path}: differs from the basis capture's")
         return
     d = design["domain"]
@@ -371,8 +370,14 @@ def capture_dictionary(root: Path, invocation_rel: str, capture_rel: str, design
     design, design_sha, problems = pd.load_and_check(root, design_rel)
     if problems:
         raise ValueError("the design is not valid: " + "; ".join(problems))
-    # the design's session is a lineage anchor; this run's session is bound to the design by its dispatch
-    lineage.dispatched_with(root, session, "design", design_rel, design_sha)
+    # the design's session is a lineage anchor; this run's session is bound to the design by its dispatch, and the
+    # parsed tool_calls.json is the record of that very dispatch (review M2: same invocation folder)
+    folder = PurePosixPath(invocation).parent.as_posix()
+    try:
+        lineage.dispatched_with(root, session, "design", design_rel, design_sha, PurePosixPath(invocation).parts[4])
+    except ValueError as exc:
+        raise ValueError(f"lineage: the invocation folder {folder} has no task.txt with the design's DATA_INPUT line "
+                         f"(its tool_calls.json must be the record of the dispatched run): {exc}") from exc
     problems = conformance(root, design, capture_rel)
     if problems:
         raise ValueError(f"the stage-A capture {capture_rel} does not conform to the design: " + "; ".join(problems))

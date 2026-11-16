@@ -243,6 +243,36 @@ class DictionaryTests(Base):
         self.write(self.design)  # still a valid design, but not the one stage A was dispatched with
         self.refused(self.good(), "lineage")
 
+    def test_line_two_with_an_extra_or_missing_key_is_not_lineage(self):
+        # parked minor 3: only the exact design form satisfies dispatched_with
+        from scripts import state
+        from scripts.physicell import lineage
+        task = self.root / f"runs/multicellular-configurator/{STAGE_A}/invocation/agent-1/task.txt"
+        lines = task.read_text().splitlines()
+        payload = json.loads(lines[1][len("DATA_INPUT "):])
+        digest = state.digest(self.root / REL)
+        self.assertTrue(lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest).endswith("task.txt"))
+        for bad in ({**payload, "extra": 1}, {k: v for k, v in payload.items() if k != "approval"}):
+            with self.subTest(keys=sorted(bad)):
+                task.write_text("\n".join([lines[0], "DATA_INPUT " + json.dumps(bad), *lines[2:]]) + "\n")
+                with self.assertRaisesRegex(ValueError, "lineage: no invocation record"):
+                    lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest)
+                self.refused(self.good(), "lineage: no invocation record")
+
+    def test_lineage_session_must_be_an_identifier(self):
+        # parked minor 1: the session is validated locally, never used as a path fragment
+        from scripts.physicell import lineage
+        for bad in ("../mc-stage-a", "a/b", "", "..", None):
+            with self.subTest(session=bad), self.assertRaisesRegex(ValueError, "identifier"):
+                lineage.dispatched_with(self.root, bad, "design", REL, "0" * 64)
+
+    def test_tool_calls_must_sit_beside_the_dispatched_task(self):
+        # review M2: the parsed tool_calls.json is in the invocation folder whose task.txt has the design line
+        other = f"runs/multicellular-configurator/{STAGE_A}/invocation/agent-2/tool_calls.json"
+        self.refused(self.good(), "agent-2.*no task.txt with the design's DATA_INPUT line", rel=other)
+        dispatch_design(self.root, agent="agent-2")
+        self.assertTrue(self.run_capture(self.good(), rel=other).is_file())
+
     def test_folder_form_accepted(self):
         content = self.good()
         self.invoke(content)

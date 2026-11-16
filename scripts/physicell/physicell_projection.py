@@ -12,7 +12,9 @@ Schema (schema_version 1; every key below is required):
                                  <session> must have been dispatched with the design (lineage.dispatched_with: an
                                  invocation task.txt line 2 is the design's DATA_INPUT line, path and sha256)
   dictionary: {path, sha256}     the physicell_dictionary.json captured for exactly this capture and design; the
-                                 capture must still conform to the design (capture_dictionary.conformance)
+                                 capture must still conform to the design (capture_dictionary.conformance); its
+                                 invocation record lies in the capture's session and its signal/behavior lists are
+                                 re-derived from the record's hashed bytes (capture_dictionary.collect) and must match
   design: {path, sha256, approval}  the stage-A design, its physicell_design stage_approval; it is re-checked
   sources: [{id, path, sha256}]  researcher files under inputs/
   data: [{id, session, proposal, approval}]  approved data-analyst proposals
@@ -202,6 +204,7 @@ class _Checker(pd.Citations):
         self.xml = None
         self.parents: dict = {}
         self.design_ref: dict | None = None
+        self.design_cells: list | None = None
         self.maboss: dict | None = None        # cell -> {"inputs": [...], "outputs": [...]}
         self.signals: list | None = None
         self.behaviors: dict | None = None
@@ -286,6 +289,7 @@ class _Checker(pd.Citations):
             if problems:
                 self.error(f"capture {self.capture['path']} does not conform to the design: " + "; ".join(problems))
         self.design_ref = ref
+        self.design_cells = [c["name"] for c in design["cell_definitions"]]
         self.maboss = {}
         for item in design["intracellular"]:
             handoff = item["maboss"]
@@ -322,9 +326,25 @@ class _Checker(pd.Citations):
                 raise ValueError(f"it was captured for design {data.get('design')!r}, not the projection's design")
             if self.session is not None and data.get("session") != self.session:
                 raise ValueError(f"its session {data.get('session')!r} is not the capture's session {self.session}")
+            invocation_session, _ = cd._invocation(data["invocation"])
+            if self.session is not None and invocation_session != self.session:
+                raise ValueError(f"its invocation record {data['invocation']} is not in the capture's session "
+                                 f"{self.session}")
             source = state.artifact(self.root, data["invocation"]).read_bytes()
             if _sha(source) != data["source_sha256"]:
                 raise ValueError(f"its invocation record {data['invocation']} changed since capture")
+            # review M1: the lists are what those hashed bytes yield, never trusted from the dictionary file
+            blocks = strict_json(source)
+            if not isinstance(blocks, list):
+                raise ValueError(f"its invocation record {data['invocation']} is not a list of content blocks")
+            cells = self.design_cells if self.design_cells is not None else list(data["behaviors"])
+            problems, found = cd.collect(blocks, invocation_session, cells)
+            if problems:
+                raise ValueError(f"its invocation record no longer yields a dictionary: {'; '.join(problems)}")
+            for key in ("signals", "behaviors"):
+                if found[key] != data[key]:
+                    raise ValueError(f"its {key} are not the lists its invocation record yields "
+                                     f"(re-capture the dictionary)")
             signals = [item["name"] for item in data["signals"]]
             behaviors = {cell: [item["name"] for item in items] for cell, items in data["behaviors"].items()}
         except (ValueError, OSError, KeyError, TypeError, AttributeError) as exc:

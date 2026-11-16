@@ -190,6 +190,29 @@ class BuildTests(Base):
                           "make template", "make -j 2"])
         self.assertEqual([p.name for p in self.dest.iterdir()], ["PhysiCell-1.14.2-template"])
 
+    def test_git_fallback_records_the_commit(self):
+        # review M5: without curl, the clone's `git rev-parse HEAD` is recorded
+        (self.bin / "curl").unlink()
+        self.fake("git", """
+args = sys.argv[1:]
+pathlib.Path(os.environ["FAKE_LOG"]).open("a").write("git " + " ".join(args) + "\\n")
+if args[:1] == ["clone"]:
+    target = pathlib.Path(args[-1]); target.mkdir(parents=True); (target / "README").write_text("physicell")
+elif args[-2:] == ["rev-parse", "HEAD"]:
+    print("0123456789abcdef0123456789abcdef01234567")
+else:
+    print("git version 2.40")
+""")
+        folder, report = self.build()
+        self.assertEqual(report["status"], "ok", report)
+        self.assertIsNone(report["archive_sha256"])
+        self.assertEqual(report["git_commit"], "0123456789abcdef0123456789abcdef01234567")
+        self.assertIn("0123456789abcdef0123456789abcdef01234567", (folder / "report.md").read_text())
+
+    def test_curl_download_records_no_commit(self):
+        _, report = self.build()
+        self.assertIsNone(report["git_commit"])
+
     def test_template_bm_and_version(self):
         self.archive("PhysiCell-1.15.0")
         folder, report = self.build("template_BM", version="1.15.0")
@@ -487,6 +510,25 @@ class SettingsCopyTests(Base):
         self.refused("unexpected_changes differ from a re-verification")
         self.recomputed.side_effect = ValueError("projection p fails its check: x")
         self.refused("cannot be re-verified: projection p fails its check")
+
+    def maboss_capture(self):
+        """Rewrite the verified capture's XML to carry a MaBoSS intracellular model (re-hashed, re-verified)."""
+        xml = XML.replace(b"<cell_rules>", b"<cell_definitions><cell_definition name='tumor'><phenotype>"
+                          b"<intracellular type=\"maboss\" /></phenotype></cell_definition></cell_definitions>"
+                          b"<cell_rules>")
+        (self.folder / "package/config/PhysiCell_settings.xml").write_bytes(xml)
+        self.rewrite_manifest(lambda m: m.update(package_xml_sha256=sha(xml)))
+        self.after = sx.capture(self.root, CAPTURE_REL)
+        self.write_verification()
+
+    def test_maboss_settings_need_template_bm(self):
+        # review M5: a PhysiBoSS configuration cannot run in the plain template project
+        self.maboss_capture()
+        with self.assertRaisesRegex(ValueError, "intracellular type=\"maboss\".*template_BM"):
+            self.build("template", verification=VERIFICATION)
+        self.assertFalse(self.dest.exists())
+        _, report = self.build("template_BM", verification=VERIFICATION)
+        self.assertEqual(report["status"], "ok", report)
 
     def test_binding_mismatch_is_refused(self):
         self.write_verification(after={**self.after, "xml_sha256": "0" * 64})

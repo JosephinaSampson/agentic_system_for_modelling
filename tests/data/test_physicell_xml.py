@@ -66,6 +66,15 @@ class XmlHelperTests(unittest.TestCase):
         self.assertIsNone(changes["new"]["before"])
         self.assertEqual(sx.diff(self.root, self.root), [])
 
+    def test_diff_detects_root_attribute_change(self):
+        # review M7: the root element's attributes are part of the normalised records
+        before = parse("<PhysiCell_settings version='devel-version'><b>3</b></PhysiCell_settings>")
+        after = parse("<PhysiCell_settings version='1.14.2'><b>3</b></PhysiCell_settings>")
+        self.assertEqual(sx.normalise(before)[0], (".", {"version": "devel-version"}, ""))
+        changes = sx.diff(before, after)
+        self.assertEqual([c["path"] for c in changes], ["."])
+        self.assertEqual(changes[0]["after"]["attributes"], {"version": "1.14.2"})
+
     def test_diff_detects_attribute_change(self):
         before = parse("<PhysiCell_settings><b units='u'>3</b></PhysiCell_settings>")
         after = parse("<PhysiCell_settings><b units='v'>3</b></PhysiCell_settings>")
@@ -96,9 +105,11 @@ class ReviewFixTests(unittest.TestCase):
 
     def test_quote_in_identity_falls_back_to_position(self):
         root = parse("<PhysiCell_settings><v name=\"a'b\">1</v><v name='c'>2</v></PhysiCell_settings>")
-        for path, _, _ in sx.normalise(root):
+        records = sx.normalise(root)
+        self.assertEqual(records[0][0], ".")  # the root record (review M7)
+        for path, _, _ in records[1:]:
             self.assertEqual(sx.resolve(root, path).tag, "v")
-        self.assertEqual(len({p for p, _, _ in sx.normalise(root)}), 2)
+        self.assertEqual(len({p for p, _, _ in records[1:]}), 2)
 
     def test_fixture_real_export_blocks_resolve(self):
         sx.resolve(self.root, "microenvironment_setup/variable[@name='oxygen']/Dirichlet_options/boundary_value[@ID='xmin']")
