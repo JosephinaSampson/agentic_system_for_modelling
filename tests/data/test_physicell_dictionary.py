@@ -205,6 +205,12 @@ class DictionaryTests(Base):
         content = [lst[0], add[0], add[1], lst[1]] + blocks(*rest)
         self.refused(content, "after the last structure-changing")
 
+    def test_non_text_tool_ids_are_ignored_not_a_crash(self):
+        # PR #17 review 4586111416: a block id that is not text is no call (never a TypeError)
+        odd = [{"type": "tool_use", "id": ["t1"], "name": P + "list_all_available_signals", "input": {}},
+               {"type": "tool_result", "tool_use_id": ["t1"], "content": "x"}]
+        self.assertTrue(self.run_capture(odd + self.good()).is_file())
+
     def test_dangling_structure_call_refused(self):
         content = self.good() + [{"type": "tool_use", "id": "dangling9", "name": P + "add_single_cell_type", "input": {}}]
         self.refused(content, "add_single_cell_type.*dangling9")

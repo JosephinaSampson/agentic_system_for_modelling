@@ -125,8 +125,8 @@ def _calls(blocks: list, session: str) -> list[dict]:
 
     A structure-changing tool_use of this session with no tool_result refuses the capture. A call whose result is an
     error is dropped: the server rejected it, so the configuration is unchanged."""
-    results = {b.get("tool_use_id"): (n, b) for n, b in enumerate(blocks)
-               if isinstance(b, dict) and b.get("type") == "tool_result"}
+    results = {b["tool_use_id"]: (n, b) for n, b in enumerate(blocks)
+               if isinstance(b, dict) and b.get("type") == "tool_result" and isinstance(b.get("tool_use_id"), str)}
     out = []
     for position, use in enumerate(blocks):
         if not isinstance(use, dict) or use.get("type") != "tool_use":
@@ -136,7 +136,7 @@ def _calls(blocks: list, session: str) -> list[dict]:
             continue
         tool = name[len(PREFIX):]
         given = use.get("input") if isinstance(use.get("input"), dict) else {}
-        if use.get("id") not in results:
+        if not isinstance(use.get("id"), str) or use["id"] not in results:
             if tool in STRUCTURE and given.get("session_id") in (None, session):
                 raise ValueError(f"structure-changing call {tool} (id {use.get('id')}) has no result; "
                                  "the configuration state is unknown")
@@ -468,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
     root = project_root().resolve()
     try:
         print(capture_dictionary(root, args.invocation, args.capture, args.design).relative_to(root).as_posix())
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, KeyError, TypeError, AttributeError) as exc:  # reported, never a traceback
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0

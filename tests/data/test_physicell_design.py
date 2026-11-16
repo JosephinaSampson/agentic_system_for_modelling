@@ -234,6 +234,49 @@ class Base(unittest.TestCase):
         self.assertTrue(any(pattern in e for e in errors), (pattern, errors))
 
 
+class NonTextJsonTests(Base):
+    """PR #17 review 4586111416: JSON values that are not text are reported, never a TypeError traceback."""
+
+    CASES = (
+        ("variant_of list", lambda d: d["cell_definitions"][2].update(variant_of=["tumor"]), "variant_of ['tumor']"),
+        ("variant_of object", lambda d: d["cell_definitions"][2].update(variant_of={"a": 1}), "variant_of"),
+        ("cell name list with a variant", lambda d: d["cell_definitions"].append(
+            {"name": ["x"], "cycle_model": "live", "description": "d", "from": CITE, "variant_of": "tumor"}),
+         "name must be non-empty text"),
+        ("intracellular cell list", lambda d: d["intracellular"][0].update(cell_definition=["tumor"]),
+         "cell definition ['tumor'] is not declared"),
+        ("coupling cell list", lambda d: d["coupling_plan"][0].update(cell_definition=["tumor"]),
+         "cell definition ['tumor'] is not declared"),
+        ("coupling group list", lambda d: d["coupling_plan"][0].update(behavior_group=["apoptosis"]),
+         "behavior_group must be non-empty text"),
+        ("coupling route list", lambda d: d["coupling_plan"][0].update(route=["rules"]), "route must be one of"),
+    )
+
+    def test_non_text_values_are_errors(self):
+        for name, edit, pattern in self.CASES:
+            with self.subTest(case=name):
+                data = self.complete()
+                edit(data)
+                self.assertRefused(data, pattern)
+
+    def test_cli_reports_errors_without_a_traceback(self):
+        import contextlib
+        import io
+        import os
+        from unittest import mock
+        for name, edit, pattern in self.CASES:
+            with self.subTest(case=name):
+                data = self.complete()
+                edit(data)
+                self.write(data)
+                err = io.StringIO()
+                with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(self.root)}), \
+                        contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(pd.main(["check", REL]), 1)
+                self.assertIn(pattern, err.getvalue())
+                self.assertNotIn("Traceback", err.getvalue())
+
+
 class DraftTests(Base):
     def test_draft_prefills_from_basis_and_never_overwrites(self):
         (self.root / REL).unlink(missing_ok=True)

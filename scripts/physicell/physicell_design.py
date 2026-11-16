@@ -402,9 +402,11 @@ class _Checker(Citations):
         bases = {}
         for n, item in enumerate(items):
             variant = item.get("variant_of") if isinstance(item, dict) else None
-            if variant is not None and (variant not in self.cells or variant == item.get("name")):
+            if variant is None or not isinstance(item.get("name"), str) or item["name"] not in self.cells:
+                continue  # no variant, or an item already refused above
+            if not isinstance(variant, str) or variant not in self.cells or variant == item["name"]:
                 self.error(f"cell_definitions[{n}]: variant_of {variant!r} must name another declared cell definition")
-            elif variant is not None:
+            else:
                 bases[item["name"]] = variant
         for name in bases:
             seen, node = [], name
@@ -578,7 +580,7 @@ class _Checker(Citations):
                 self.error(f"{label} must have exactly cell_definition and maboss")
                 continue
             cell = item["cell_definition"]
-            if cell not in self.cells:
+            if not isinstance(cell, str) or cell not in self.cells:
                 self.error(f"{label}: cell definition {cell!r} is not declared")
             elif cell in self.intracellular:
                 self.error(f"{label}: cell definition {cell} carries two MaBoSS models")
@@ -597,16 +599,19 @@ class _Checker(Citations):
                 self.error(f"{label} must have exactly cell_definition, behavior_group, route, notes")
                 continue
             cell, group, route = item["cell_definition"], item["behavior_group"], item["route"]
-            if cell not in self.cells:
+            declared = isinstance(cell, str) and cell in self.cells
+            if not declared:
                 self.error(f"{label}: cell definition {cell!r} is not declared")
             if not real_text(group):
                 self.error(f"{label}: behavior_group must be non-empty text")
-            if route not in ROUTES:
+            if not isinstance(route, str) or route not in ROUTES:
                 self.error(f"{label}: route must be one of {', '.join(ROUTES)}, not {route!r}")
-            elif route == "physiboss" and cell in self.cells and cell not in self.intracellular:
+            elif route == "physiboss" and declared and cell not in self.intracellular:
                 self.error(f"{label}: route physiboss needs an intracellular MaBoSS model on {cell}")
             if not real_text(item["notes"]):
                 self.error(f"{label}: notes must be a non-empty explanation, not empty or TODO")
+            if not declared or not isinstance(group, str):
+                continue  # already refused: no duplicate test on a value that is not text
             if (cell, group) in seen:
                 self.error(f"{label}: duplicate coupling for {cell!r}, {group!r}")
             seen.add((cell, group))
@@ -706,7 +711,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"physicell design check passed: {args.design}")
         return 0
-    except (ValueError, OSError, KeyError) as exc:
+    except (ValueError, OSError, KeyError, TypeError, AttributeError) as exc:  # reported, never a traceback
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

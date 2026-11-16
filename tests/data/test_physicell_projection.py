@@ -175,6 +175,28 @@ class HappyPathTests(ProjectionBase):
         self.assertIn("check passed", out.getvalue())
 
 
+class NonTextJsonTests(ProjectionBase):
+    """PR #17 review 4586111416: JSON values that are not text are reported, never a TypeError traceback."""
+
+    def test_entry_kind_list_refused(self):
+        data = self.projection()
+        data["entries"][0]["kind"] = ["rule"]
+        self.assertRefused(data, "entries[0]: kind must be one of")
+
+    def test_design_with_non_text_values_is_an_error(self):
+        design = json.loads((self.root / REL).read_text())
+        design["cell_definitions"][2]["variant_of"] = ["tumor"]
+        (self.root / REL).write_text(json.dumps(design, indent=2))
+        data = self.projection()
+        data["design"]["sha256"] = sha(self.root / REL)
+        self.assertRefused(data, "variant_of ['tumor']")
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(self.root)}), \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pp.main(["check", PROJ]), 1)
+        self.assertIn("variant_of ['tumor']", err.getvalue())
+
+
 class NameTests(ProjectionBase):
     def test_unknown_signal_lists_close_matches(self):
         data, entry = self.entry("in1")

@@ -578,7 +578,7 @@ class _Checker(pd.Citations):
         ids = []
         for n, e in enumerate(items):
             label = f"entries[{n}]"
-            if not isinstance(e, dict) or e.get("kind") not in KINDS:
+            if not isinstance(e, dict) or not isinstance(e.get("kind"), str) or e["kind"] not in KINDS:
                 self.error(f"{label}: kind must be one of {', '.join(KINDS)}")
                 continue
             entry_id = e.get("entry_id")
@@ -701,7 +701,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"physicell projection check passed: {args.projection}")
         return 0
-    except (ValueError, OSError, KeyError) as exc:
+    except (ValueError, OSError, KeyError, TypeError, AttributeError) as exc:  # reported, never a traceback
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
