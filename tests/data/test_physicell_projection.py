@@ -61,6 +61,44 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+@contextlib.contextmanager
+def binding_reads(root):
+    """Count settings_xml.capture_tree calls per capture and Path.read_bytes of each file inside a capture folder
+    (runs/multicellular-configurator/<session>/configs/<capture>/...). Yields (binds, reads): Counters keyed by
+    capture rel and by (capture rel, file inside it)."""
+    from collections import Counter
+    from pathlib import Path
+    from scripts.physicell import settings_xml as sx
+    binds, reads = Counter(), Counter()
+    original_read, original_tree = Path.read_bytes, sx.capture_tree
+
+    def read(path):
+        try:
+            parts = path.relative_to(root).parts
+        except ValueError:
+            parts = ()
+        if len(parts) > 5 and parts[:2] == ("runs", "multicellular-configurator") and parts[3] == "configs":
+            reads[("/".join(parts[:5]), "/".join(parts[5:]))] += 1
+        return original_read(path)
+
+    def tree(where, capture_rel):
+        binds[capture_rel] += 1
+        return original_tree(where, capture_rel)
+    with mock.patch.object(Path, "read_bytes", read), mock.patch.object(sx, "capture_tree", tree):
+        yield binds, reads
+
+
+BOUND_FILES = ("capture.json", "package/config/PhysiCell_settings.xml")
+
+
+def assert_read_only_by_bindings(case, binds, reads):
+    """capture.json and the package XML of every capture were read exactly once per binding of that capture: no
+    caller re-reads them after settings_xml.capture_tree verified them."""
+    for (capture, name), count in reads.items():
+        if name in BOUND_FILES:
+            case.assertEqual(count, binds[capture], f"{capture}/{name} read {count}x for {binds[capture]} binding(s)")
+
+
 class ProjectionBase(Base):
     """A checked, approved design, its captured dictionary and a drafted projection over the built capture.
 
@@ -343,6 +381,29 @@ class SettingTests(ProjectionBase):
 
     def test_tool_hint_required(self):
         self.assertRefused(self.setting(tool_hint=""), "tool_hint")
+
+
+class CaptureBoundOnceTests(ProjectionBase):
+    """PR #17 review 4587427664: the projection check binds its capture once (sx.capture_tree) and uses that
+    binding's tree and manifest_sha256; it never reads capture.json or the package XML again."""
+
+    def test_projection_check_binds_its_capture_once(self):
+        self.write_projection(self.projection())
+        with binding_reads(self.root) as (binds, reads):
+            self.assertEqual(pp.check(self.root, PROJ), [])
+        self.assertEqual(binds[self.capture], 1)
+        self.assertEqual(reads[(self.capture, "capture.json")], 1)
+        self.assertEqual(reads[(self.capture, "package/config/PhysiCell_settings.xml")], 1)
+        assert_read_only_by_bindings(self, binds, reads)
+
+    def test_draft_records_the_bound_manifest_sha256(self):
+        with binding_reads(self.root) as (binds, reads):
+            path = pp.draft(self.root, "p7", capture=self.capture, design=REL, design_approval="design-1",
+                            dictionary=DICT)
+        self.assertEqual(json.loads(path.read_text())["capture"]["sha256"],
+                         sha(self.root / self.capture / "capture.json"))
+        self.assertEqual(binds[self.capture], 1)
+        assert_read_only_by_bindings(self, binds, reads)
 
 
 class NonDecimalLeafTests(ProjectionBase):

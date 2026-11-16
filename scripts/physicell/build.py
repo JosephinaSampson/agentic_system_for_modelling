@@ -39,6 +39,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -145,8 +146,9 @@ def toolchain(env: dict, template: str = "template") -> dict:
 
 # ---------------------------------------------------------------- verified settings
 
-def _verification(root: Path, given: str) -> tuple[str, dict, bytes]:
-    """(repo-relative path, the verification, its bytes) for a passed physicell_verification; ValueError else."""
+def _verification(root: Path, given: str) -> tuple[str, dict, bytes, ET.Element]:
+    """(repo-relative path, the verification, its bytes, the after capture's package XML parsed from the bytes this
+    re-binding verified) for a passed physicell_verification; ValueError else."""
     path = Path(given)
     path = path if path.is_absolute() else root / path
     try:
@@ -174,7 +176,7 @@ def _verification(root: Path, given: str) -> tuple[str, dict, bytes]:
     if not isinstance(session, str) or not isinstance(capture, str):
         raise ValueError(f"{rel_text} records a malformed after capture")
     after_rel = f"runs/{sx.SPECIALIST}/{session}/configs/{capture}"
-    bound = sx.capture(root, after_rel)
+    bound, tree = sx.capture_tree(root, after_rel)
     if bound != after:
         missing = sorted(set(bound) - set(after))
         if missing:
@@ -198,15 +200,13 @@ def _verification(root: Path, given: str) -> tuple[str, dict, bytes]:
     for key in RECOMPUTED:
         if recomputed[key] != data.get(key):
             raise ValueError(f"{rel_text}: its {key} differ from a re-verification (the file is stale or forged)")
-    return rel_text, data, raw
+    return rel_text, data, raw, tree
 
 
-def _physiboss(root: Path, after: dict) -> bool:
-    """The verified package XML (re-hashed) carries an intracellular MaBoSS model (review M5)."""
-    raw = (root / after["xml_path"]).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != after["xml_sha256"]:
-        raise ValueError("the verified settings XML changed while being read")
-    return any(e.get("type") == "maboss" for e in sx.parse_bytes(raw).iter("intracellular"))
+def _physiboss(tree: ET.Element) -> bool:
+    """The verified package XML (the tree _verification parsed from the bytes it verified) carries an intracellular
+    MaBoSS model (review M5)."""
+    return any(e.get("type") == "maboss" for e in tree.iter("intracellular"))
 
 
 def _package_files(root: Path, after: dict) -> dict[str, bytes]:
@@ -412,7 +412,7 @@ def build(root: Path, template: str, version: str = DEFAULT_VERSION, dest: str |
     started, began = datetime.now(timezone.utc), time.monotonic()
     tool = toolchain(env, template)
     verified = _verification(root, verification) if verification else None
-    if verified and template == "template" and _physiboss(root, verified[1]["after"]):
+    if verified and template == "template" and _physiboss(verified[3]):
         raise ValueError('the verified settings carry intracellular type="maboss" (PhysiBoSS), which the plain '
                          "template project cannot run: build them with --template template_BM")
     dest = Path(dest).expanduser().resolve()

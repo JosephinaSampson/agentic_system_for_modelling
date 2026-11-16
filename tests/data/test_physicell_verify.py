@@ -15,7 +15,8 @@ from scripts.physicell import physicell_projection as pp
 from scripts.physicell import settings_xml as sx
 from scripts.physicell import verify_export as ve
 from tests.data.test_physicell_design import STAGE_A, ensure_approval
-from tests.data.test_physicell_projection import APOPTOSIS, PROJ, SRC, ProjectionBase, q, sha
+from tests.data.test_physicell_projection import (APOPTOSIS, PROJ, SRC, ProjectionBase, assert_read_only_by_bindings,
+                                                  binding_reads, q, sha)
 
 AFTER = "mc-session-2"
 CAPTURE_ID = "cap-1"
@@ -624,8 +625,24 @@ class BuildHandoffTests(VerifyBase):
     def test_passed_verification_is_accepted_by_build(self):
         from scripts.physicell import build
         path, result = self.verify(self.export())
-        rel, data, raw = build._verification(self.root, OUTPUT)
+        rel, data, raw, _ = build._verification(self.root, OUTPUT)
         self.assertEqual((rel, data), (OUTPUT, result))
+
+    def test_no_capture_file_is_read_outside_a_binding(self):
+        # PR #17 review 4587427664: compute binds with sx.capture_tree (verify_export._bind) and uses the binding's
+        # manifest_sha256; build._verification binds with capture_tree and _physiboss uses that tree
+        from scripts.physicell import build
+        after = self.export()
+        self.verify(after)
+        with binding_reads(self.root) as (binds, reads):
+            ve.compute(self.root, PROJ, after)
+        self.assertEqual(binds[after], 1)
+        assert_read_only_by_bindings(self, binds, reads)
+        with binding_reads(self.root) as (binds, reads):
+            rel, data, raw, tree = build._verification(self.root, OUTPUT)
+            self.assertTrue(build._physiboss(tree))  # the stage-A design carries a MaBoSS model
+        self.assertEqual(binds[after], 2)  # the file's binding and the recomputation (ruling T9-d), nothing else
+        assert_read_only_by_bindings(self, binds, reads)
 
     def forge(self, after, **changes):
         """A verification file written by hand for `after`: passed true and the real after binding."""

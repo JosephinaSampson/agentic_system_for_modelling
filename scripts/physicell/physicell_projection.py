@@ -70,7 +70,7 @@ if __package__ in (None, ""):  # run as a script: make the repo importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts import state  # noqa: E402
 from scripts.data import approvals  # noqa: E402
-from scripts.data.common import finite_number, project_root, reject_symlinks, sha256_file, strict_json  # noqa: E402
+from scripts.data.common import finite_number, project_root, sha256_file, strict_json  # noqa: E402
 from scripts.physicell import capture_dictionary as cd  # noqa: E402
 from scripts.physicell import lineage  # noqa: E402
 from scripts.physicell import physicell_design as pd  # noqa: E402
@@ -189,9 +189,7 @@ def draft(root: Path, purpose: str, *, capture: str, design: str, design_approva
     message = f"{target.relative_to(root).as_posix()} exists; drafts never overwrite a projection"
     if target.exists() or target.is_symlink():
         raise ValueError(message)
-    sx.capture(root, capture)
-    manifest = root / capture / "capture.json"
-    reject_symlinks(manifest, root)
+    bound = sx.capture(root, capture)  # its manifest_sha256 is of the capture.json bytes it verified
     design_sha = _sha(_read(root, design, "design"))
     approvals.require_physicell_design_approval(root, design_approval, design, design_sha)
     if dictionary is None:
@@ -199,7 +197,7 @@ def draft(root: Path, purpose: str, *, capture: str, design: str, design_approva
     dictionary_sha = _sha(_read(root, dictionary, "dictionary"))
     declared, proposals = pd.declare_inputs(root, sources, data)
     projection = {"kind": "physicell_projection", "schema_version": 1,
-                  "capture": {"path": capture, "sha256": _sha(manifest.read_bytes())},
+                  "capture": {"path": capture, "sha256": bound["manifest_sha256"]},
                   "dictionary": {"path": dictionary, "sha256": dictionary_sha},
                   "design": {"path": design, "sha256": design_sha, "approval": design_approval},
                   "sources": declared, "data": proposals, "entries": [], "unmapped": []}
@@ -248,15 +246,9 @@ class _Checker(pd.Citations):
             self.error("capture must be exactly {path, sha256}")
             return
         try:
-            bound = sx.capture(self.root, ref["path"])
-            manifest = self.root / ref["path"] / "capture.json"
-            reject_symlinks(manifest, self.root)
-            if _sha(manifest.read_bytes()) != ref["sha256"]:
+            bound, self.xml = sx.capture_tree(self.root, ref["path"])  # bound once: the tree of the verified bytes
+            if bound["manifest_sha256"] != ref["sha256"]:
                 raise ValueError("its capture.json sha256 differs from the projection's")
-            raw = (self.root / bound["xml_path"]).read_bytes()
-            if _sha(raw) != bound["xml_sha256"]:
-                raise ValueError("its settings XML changed while being read")
-            self.xml = sx.parse_bytes(raw)
         except (ValueError, OSError, UnicodeDecodeError) as exc:
             self.xml = None
             self.error(f"capture {ref['path']!r}: {exc}")

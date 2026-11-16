@@ -54,7 +54,7 @@ from pathlib import Path, PurePosixPath
 
 if __package__ in (None, ""):  # run as a script: make the repo importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts.data.common import project_root, reject_symlinks, strict_json  # noqa: E402
+from scripts.data.common import project_root, reject_symlinks  # noqa: E402
 from scripts.physicell import lineage  # noqa: E402
 from scripts.physicell import physicell_design as pd  # noqa: E402
 from scripts.physicell import physicell_projection as pp  # noqa: E402
@@ -82,12 +82,9 @@ def _exact_int(found, expected: int) -> bool:
 # ---------------------------------------------------------------- bindings
 
 def _bind(root: Path, rel: str):
-    """(the settings_xml.capture binding, verbatim, with its verified manifest; the parsed package XML)."""
-    bound = sx.capture(root, rel)
-    xml_raw = (root / bound["xml_path"]).read_bytes()
-    if _sha(xml_raw) != bound["xml_sha256"]:
-        raise ValueError(f"capture {rel}: its settings XML changed while being read")
-    return bound, sx.parse_bytes(xml_raw)
+    """(the settings_xml.capture binding, verbatim, with its verified manifest; the package XML parsed from exactly
+    the verified bytes): settings_xml.capture_tree, read once."""
+    return sx.capture_tree(root, rel)
 
 
 # ---------------------------------------------------------------- entries
@@ -398,10 +395,7 @@ def compute(root: Path, projection_rel: str, new_capture_rel: str) -> dict:
         raise ValueError(f"projection {projection_rel} fails its check: " + "; ".join(errors))
     before, before_xml = _bind(root, data["capture"]["path"])
     after, after_xml = _bind(root, new_capture_rel)
-    manifest = root / data["capture"]["path"] / "capture.json"
-    reject_symlinks(manifest, root)
-    raw = manifest.read_bytes()
-    if _sha(raw) != data["capture"]["sha256"] or strict_json(raw) != before["manifest"]:
+    if before["manifest_sha256"] != data["capture"]["sha256"]:
         raise ValueError(f"capture {data['capture']['path']} changed since the projection check")
     if after["session"] == before["session"]:
         raise ValueError(f"lineage: the new capture {new_capture_rel} is in session {after['session']}, the "
