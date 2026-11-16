@@ -364,8 +364,14 @@ class UnsafeArchiveTests(Base):
 
 
 class SettingsCopyTests(Base):
+    """The copy of a verified capture. The verification recomputation (ruling T9-d) is patched to agree with the file
+    here; test_physicell_verify.BuildHandoffTests runs it for real (forged and stale files refused)."""
+
     def setUp(self):
         super().setUp()
+        patcher = mock.patch.object(build.ve, "compute", side_effect=self.recompute)
+        self.recomputed = patcher.start()
+        self.addCleanup(patcher.stop)
         self.folder = self.root / CAPTURE_REL
         (self.folder / "package/config").mkdir(parents=True)
         config = self.folder / "package/config"
@@ -382,8 +388,14 @@ class SettingsCopyTests(Base):
         self.verification_path = self.root / VERIFICATION
         self.write_verification()
 
+    def recompute(self, root, projection, after):
+        self.assertEqual((projection, after), ("runs/orchestrator/p1/physicell_projection.json", CAPTURE_REL))
+        return json.loads(self.verification_path.read_text(encoding="utf-8"))
+
     def write_verification(self, **overrides):
-        data = {"kind": "physicell_verification", "schema_version": 1, "projection": {}, "before": {},
+        data = {"kind": "physicell_verification", "schema_version": 1,
+                "projection": {"path": "runs/orchestrator/p1/physicell_projection.json", "sha256": "0" * 64},
+                "before": {},
                 "after": self.after, "entries": [], "unexpected_changes": [], "passed": True}
         data.update(overrides)
         self.verification_path.parent.mkdir(parents=True, exist_ok=True)
@@ -465,6 +477,16 @@ class SettingsCopyTests(Base):
     def test_changed_capture_bytes_are_refused(self):
         (self.folder / "package/config/rules.csv").write_bytes(RULES + b"x\n")
         self.refused("changed since capture")
+
+    def test_recomputation_must_pass_and_agree(self):
+        self.recomputed.side_effect = None
+        self.recomputed.return_value = {**json.loads(self.verification_path.read_text()), "passed": False}
+        self.refused("does not pass")
+        self.recomputed.return_value = {**json.loads(self.verification_path.read_text()),
+                                        "unexpected_changes": [{"kind": "xml"}]}
+        self.refused("unexpected_changes differ from a re-verification")
+        self.recomputed.side_effect = ValueError("projection p fails its check: x")
+        self.refused("cannot be re-verified: projection p fails its check")
 
     def test_binding_mismatch_is_refused(self):
         self.write_verification(after={**self.after, "xml_sha256": "0" * 64})

@@ -424,7 +424,9 @@ only on the `DATA_INPUT` line.
 session whose invocation record (`runs/multicellular-configurator/<session>/invocation/*/task.txt`) has this
 projection's `DATA_INPUT` line as its line 2, and compares the stage-A and stage-B captures: only the entries'
 changes are allowed (setting values, the added links, the rules CSV rows and its enabled ruleset). Any other
-difference fails. A failed or retried attempt keeps its own file.
+difference fails. A failed or retried attempt keeps its own file. `build.py --verification` never trusts the file:
+it recomputes the verification (`verify_export.compute`) on the file's own projection and after capture and
+refuses unless it passes with the same entries, unexpected changes, bindings and projection.
 
 **Limitations.** Server 2.5.2 cannot reload a captured configuration's input files into a new session, so a
 design basis may have no input files (rules CSV, MaBoSS models, initial cells) and a projection's capture no

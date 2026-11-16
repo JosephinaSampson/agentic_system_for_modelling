@@ -13,7 +13,9 @@ Steps, in order (the toolchain and the verification are checked before anything 
   template   `make <template>` in the extracted folder (template_BM fetches MaBoSS: needs internet).
   settings   optional, --verification runs/orchestrator/<p>/physicell_verification.*.json: it must be a
              physicell_verification, schema_version 1, passed true, and its `after` capture must re-bind byte for
-             byte (settings_xml.capture). The packaged PhysiCell_settings.xml and every package/config
+             byte (settings_xml.capture). The verification is then recomputed (verify_export.compute on the file's
+             projection path and after capture: projection check, lineage, comparison); it must pass and its
+             entries, unexpected_changes, before, after and projection must equal the file's. The packaged PhysiCell_settings.xml and every package/config
              dependency are copied into the project's config/; a file that would be replaced is first renamed
              <name>.template-backup (an existing backup is refused).
   compile    `make -j N` (default os.cpu_count()); `project` must exist and its sha256 is recorded.
@@ -43,6 +45,7 @@ if __package__ in (None, ""):
 
 from scripts.data.common import project_root, reject_symlinks, sha256_file, strict_json, utc_now  # noqa: E402
 from scripts.physicell import settings_xml as sx  # noqa: E402
+from scripts.physicell import verify_export as ve  # noqa: E402
 
 DEFAULT_VERSION = "1.14.2"
 TEMPLATES = ("template", "template_BM")
@@ -54,6 +57,7 @@ OPENMP_SOURCE = ("#include <omp.h>\n#include <cstdio>\n"
                  "std::printf(\"%d\\n\", n); return 0; }\n")
 TAIL_LINES = 40
 VERIFICATION_DIR = ("runs", "orchestrator")
+RECOMPUTED = ("entries", "unexpected_changes", "before", "after", "projection")
 
 
 class StepFailed(Exception):
@@ -167,10 +171,25 @@ def _verification(root: Path, given: str) -> tuple[str, dict, bytes]:
     session, capture = after.get("session"), after.get("capture")
     if not isinstance(session, str) or not isinstance(capture, str):
         raise ValueError(f"{rel_text} records a malformed after capture")
-    bound = sx.capture(root, f"runs/{sx.SPECIALIST}/{session}/configs/{capture}")
+    after_rel = f"runs/{sx.SPECIALIST}/{session}/configs/{capture}"
+    bound = sx.capture(root, after_rel)
     if bound != after:
         raise ValueError(f"the captured configuration changed since {rel_text} verified it "
                          "(the after capture no longer matches the recorded binding)")
+    # Ruling T9-d: never trust the file; re-run the verification on its own projection and after capture.
+    projection = data.get("projection")
+    if not isinstance(projection, dict) or not isinstance(projection.get("path"), str):
+        raise ValueError(f"{rel_text} records no projection path")
+    try:
+        recomputed = json.loads(json.dumps(ve.compute(root, projection["path"], after_rel)))
+    except (ValueError, OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"{rel_text} cannot be re-verified: {exc}") from exc
+    if recomputed["passed"] is not True:
+        raise ValueError(f"{rel_text} says passed, but a re-verification of {after_rel} against "
+                         f"{projection['path']} does not pass")
+    for key in RECOMPUTED:
+        if recomputed[key] != data.get(key):
+            raise ValueError(f"{rel_text}: its {key} differ from a re-verification (the file is stale or forged)")
     return rel_text, data, raw
 
 

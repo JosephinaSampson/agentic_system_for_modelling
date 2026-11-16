@@ -612,11 +612,47 @@ class StrictNumberTests(VerifyBase):
 
 
 class BuildHandoffTests(VerifyBase):
+    """Ruling T9-d: build.py never trusts the verification file; it recomputes the verification."""
+
     def test_passed_verification_is_accepted_by_build(self):
         from scripts.physicell import build
         path, result = self.verify(self.export())
         rel, data, raw = build._verification(self.root, OUTPUT)
         self.assertEqual((rel, data), (OUTPUT, result))
+
+    def forge(self, after, **changes):
+        """A verification file written by hand for `after`: passed true and the real after binding."""
+        bound = sx.capture(self.root, after)
+        data = {"kind": "physicell_verification", "schema_version": 1,
+                "projection": {"path": PROJ, "sha256": sha(self.root / PROJ)},
+                "before": sx.capture(self.root, self.capture), "after": bound,
+                "lineage": {"invocation": INVOCATION}, "entries": [], "unexpected_changes": [], "passed": True}
+        data.update(changes)
+        path = ve.target(self.root, PROJ, bound)
+        path.write_text(json.dumps(data, indent=2) + "\n")
+        return path.relative_to(self.root).as_posix()
+
+    def test_forged_passed_file_with_real_after_binding_refused(self):
+        from scripts.physicell import build
+        after = self.export([e for e in self.entries() if e["entry_id"] != "set1"])  # set1 not applied: fails
+        self.assertFalse(ve.compute(self.root, PROJ, after)["passed"])
+        with self.assertRaisesRegex(ValueError, "re-verification"):
+            build._verification(self.root, self.forge(after))
+
+    def test_forged_file_matching_a_passing_capture_but_not_its_report_refused(self):
+        from scripts.physicell import build
+        after = self.export()
+        with self.assertRaisesRegex(ValueError, "entries differ from a re-verification"):
+            build._verification(self.root, self.forge(after))
+
+    def test_stale_file_whose_projection_no_longer_checks_refused(self):
+        from scripts import state
+        from scripts.physicell import build
+        from tests.data.test_physicell_design import MABOSS
+        self.verify(self.export())
+        state.update(self.root, "registry-supersede", {"session_id": MABOSS})  # the design no longer checks
+        with self.assertRaisesRegex(ValueError, "cannot be re-verified.*projection .* fails its check"):
+            build._verification(self.root, OUTPUT)
 
 
 class CliTests(VerifyBase):

@@ -36,7 +36,8 @@ Output (write-new, one file per attempt): runs/orchestrator/<p>/physicell_verifi
 capture>.json beside the projection: {kind: "physicell_verification", schema_version: 1, projection: {path,
 sha256}, before, after (the settings_xml.capture bindings, verbatim), lineage: {invocation}, entries: [{entry_id,
 expected, found, ok, problem (when not ok)}], unexpected_changes: [{kind, path, before, after, reason?}], passed}.
-CLI exit 0 passed, 1 not passed, 2 refused.
+CLI exit 0 passed, 1 not passed, 2 refused. compute() builds the report without writing it; build.py re-runs it
+on the file's own projection and after capture and requires the same result (ruling T9-d).
 """
 from __future__ import annotations
 
@@ -375,9 +376,32 @@ def _dependency_changes(before_manifest: dict, after_manifest: dict, rules_name:
 
 # ---------------------------------------------------------------- verify
 
+def target(root: Path, projection_rel: str, after: dict) -> Path:
+    """runs/orchestrator/<p>/physicell_verification.<after session>.<after capture>.json beside the projection."""
+    purpose = PurePosixPath(projection_rel).parts[2]
+    return Path(root) / "runs" / "orchestrator" / purpose / \
+        f"physicell_verification.{after['session']}.{after['capture']}.json"
+
+
 def verify(root: Path, projection_rel: str, new_capture_rel: str) -> Path:
-    """Write runs/orchestrator/<p>/physicell_verification.<after session>.<after capture>.json; ValueError on a
-    refusal (projection check errors, lineage, an existing output)."""
+    """compute, then write runs/orchestrator/<p>/physicell_verification.<after session>.<after capture>.json
+    (write-new); ValueError on a refusal (projection check errors, lineage, an existing output)."""
+    root = Path(root)
+    report = compute(root, projection_rel, new_capture_rel)
+    path = target(root, projection_rel, report["after"])
+    if path.exists() or path.is_symlink():
+        raise ValueError(f"{path.relative_to(root).as_posix()} exists; a verification is never overwritten")
+    try:
+        pd.write_new(root, path, json.dumps(report, indent=2) + "\n")
+    except FileExistsError as exc:
+        raise ValueError(f"{path.relative_to(root).as_posix()} exists; a verification is never overwritten") \
+            from exc
+    return path
+
+
+def compute(root: Path, projection_rel: str, new_capture_rel: str) -> dict:
+    """The verification report of the stage-B capture against the projection (pure: writes nothing). It re-runs the
+    projection check and the lineage check; ValueError on a refusal. build.py recomputes it (ruling T9-d)."""
     root = Path(root)
     data, digest, errors = pp.load_and_check(root, projection_rel)
     if errors:
@@ -393,11 +417,6 @@ def verify(root: Path, projection_rel: str, new_capture_rel: str) -> Path:
         raise ValueError(f"lineage: the new capture {new_capture_rel} is in session {after['session']}, the "
                          f"projection's capture session; stage B runs in a new session")
     invocation = lineage.dispatched_with(root, after["session"], "projection", projection_rel, digest)
-    purpose = PurePosixPath(projection_rel).parts[2]
-    target = root / "runs" / "orchestrator" / purpose / \
-        f"physicell_verification.{after['session']}.{after['capture']}.json"
-    if target.exists() or target.is_symlink():
-        raise ValueError(f"{target.relative_to(root).as_posix()} exists; a verification is never overwritten")
 
     entries = data["entries"]
     rules_raw = None
@@ -435,16 +454,10 @@ def verify(root: Path, projection_rel: str, new_capture_rel: str) -> Path:
     unexpected += [{"kind": "xml", **change} for change in sx.diff(old, new)]
     unexpected += _dependency_changes(before["manifest"], after["manifest"], rules_name)
 
-    report = {"kind": "physicell_verification", "schema_version": 1,
-              "projection": {"path": projection_rel, "sha256": digest}, "before": before, "after": after,
-              "lineage": {"invocation": invocation}, "entries": results, "unexpected_changes": unexpected,
-              "passed": all(r["ok"] for r in results) and not unexpected}
-    try:
-        pd.write_new(root, target, json.dumps(report, indent=2) + "\n")
-    except FileExistsError as exc:
-        raise ValueError(f"{target.relative_to(root).as_posix()} exists; a verification is never overwritten") \
-            from exc
-    return target
+    return {"kind": "physicell_verification", "schema_version": 1,
+            "projection": {"path": projection_rel, "sha256": digest}, "before": before, "after": after,
+            "lineage": {"invocation": invocation}, "entries": results, "unexpected_changes": unexpected,
+            "passed": all(r["ok"] for r in results) and not unexpected}
 
 
 def _why(report: dict) -> list[str]:

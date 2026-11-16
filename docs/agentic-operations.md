@@ -296,8 +296,8 @@ only for a capture whose session has the design's `DATA_INPUT` line as line 2 of
 (`scripts/physicell/lineage.py`; the projection check requires the same).
 `verify_export.py` writes `runs/orchestrator/P/physicell_verification.<session>.<capture>.json` (one file per
 attempt) and requires an invocation `task.txt` of the stage-B session whose line 2 is this projection's
-`DATA_INPUT` line. `build.py` copies settings only from a passed verification whose capture is unchanged, and
-never runs the project. Details: docs/data-workflow.md.
+`DATA_INPUT` line. `build.py` copies settings only from a passed verification whose capture is unchanged and
+whose recomputation (`verify_export.compute`) passes with the same result, and never runs the project. Details: docs/data-workflow.md.
 
 ## Evidence and provenance
 
