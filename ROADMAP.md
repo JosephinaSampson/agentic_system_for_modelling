@@ -50,3 +50,5 @@ reordered as work progresses. Released changes are listed in
 - Start from an existing PhysiCell project with input files (rules, MaBoSS models,
   initial cells), once the server can reload them.
 - Combine MaBoSS models from several MaBoSS sessions in one PhysiCell design.
+- Substrates in units other than mmHg, and control over PhysiCell's default substrate,
+  once the server supports them.
