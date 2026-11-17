@@ -177,7 +177,7 @@ reviews, and obtain exact session/revision/output approval. Any later interactio
 rule, readout or rate edit supersedes it: re-review and re-approve. Record review and approval
 with state.py; run and quote `python3 scripts/gate.py check <stage> <session> --outputs ...`
 (for biomass_ode the outputs are every node_id of the exported graph; for a multicellular dispatch applying a
-PhysiCell design or projection, add `--design <physicell_design.json>`).
+PhysiCell design or projection, add `--design <the physicell_design.json it applies>`).
 Prefix the bounded task with `STAGE_GATE {"upstream_session_id":"...","outputs":["..."]}`.
 The dispatch hook checks the durable records again. Explicit standalone sources use
 standalone_decision_id. Never run reviews in parallel with downstream work.

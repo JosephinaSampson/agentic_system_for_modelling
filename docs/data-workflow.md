@@ -434,7 +434,8 @@ must come from the `STAGE_GATE` upstream as in the design form. With either form
 the design, handoff by handoff, as the design check does: its `outputs` must be those of the current approval of
 one of the design's handoffs (a design may import several handoffs of one MaBoSS session, one per cell type). To run
 and quote that resolution before dispatch, add the design: `python3 scripts/gate.py check multicellular <MaBoSS
-session> --outputs ... --design runs/orchestrator/P/physicell_design.json` (it runs the design check first). The
+session> --outputs ... --design runs/orchestrator/P/physicell_design.json` (for a projection, its design; it runs the design check first,
+but neither pins the design's sha256 nor requires its approval: the dispatch hook does that). The
 design, projection and dictionary may be named only on the `DATA_INPUT` line.
 
 **Verification.** `verify_export.py` re-checks the projection, requires the stage-B capture to come from a new

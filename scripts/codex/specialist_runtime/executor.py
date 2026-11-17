@@ -27,7 +27,8 @@ from .models import SpecialistInvocationRequest, SpecialistExecutionResult, Exec
 from .lifecycle import validate_transition
 
 
-# DATA_INPUT forms the Codex runtime refuses before launch (checked first, so a wrong brief gets its own refusal).
+# DATA_INPUT forms the Codex runtime refuses before launch, after the hook's check has passed (so a wrong brief
+# still gets the hook's own refusal).
 CLAUDE_ONLY_DATA_INPUT = {
     "multicellular_configurator": (
         "a PhysiCell design or projection DATA_INPUT is Claude-only for now: its lineage and dictionary need the "
