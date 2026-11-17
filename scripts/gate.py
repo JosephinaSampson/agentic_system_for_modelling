@@ -166,6 +166,11 @@ def verify_manifest(root, data, expected_type, session, outputs=None):
     return data
 
 
+def _artifact_path(artifact):
+    """The path of an artifact reference for a message; a malformed reference is shown as is."""
+    return artifact.get("path") if isinstance(artifact, dict) else artifact
+
+
 def _newer_export(later, kind, session, upstream_stage, current, done, own, downstream):
     """ValueError naming the newest export of `session` that a `kind` record in `later` (the records after `own`)
     covers but `current` does not: a newer export supersedes the caller's handoff. Approvals count with any outputs
@@ -174,7 +179,7 @@ def _newer_export(later, kind, session, upstream_stage, current, done, own, down
              and r.get("stage") == upstream_stage and (downstream is None or r.get("downstream_stage") == downstream)
              and r.get("artifact") not in current]
     if newer:
-        path = (newer[-1].get("artifact") or {}).get("path")
+        path = _artifact_path(newer[-1].get("artifact"))
         raise ValueError(f"a newer export {path} of MaBoSS session {session} was {done} after this handoff's own "
                          f"{kind.split('_')[1]} {own.get('id')}; import it in the design or re-review")
 
@@ -217,7 +222,7 @@ def check(root, stage, session, outputs, artifact=None, current=None):
             approval = own[-1] if own else approval
         if approval.get("artifact") != artifact:
             raise ValueError(f"the approval of these outputs is of a different artifact "
-                             f"{(approval.get('artifact') or {}).get('path')} (superseded re-export?)")
+                             f"{_artifact_path(approval.get('artifact'))} (superseded re-export?)")
     validate_record(root, approval)
     manifest = checked_artifact(root, approval["artifact"])
     prefix = f"runs/{role}/{session}/"

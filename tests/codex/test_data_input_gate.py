@@ -1713,6 +1713,16 @@ def gate_calls(root, subagent_type, prompt):
     return status, err, task.call_count, check.call_count
 
 
+class NewerExportMessageTests(unittest.TestCase):
+    def test_malformed_artifact_refuses_with_a_value_error(self):
+        own = {"id": "own"}
+        for artifact in ("x", ["x"], None):
+            later = [{"kind": "stage_approval", "session_id": "s", "stage": "boolean_dynamics",
+                      "downstream_stage": "multicellular", "artifact": artifact}]
+            with self.assertRaisesRegex(ValueError, "a newer export"):
+                gate._newer_export(later, "stage_approval", "s", "boolean_dynamics", [], "approved", own, "multicellular")
+
+
 class HookRoleTests(unittest.TestCase):
     """PR #17 review 4586112665: every gated role takes DATA_INPUT; the hook has no check_job_mentions branch and
     fails closed (exit 2) on a gated role without a DATA_INPUT form."""
