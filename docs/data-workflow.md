@@ -386,16 +386,10 @@ multicellular-configurator from a `DATA_INPUT` line (line 2, after `STAGE_GATE`)
 
 **Session anchor and dispatch lineage.** The design's `session` is a lineage anchor, never a live session: the
 basis capture's session when the design has a basis, otherwise the purpose `P`. Every configurator run is a new
-session, so the stage-A capture is bound to the design by its dispatch: an invocation record
-`runs/multicellular-configurator/<session>/invocation/*/task.txt` of the capture's session has the design's
-`DATA_INPUT` line (path and sha256) as its line 2 (`scripts/physicell/lineage.py`), and is a brief the dispatch hook
-could have passed: line 1 is a well-formed `STAGE_GATE` bound to the design (for stage B, the projection's design)
-as the hook binds it (its `upstream_session_id` is the design's one MaBoSS handoff session; `standalone_decision_id`
-only for a design without MaBoSS handoffs, and that `standalone_approval` record must exist with exactly those
-outputs), the line's `approval` is a real `physicell_design` (or, for stage B, `physicell_projection`) approval of
-exactly that path and sha256, and its `record_session_id` is that approval's `session_id`. Only durable files decide
-this; the registry state the hook checked at dispatch is not re-checked. `capture_dictionary.py` and the projection check refuse a capture without that lineage; `verify_export.py` binds the stage-B capture to the
-projection the same way.
+session, so the stage-A capture is bound to the design, and the stage-B capture to the projection, by dispatch
+lineage (`scripts/physicell/lineage.py`; the rule is stated once, in
+[the architecture doc](data-to-physicell-architecture.md), under "Dispatch lineage"). `capture_dictionary.py`, the
+projection check and `verify_export.py` refuse a capture without it.
 
 **Design values.** The design carries every argument the configurator's build tools take, each cited (`from`), so
 the configurator never relies on a tool default or a typical value: the domain (`domain_x`, `domain_y`, `use_2d`,

@@ -94,7 +94,8 @@ When the stage applies a PhysiCell design or projection, check that these agree:
   that bind them; each capture's `capture.json` sha256 in the dictionary and projection;
 - lineage: the stage-A and stage-B sessions each have an invocation `task.txt` whose line 2 is the design's
   (stage A) or projection's (stage B) `DATA_INPUT` line, and the dictionary's `tool_calls.json` sits in the same
-  invocation folder as that stage-A `task.txt`;
+  invocation folder as that stage-A `task.txt` (the full rule: docs/data-to-physicell-architecture.md, "Dispatch
+  lineage");
 - verification file: `passed` true, its `before`/`after` bindings and projection sha256 match the files, and
   re-running `verify_export.py` (or `build.py`'s recomputation) gives the same result;
 - build report: `report.json` names the verification and its sha256, the copied files' sha256 equal the capture

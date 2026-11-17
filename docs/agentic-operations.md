@@ -300,13 +300,10 @@ python3 scripts/physicell/build.py --template template|template_BM [--version 1.
 `session_id` = the design's anchor (the basis capture's session, else `P`), `outputs` = the cell definition and
 substrate names; projection approval `session_id` = the capture's session, `outputs` = the entry ids. The
 dictionary is written once beside the design, from list calls made after the last structure-changing call, and
-only for a capture whose session has an invocation `task.txt` whose `STAGE_GATE` line 1 names the design's MaBoSS upstream (or, for a design without handoffs,
-an existing standalone decision) and whose
-line 2 is the design's `DATA_INPUT` line, naming a real approval of that design whose `session_id` equals its
-`record_session_id` (`scripts/physicell/lineage.py`; the projection check and `verify_export.py` require the same).
-`verify_export.py` writes `runs/orchestrator/P/physicell_verification.<session>.<capture>.json` (one file per
-attempt) and requires an invocation `task.txt` of the stage-B session whose line 2 is this projection's
-`DATA_INPUT` line. `build.py` copies settings only from a passed verification whose capture is unchanged and
+only for a capture bound to the design by dispatch lineage (`scripts/physicell/lineage.py`; the rule is stated once,
+in docs/data-to-physicell-architecture.md, "Dispatch lineage"); the projection check and `verify_export.py` require
+the same. `verify_export.py` writes `runs/orchestrator/P/physicell_verification.<session>.<capture>.json` (one file
+per attempt). `build.py` copies settings only from a passed verification whose capture is unchanged and
 whose recomputation (`verify_export.compute`) passes with the same result, and never runs the project. Details: docs/data-workflow.md.
 
 ## Evidence and provenance

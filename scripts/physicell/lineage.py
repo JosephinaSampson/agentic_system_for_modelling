@@ -1,23 +1,10 @@
 """Dispatch lineage of a multicellular-configurator session: which approved file its run was dispatched with.
 
 Every configurator run is a new PhysiCell session (record_session_id is only a lineage anchor), so a capture is
-bound to the stage-A design or the stage-B projection it was built from by its invocation record:
-runs/multicellular-configurator/<session>/invocation/<id>/task.txt keeps the dispatched brief, whose line 2 is the
-DATA_INPUT line the dispatch check verified (the Claude hook, or the Codex executor, which runs the same check).
-Lineage cannot tell which check ran, or whether one did: a recorded brief is lineage only when it is one that check
-could have passed, judged from durable state alone:
-  - line 1 is a well-formed STAGE_GATE (gate.stage_gate_form, the parser check_task uses);
-  - that STAGE_GATE is bound to the design (for a projection, the projection's design) as the hook binds it
-    (gate.design_upstream): with upstream_session_id, the design's MaBoSS handoffs all come from exactly that
-    session, and its outputs are exactly those of the boolean-dynamics stage_approval each handoff was verified
-    against (physicell_design.handoff_approval, the record the design check resolves); standalone_decision_id
-    only for a design without MaBoSS handoffs, and the standalone_approval record must exist for stage
-    multicellular with exactly those outputs (gate.standalone);
-  - line 2's approval is a real approval of the matching stage binding exactly this path and sha256
-    (approvals.require_physicell_design_approval / require_physicell_projection_approval), and its
-    record_session_id is that approval's session_id.
-The live registry state the hook also checked at dispatch (the MaBoSS session active and exported, its stage
-approval and review) may have changed since and is not re-checked here. Stdlib only.
+bound to the stage-A design or the stage-B projection it was built from by its invocation record
+runs/multicellular-configurator/<session>/invocation/<id>/task.txt. The rule (which recorded brief is lineage) is
+stated once, in docs/data-to-physicell-architecture.md under "Dispatch lineage"; dispatched_with reads the records
+and _verified checks one brief against durable state only, never the live registry. Stdlib only.
 """
 from __future__ import annotations
 

@@ -128,19 +128,35 @@ outline:
   every capture file re-verified against its `capture.json` on each read.
 - **Anchor:** the design's `session` is the basis capture's session, else `<p>`, and equals the
   approval's `session_id` and the `record_session_id`. A projection's anchor is its capture session.
-- **Dispatch lineage:** `lineage.dispatched_with` finds, in
-  `runs/multicellular-configurator/<session>/invocation/*/task.txt`, a line 2 that is exactly the
-  design or projection `DATA_INPUT` form naming that path and sha256, under a well-formed line-1
-  `STAGE_GATE` (`gate.stage_gate_form`, the one STAGE_GATE parser: `check_task` and the MaBoSS mapping
-  checks use it too, so duplicate keys are refused at dispatch and in lineage alike) bound to the design, for a projection to its design (`gate.design_upstream`:
-  `upstream_session_id` is the design's one MaBoSS handoff session; `standalone_decision_id` only without
-  handoffs, and its `standalone_approval` must exist, `gate.standalone`), whose `approval` is a real approval of the matching stage binding
-  exactly that path and sha256 (`approvals.require_physicell_design_approval` /
-  `require_physicell_projection_approval`) and whose `record_session_id` is that approval's `session_id`
-  (a run the hook never verified, e.g. under the Codex runtime, is no lineage). `capture_dictionary.py`
-  requires it in the same invocation folder as the parsed `tool_calls.json`; the projection check
-  binds its capture to the design; `verify_export.py` binds the stage-B capture (a session other
-  than stage A's) to the projection.
+- **Dispatch lineage** (the one statement of this rule; `scripts/physicell/lineage.py` implements it,
+  the other docs link here). Every configurator run is a new session, so a capture is bound to the
+  design or projection it was built from by an invocation record
+  `runs/multicellular-configurator/<session>/invocation/<id>/task.txt` of the capture's session. The
+  recorded brief is lineage only when it is one the dispatch check could have passed, judged from
+  durable files alone. That check is the Claude hook or the Codex executor, which runs the same
+  `check_data_input_and_stage_gate`; lineage cannot tell which one ran, or whether one did. The brief
+  must meet all of these conditions:
+  1. line 2 is exactly the design (or projection) `DATA_INPUT` form naming that path and sha256;
+  2. line 1 is a well-formed `STAGE_GATE` (`gate.stage_gate_form`, the one STAGE_GATE parser:
+     `check_task` and the MaBoSS mapping checks use it too, so duplicate keys are refused at dispatch
+     and in lineage alike);
+  3. that `STAGE_GATE` is bound to the design (for a projection, to its design; `gate.design_upstream`).
+     `upstream_session_id` is the session of every design MaBoSS handoff, and its `outputs` are
+     exactly those of the boolean-dynamics `stage_approval` each handoff was verified against
+     (`physicell_design.handoff_approval`, the record the design check resolves).
+     `standalone_decision_id` is allowed only for a design without handoffs, and its
+     `standalone_approval` must exist for stage multicellular with exactly those outputs
+     (`gate.standalone`);
+  4. the line's `approval` is a real approval of the matching stage binding exactly that path and
+     sha256 (`approvals.require_physicell_design_approval` / `require_physicell_projection_approval`),
+     and its `record_session_id` is that approval's `session_id`.
+
+  The live registry state the dispatch check also read (the MaBoSS session active and exported, its
+  review) is not re-checked, so a later supersession does not invalidate a past build. A refusal
+  names each record it refused and why. `capture_dictionary.py` requires the record in the same
+  invocation folder as the parsed `tool_calls.json`; the projection check binds its capture to the
+  design; `verify_export.py` binds the stage-B capture (a session other than stage A's) to the
+  projection.
 - **Gate:** the file is re-checked on exactly the approved bytes, then the approval and
   `record_session_id`. Design form: with `upstream_session_id`, every handoff lies under
   `runs/boolean-dynamics-modeler/<that session>/` (at least one); with `standalone_decision_id`,
