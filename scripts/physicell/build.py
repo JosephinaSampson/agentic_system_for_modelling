@@ -178,11 +178,6 @@ def _verification(root: Path, given: str) -> tuple[str, dict, bytes, ET.Element]
     after_rel = f"runs/{sx.SPECIALIST}/{session}/configs/{capture}"
     bound, tree = sx.capture_tree(root, after_rel)
     if bound != after:
-        missing = sorted(set(bound) - set(after))
-        if missing:
-            raise ValueError(f"{rel_text} records an after binding without {', '.join(missing)} (written before "
-                             "settings_xml recorded it), so it no longer matches the recorded binding: regenerate "
-                             "the verification with verify_export.py")
         raise ValueError(f"the captured configuration changed since {rel_text} verified it "
                          "(the after capture no longer matches the recorded binding); regenerate the verification "
                          "with verify_export.py")

@@ -152,9 +152,7 @@ outline:
   byte for byte and whose recomputed `entries`, `unexpected_changes`, `before`, `after` and
   `projection` equal the file's. The packaged XML and dependencies are copied into `config/`
   (replaced files kept as `.template-backup`); MaBoSS settings need `template_BM`. The report
-  records the verification sha256 and never runs `./project`. The capture binding (`before`, `after`)
-  includes `manifest_sha256` (the capture.json bytes `settings_xml.capture_tree` verified): verification files
-  written before it was added no longer match and must be regenerated with `verify_export.py`.
+  records the verification sha256 and never runs `./project`.
 - **Registry** (CLAUDE.md): stage-A row `Derived from` = the `STAGE_GATE` upstream MaBoSS session
   or standalone decision id, plus the basis capture's session with a basis; Artifacts cite the
   design path and short sha256. Stage-B row `Derived from` = the stage-A session; Artifacts cite the
