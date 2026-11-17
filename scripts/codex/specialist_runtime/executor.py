@@ -137,21 +137,20 @@ def _run(request: SpecialistInvocationRequest, execution: SpecialistExecutionRes
     # brief of a role with a DATA_INPUT form (network-curator, boolean-dynamics-modeler, multicellular-configurator,
     # ode-modeler) gets check_data_input_and_stage_gate, i.e. its DATA_INPUT line and the job-file and model-input
     # mention rules. A gated dispatch whose STAGE_GATE that check did not resolve then runs check_task. Fail
-    # closed, as the hook: any exception refuses the dispatch.
-    from scripts import gate
-    if request.specialist in gate.DATA_INPUT_LINE or needs_gate:
-        try:
-            gate_result = None
-            if request.specialist in gate.DATA_INPUT_LINE:
-                _, gate_result = gate.check_data_input_and_stage_gate(PROJECT_ROOT, request.specialist, request.task)
-            if needs_gate:
-                if gate_result is None:
-                    gate_result = gate.check_task(PROJECT_ROOT, request.specialist, request.task)
-                event_callback({"type": "stage_gate", "result": gate_result})
-        except Exception as exc:  # noqa: BLE001 - fail closed, never weaker than the hook
-            execution.handoff_error = f"stage gate failed: {exc}"
-            emit_status(execution.handoff_error)
-            return 2
+    # closed, as the hook: any exception, including an import failure of the gate, refuses the dispatch.
+    try:
+        from scripts import gate
+        gate_result = None
+        if request.specialist in gate.DATA_INPUT_LINE:
+            _, gate_result = gate.check_data_input_and_stage_gate(PROJECT_ROOT, request.specialist, request.task)
+        if needs_gate:
+            if gate_result is None:
+                gate_result = gate.check_task(PROJECT_ROOT, request.specialist, request.task)
+            event_callback({"type": "stage_gate", "result": gate_result})
+    except Exception as exc:  # noqa: BLE001 - fail closed, never weaker than the hook
+        execution.handoff_error = f"stage gate failed: {exc}"
+        emit_status(execution.handoff_error)
+        return 2
     try:
         codex = resolve_codex_executable(codex_executable)
         approved_tools = list(request.approved_tools)

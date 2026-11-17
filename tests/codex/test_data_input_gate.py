@@ -1453,6 +1453,20 @@ class PhysiCellDataInputTests(ProjectionBase):
         self.assertEqual((status, launched), (2, False))
         self.assertEqual(error, "stage gate failed: boom")
 
+    def test_codex_executor_fails_closed_when_the_gate_cannot_be_imported(self):
+        # round-3 follow-up: the gate import is inside the fail-closed block, so an import error refuses too
+        import scripts
+        prompt = self.task(self.design_line())
+        saved = scripts.gate
+        del scripts.gate
+        try:
+            with mock.patch.dict(sys.modules, {"scripts.gate": None}):
+                status, error, launched, _ = self.executor_run("multicellular_configurator", prompt)
+        finally:
+            scripts.gate = saved
+        self.assertEqual((status, launched), (2, False))
+        self.assertRegex(error, "^stage gate failed: .*scripts.gate")
+
     def errors_at(self, rel):
         from scripts.physicell import physicell_design
         return physicell_design.check(self.root, rel)
