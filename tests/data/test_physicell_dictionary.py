@@ -479,8 +479,12 @@ class ConformanceTests(DictionaryTests):
         self.refused(self.good(), "does not conform to the design.*" + pattern)
 
     def conform(self, design, capture):
-        """conformance on the caller's binding of `capture` (settings_xml.capture_tree), as its callers do."""
-        return cd.conformance(self.root, design, *cd.sx.capture_tree(self.root, capture))
+        """conformance on the caller's binding of `capture` (settings_xml.capture_tree) and, as the design check
+        hands them to its callers, the basis tree and the handoff manifests."""
+        basis = None if design["basis"] is None else cd.sx.capture_tree(self.root, design["basis"]["capture"])[1]
+        manifests = {i["cell_definition"]: cd.pd.handoff_manifest(self.root, i["maboss"])
+                     for i in design["intracellular"]}
+        return cd.conformance(design, *cd.sx.capture_tree(self.root, capture), basis, manifests)
 
     def test_conforming_capture_passes(self):
         self.assertEqual(self.conform(self.design, self.capture), [])
@@ -603,21 +607,28 @@ class ConformanceTests(DictionaryTests):
             if stage_a in path.parents:
                 reads.append(path.relative_to(stage_a).as_posix())
             return original(path)
-        with mock.patch.object(Path, "read_bytes", counting):
+        with mock.patch.object(Path, "read_bytes", counting), \
+                mock.patch.object(cd.sx, "capture_tree", wraps=cd.sx.capture_tree) as binds:
             out = json.loads(self.run_capture(self.good()).read_text())
+        # PR #17 review 4588363965: the basis too is bound once per dictionary (by the design check)
+        basis = [] if self.design["basis"] is None else [self.design["basis"]["capture"]]
+        self.assertEqual(sorted(c.args[1] for c in binds.call_args_list), sorted([self.capture, *basis]))
         files = ["capture.json", "original.xml", *(d["path"] for d in json.loads(
             (stage_a / "capture.json").read_text())["dependencies"]), f"package/config/{cd.sx.XML_NAME}"]
         self.assertEqual(sorted(reads), sorted(files))
         self.assertEqual(out["capture"]["sha256"], hashlib.sha256((stage_a / "capture.json").read_bytes()).hexdigest())
 
     def test_conformance_takes_the_binding(self):
-        # PR #17 review 4587427279: conformance never binds the stage-A capture itself
+        # PR #17 reviews 4587427279, 4588363965 and 4588366540: conformance binds no capture (neither the stage-A
+        # capture nor the basis) and reads no handoff; it takes them from its caller
         from unittest import mock
+        checked = cd.pd.load_checked(self.root, REL)
+        self.assertEqual(checked.errors, [])
         bound, tree = cd.sx.capture_tree(self.root, self.capture)
-        with mock.patch.object(cd.sx, "capture_tree", wraps=cd.sx.capture_tree) as binds:
-            self.assertEqual(cd.conformance(self.root, self.design, bound, tree), [])
-        basis = [] if self.design["basis"] is None else [self.design["basis"]["capture"]]
-        self.assertEqual([c.args[1] for c in binds.call_args_list], basis)
+        with mock.patch.object(cd.sx, "capture_tree", wraps=cd.sx.capture_tree) as binds, \
+                mock.patch.object(cd.pd, "handoff_manifest", wraps=cd.pd.handoff_manifest) as reads:
+            self.assertEqual(cd.conformance(checked.data, bound, tree, checked.basis_tree, checked.manifests), [])
+        self.assertEqual((binds.call_count, reads.call_count), (0, 0))
 
     def test_no_enabled_rules_ruleset(self):
         self.refused_capture("enabled rules ruleset", rules=True)

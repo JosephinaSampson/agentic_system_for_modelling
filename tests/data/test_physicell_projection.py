@@ -424,7 +424,9 @@ class CaptureBoundOnceTests(ProjectionBase):
         self.write_projection(self.projection())
         with binding_reads(self.root) as (binds, reads):
             self.assertEqual(pp.check(self.root, PROJ), [])
-        self.assertEqual(binds[self.capture], 1)
+        # PR #17 review 4588363965: the design's basis too is bound once (by the design check; conformance takes
+        # its tree)
+        self.assertEqual(dict(binds), {self.capture: 1, self.design["basis"]["capture"]: 1})
         self.assertEqual(reads[(self.capture, "capture.json")], 1)
         self.assertEqual(reads[(self.capture, "package/config/PhysiCell_settings.xml")], 1)
         assert_read_only_by_bindings(self, binds, reads)
@@ -445,17 +447,17 @@ class CheckedDesignTests(ProjectionBase):
 
     def test_design_failing_lineage_is_not_returned(self):
         self.write_projection(self.projection())
-        self.assertIsNotNone(pp.load_and_check_with_design(self.root, PROJ)[3])
+        self.assertIsNotNone(pp.load_checked(self.root, PROJ).design)
         for task in (self.root / f"runs/multicellular-configurator/{STAGE_A}/invocation").glob("*/task.txt"):
             task.unlink()
-        _, _, errors, design = pp.load_and_check_with_design(self.root, PROJ)
+        _, _, errors, design, _ = pp.load_checked(self.root, PROJ)
         self.assertTrue(any("was not dispatched with it" in e for e in errors), errors)
         self.assertIsNone(design)
 
     def test_design_failing_conformance_is_not_returned(self):
         self.write_projection(self.projection())
         with mock.patch.object(pp.cd, "conformance", return_value=["a difference"]):
-            _, _, errors, design = pp.load_and_check_with_design(self.root, PROJ)
+            _, _, errors, design, _ = pp.load_checked(self.root, PROJ)
         self.assertTrue(any("does not conform to the design: a difference" in e for e in errors), errors)
         self.assertIsNone(design)
 
@@ -464,14 +466,15 @@ class HandoffManifestTests(ProjectionBase):
     """PR #17 review 4587428064: one helper, physicell_design.handoff_manifest, reads a design's MaBoSS handoff once,
     checks the design's sha256 and parses it; the design check, conformance and the projection check all use it."""
 
-    def test_projection_check_reads_handoffs_through_the_helper(self):
+    def test_projection_check_reads_each_handoff_once(self):
+        # PR #17 review 4588366540: the design check (maboss_handoff) reads each handoff once and hands the manifests
+        # to conformance and design_section, which read no handoff themselves
         from scripts.physicell import physicell_design as pd
         self.write_projection(self.projection())
         with mock.patch.object(pd, "handoff_manifest", wraps=pd.handoff_manifest) as helper:
             self.assertEqual(pp.check(self.root, PROJ), [])
         ref = self.design["intracellular"][0]["maboss"]
-        # maboss_handoff (the design re-check), conformance and design_section: each through the helper
-        self.assertEqual([c.args[1] for c in helper.call_args_list], [ref, ref, ref])
+        self.assertEqual([c.args[1] for c in helper.call_args_list], [ref])
 
     def test_helper_reads_once_checks_sha256_and_parses(self):
         from scripts.physicell import physicell_design as pd

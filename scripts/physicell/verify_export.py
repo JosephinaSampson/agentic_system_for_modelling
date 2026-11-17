@@ -386,17 +386,22 @@ def verify(root: Path, projection_rel: str, new_capture_rel: str) -> Path:
     return path
 
 
-def compute(root: Path, projection_rel: str, new_capture_rel: str) -> dict:
+def compute(root: Path, projection_rel: str, new_capture_rel: str, after_binding: tuple | None = None) -> dict:
     """The verification report of the stage-B capture against the projection (pure: writes nothing). It re-runs the
-    projection check and the lineage check; ValueError on a refusal. build.py recomputes it (ruling T9-d)."""
+    projection check and the lineage check; ValueError on a refusal. build.py recomputes it (ruling T9-d).
+
+    Each capture is bound once: the stage-A capture (`before`) and the design's basis by the projection check, whose
+    binding and tree are used here; the new capture by sx.capture_tree here, or `after_binding`, the caller's
+    (binding, tree) of exactly new_capture_rel from sx.capture_tree (build.py passes the one it just verified)."""
     root = Path(root)
-    data, digest, errors, design = pp.load_and_check_with_design(root, projection_rel)
-    if errors:
-        raise ValueError(f"projection {projection_rel} fails its check: " + "; ".join(errors))
-    before, before_xml = _bind(root, data["capture"]["path"])
-    after, after_xml = _bind(root, new_capture_rel)
-    if before["manifest_sha256"] != data["capture"]["sha256"]:
-        raise ValueError(f"capture {data['capture']['path']} changed since the projection check")
+    checked = pp.load_checked(root, projection_rel)
+    if checked.errors:
+        raise ValueError(f"projection {projection_rel} fails its check: " + "; ".join(checked.errors))
+    data, digest, design = checked.data, checked.digest, checked.design
+    # capture_section bound it once and compared its manifest_sha256 with capture.sha256; the trees are deep-copied
+    # below before any change
+    before, before_xml = checked.capture
+    after, after_xml = sx.capture_tree(root, new_capture_rel) if after_binding is None else after_binding
     if after["session"] == before["session"]:
         raise ValueError(f"lineage: the new capture {new_capture_rel} is in session {after['session']}, the "
                          f"projection's capture session; stage B runs in a new session")

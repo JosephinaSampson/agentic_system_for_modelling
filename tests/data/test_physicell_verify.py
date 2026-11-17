@@ -14,7 +14,7 @@ from scripts.capture.record_physicell_config import record_physicell
 from scripts.physicell import physicell_projection as pp
 from scripts.physicell import settings_xml as sx
 from scripts.physicell import verify_export as ve
-from tests.data.test_physicell_design import STAGE_A, ensure_approval
+from tests.data.test_physicell_design import REL, STAGE_A, ensure_approval
 from tests.data.test_physicell_projection import (APOPTOSIS, PROJ, SRC, ProjectionBase, assert_read_only_by_bindings,
                                                   binding_reads, q, sha)
 
@@ -629,19 +629,22 @@ class BuildHandoffTests(VerifyBase):
         self.assertEqual((rel, data), (OUTPUT, result))
 
     def test_no_capture_file_is_read_outside_a_binding(self):
-        # PR #17 review 4587427664: compute binds with sx.capture_tree (verify_export._bind) and uses the binding's
-        # manifest_sha256; build._verification binds with capture_tree and _physiboss uses that tree
+        # PR #17 reviews 4587427664 and 4588363965: each capture (the after capture, the stage-A capture and the
+        # design's basis) is bound once per verification, by sx.capture_tree, and its tree is passed down;
+        # build._verification passes its fresh binding of the after capture to the recomputation (ruling T9-d)
         from scripts.physicell import build
         after = self.export()
         self.verify(after)
+        basis = json.loads((self.root / REL).read_text())["basis"]
+        once = {after: 1, self.capture: 1, **({basis["capture"]: 1} if basis else {})}
         with binding_reads(self.root) as (binds, reads):
             ve.compute(self.root, PROJ, after)
-        self.assertEqual(binds[after], 1)
+        self.assertEqual(dict(binds), once)
         assert_read_only_by_bindings(self, binds, reads)
         with binding_reads(self.root) as (binds, reads):
             rel, data, raw, tree = build._verification(self.root, OUTPUT)
             self.assertTrue(build._physiboss(tree))  # the stage-A design carries a MaBoSS model
-        self.assertEqual(binds[after], 2)  # the file's binding and the recomputation (ruling T9-d), nothing else
+        self.assertEqual(dict(binds), once)
         assert_read_only_by_bindings(self, binds, reads)
 
     def forge(self, after, **changes):

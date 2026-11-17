@@ -15,7 +15,7 @@ Steps, in order (the toolchain and the verification are checked before anything 
   settings   optional, --verification runs/orchestrator/<p>/physicell_verification.*.json: it must be a
              physicell_verification, schema_version 1, passed true, and its `after` capture must re-bind byte for
              byte (settings_xml.capture). The verification is then recomputed (verify_export.compute on the file's
-             projection path and after capture: projection check, lineage, comparison); it must pass and its
+             projection path and the after capture as just bound, never bound again: projection check, lineage, comparison); it must pass and its
              entries, unexpected_changes, before, after and projection must equal the file's. The packaged PhysiCell_settings.xml and every package/config
              dependency are copied into the project's config/; a file that would be replaced is first renamed
              <name>.template-backup (an existing backup is refused). Settings carrying an intracellular
@@ -191,7 +191,7 @@ def _verification(root: Path, given: str) -> tuple[str, dict, bytes, ET.Element]
     if not isinstance(projection, dict) or not isinstance(projection.get("path"), str):
         raise ValueError(f"{rel_text} records no projection path")
     try:
-        recomputed = json.loads(json.dumps(ve.compute(root, projection["path"], after_rel)))
+        recomputed = json.loads(json.dumps(ve.compute(root, projection["path"], after_rel, (bound, tree))))
     except (ValueError, OSError, UnicodeDecodeError) as exc:
         raise ValueError(f"{rel_text} cannot be re-verified: {exc}") from exc
     if recomputed["passed"] is not True:

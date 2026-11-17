@@ -1397,7 +1397,7 @@ class PhysiCellDataInputTests(ProjectionBase):
             status, err = run_hook(hook, self.root, "multicellular-configurator", self.task(self.projection_line()))
         self.assertEqual(status, 0, err)
         self.assertEqual([c.args[1] for c in loads.call_args_list], [DESIGN_REL])
-        data, digest, errors, design = physicell_projection.load_and_check_with_design(self.root, MC_PROJ)
+        data, digest, errors, design, _ = physicell_projection.load_checked(self.root, MC_PROJ)
         self.assertEqual((errors, design), ([], json.loads((self.root / DESIGN_REL).read_text())))
         self.assertEqual(physicell_projection.load_and_check(self.root, MC_PROJ), (data, digest, errors))
 

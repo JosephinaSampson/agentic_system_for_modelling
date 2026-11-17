@@ -64,6 +64,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 if __package__ in (None, ""):  # run as a script: make the repo importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -150,7 +151,8 @@ def _basis_input_files(bound: dict) -> list:
 def handoff_manifest(root: Path, ref: dict) -> dict:
     """The MaBoSS handoff manifest a design pins (ref = its intracellular {handoff, sha256}): read once, its sha256
     must be ref["sha256"] and the object is parsed (strict_json) from those very bytes; ValueError otherwise. The one
-    reader of a design handoff after gate.check: the design check, conformance and the projection check use it."""
+    reader of a design handoff after gate.check: the design check reads each handoff once with it and hands the
+    manifests on (Checked.manifests) to conformance and the projection check."""
     raw = state.artifact(Path(root), ref["handoff"]).read_bytes()
     if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
         raise ValueError("it changed since the design check")
@@ -300,6 +302,8 @@ class _Checker(Citations):
     def __init__(self, root: Path):
         super().__init__(root)
         self.basis: dict | None = None
+        self.basis_tree = None        # the basis capture's package XML, parsed from the bytes basis_section verified
+        self.manifests: dict = {}     # {cell definition: its handoff manifest}, as maboss_handoff read and checked it
         self.cycle_names: dict = {}
         self.cells: set = set()
         self.substrate_names: set = set()
@@ -326,6 +330,7 @@ class _Checker(Citations):
                             self.error(f"basis: capture {basis['capture']} has input files ({', '.join(files)}); "
                                        f"{sx.INPUT_FILES_RELOAD}")
                     self.basis = _facts(bound, tree)
+                    self.basis_tree = tree
                 except (ValueError, OSError) as exc:
                     self.error(f"basis: {exc}")
         if not isinstance(session, str) or not state.ID.fullmatch(session):
@@ -588,6 +593,7 @@ class _Checker(Citations):
             if target != cell:
                 raise ValueError(f"its target cell_type is {target!r} but it is bound to cell definition {cell!r}; "
                                  f"re-export the MaBoSS handoff for that cell type")
+            self.manifests[cell] = manifest
         except (ValueError, OSError, KeyError, TypeError) as exc:
             self.error(f"{label}: MaBoSS handoff {rel} is not an exported, approved maboss-to-physicell "
                        f"handoff: {exc}")
@@ -657,8 +663,26 @@ def _load(root: Path, rel: str) -> tuple[dict, str]:
     return data, hashlib.sha256(raw).hexdigest()
 
 
+class Checked(NamedTuple):
+    """A design as its check loaded it, and what the check bound and read, for callers to pass down (never re-read):
+    basis_tree is the basis capture's package XML parsed from the bytes the check verified (None without a basis or
+    when its binding failed); manifests maps each intracellular cell definition to its MaBoSS handoff manifest, read
+    once from the bytes the design pins (handoff_manifest), for every handoff the check accepted."""
+    data: dict
+    digest: str
+    errors: list
+    basis_tree: object
+    manifests: dict
+
+
 def load_and_check(root: Path, rel: str) -> tuple[dict, str, list[str]]:
     """(design, sha256 of exactly those bytes, every problem); ValueError if it cannot be read at all."""
+    checked = load_checked(root, rel)
+    return checked.data, checked.digest, checked.errors
+
+
+def load_checked(root: Path, rel: str) -> Checked:
+    """load_and_check, plus the basis tree and the handoff manifests the check bound and read (Checked)."""
     root = Path(root)
     data, digest = _load(root, rel)
     checker = _Checker(root)
@@ -679,7 +703,7 @@ def load_and_check(root: Path, rel: str) -> tuple[dict, str, list[str]]:
         checker.unmapped_section(data["unmapped"])
         checker.sources.uncited()
         checker.uncited_data()
-    return data, digest, checker.errors
+    return Checked(data, digest, checker.errors, checker.basis_tree, checker.manifests)
 
 
 def check(root: Path, rel: str) -> list[str]:

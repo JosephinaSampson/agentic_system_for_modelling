@@ -67,6 +67,7 @@ import json
 import math
 import sys
 from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 if __package__ in (None, ""):  # run as a script: make the repo importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -283,7 +284,8 @@ class _Checker(pd.Citations):
             return
         first_error = len(self.errors)
         try:
-            design, digest, problems = pd.load_and_check(self.root, ref["path"])
+            checked = pd.load_checked(self.root, ref["path"])  # binds the basis and reads each handoff once
+            design, digest, problems = checked.data, checked.digest, checked.errors
         except (ValueError, OSError, UnicodeDecodeError) as exc:
             self.error(f"design {ref['path']!r}: {exc}")
             return
@@ -306,7 +308,8 @@ class _Checker(pd.Citations):
                            f"{exc}")
         if self.capture is not None:
             try:  # ruling T9-b: stage B starts only from a stage-A capture that conforms to its design
-                problems = cd.conformance(self.root, design, self.bound, self.xml)  # the capture bound once
+                # the capture bound once (capture_section); the basis tree and manifests from the design check
+                problems = cd.conformance(design, self.bound, self.xml, checked.basis_tree, checked.manifests)
             except (ValueError, OSError) as exc:
                 problems = [str(exc)]
             if problems:
@@ -317,7 +320,7 @@ class _Checker(pd.Citations):
         for item in design["intracellular"]:
             handoff = item["maboss"]
             try:
-                manifest = pd.handoff_manifest(self.root, handoff)
+                manifest = checked.manifests[item["cell_definition"]]  # as the design check read it
                 network = manifest["network"]
                 readouts = list(manifest.get("readouts") or {})
                 self.maboss[item["cell_definition"]] = {
@@ -648,16 +651,29 @@ def _load(root: Path, rel: str) -> tuple[dict, str]:
     return data, _sha(raw)
 
 
+class Checked(NamedTuple):
+    """A projection as its check loaded it, and what the check bound, for callers to pass down (never re-read):
+    design is the projection's design (the bytes of design.path whose sha256 is design.sha256), only when every check
+    of the design passed: re-checked, approved, the capture's session dispatched with it (lineage), the capture
+    conforming to it and its handoffs read; None otherwise (then a problem is listed). capture is the stage-A
+    capture's (binding, tree) as settings_xml.capture_tree bound it, its manifest_sha256 equal to capture.sha256;
+    None when that failed."""
+    data: dict
+    digest: str
+    errors: list
+    design: dict | None
+    capture: tuple | None
+
+
 def load_and_check(root: Path, rel: str) -> tuple[dict, str, list[str]]:
     """(projection, sha256 of exactly those bytes, every problem); ValueError if it cannot be read at all."""
-    return load_and_check_with_design(root, rel)[:3]
+    checked = load_checked(root, rel)
+    return checked.data, checked.digest, checked.errors
 
 
-def load_and_check_with_design(root: Path, rel: str) -> tuple[dict, str, list[str], dict | None]:
-    """load_and_check, plus the projection's design as its check loaded it (the bytes of design.path whose sha256 is
-    design.sha256), only when every check of the design passed: re-checked, approved, the capture's session
-    dispatched with it (lineage), the capture conforming to it and its handoffs read; None otherwise (then a problem
-    is listed). Callers needing the design use it instead of reading the design again."""
+def load_checked(root: Path, rel: str) -> Checked:
+    """load_and_check, plus the design and the capture binding the check loaded (Checked). Callers needing them use
+    these instead of reading or binding them again."""
     root = Path(root)
     data, digest = _load(root, rel)
     checker = _Checker(root)
@@ -674,7 +690,8 @@ def load_and_check_with_design(root: Path, rel: str) -> tuple[dict, str, list[st
         checker.unmapped_section(data["unmapped"])
         checker.sources.uncited()
         checker.uncited_data()
-    return data, digest, checker.errors, checker.design
+    capture = (checker.bound, checker.xml) if checker.capture is not None else None
+    return Checked(data, digest, checker.errors, checker.design, capture)
 
 
 def check(root: Path, rel: str) -> list[str]:

@@ -565,8 +565,10 @@ class Smoke:
         for tag, field in (("bnd_filename", "bnd_file"), ("cfg_filename", "cfg_file")):
             name = Path(model.findtext(tag).strip()).name
             assert deps[name] == handoff[field]["sha256"], (tag, name, deps, handoff[field])
-        design = json.loads((self.root / REAL_DESIGN).read_text())
-        problems = cd.conformance(self.root, design, *sx.capture_tree(self.root, a["capture"]))
+        checked = cd.pd.load_checked(self.root, REAL_DESIGN)  # as capture_dictionary.py: the design check's tree, manifests
+        assert checked.errors == [], checked.errors
+        problems = cd.conformance(checked.data, *sx.capture_tree(self.root, a["capture"]), checked.basis_tree,
+                                  checked.manifests)
         assert problems == [], problems
         # a stage-A capture that differs from the design (oxygen decay_rate) is refused before any dictionary
         folder = Path(a["artifacts"])

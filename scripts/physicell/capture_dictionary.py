@@ -370,14 +370,17 @@ def _cells(design: dict, tree, problems: list) -> None:
 MODEL_FILES = (("bnd", "bnd_filename", "bnd_file"), ("cfg", "cfg_filename", "cfg_file"))
 
 
-def _handoff_models(root: Path, design: dict, problems: list) -> dict:
-    """{carrier: {"bnd": sha256, "cfg": sha256}} from each design handoff manifest's bnd_file / cfg_file, read from
-    exactly the bytes the design pins (physicell_design.handoff_manifest); an unreadable handoff is a problem."""
+def _handoff_models(design: dict, manifests: dict, problems: list) -> dict:
+    """{carrier: {"bnd": sha256, "cfg": sha256}} from each design handoff manifest's bnd_file / cfg_file, as the
+    design check read it from exactly the bytes the design pins (physicell_design.Checked.manifests; nothing is read
+    here); a handoff the check did not read, or without those fields, is a problem."""
     models = {}
     for item in design["intracellular"]:
         cell, ref = item["cell_definition"], item["maboss"]
         try:
-            manifest = pd.handoff_manifest(root, ref)
+            manifest = manifests.get(cell)
+            if not isinstance(manifest, dict):
+                raise ValueError("the design check read no manifest for it")
             models[cell] = {}
             for key, _, field in MODEL_FILES:
                 digest = (manifest.get(field) or {}).get("sha256")
@@ -413,24 +416,24 @@ def _carrier_models(tree, manifest: dict, models: dict, problems: list) -> None:
                                 "MaBoSS export was imported")
 
 
-def conformance(root: Path, design: dict, bound: dict, tree) -> list[str]:
+def conformance(design: dict, bound: dict, tree, basis_tree, manifests: dict) -> list[str]:
     """Every difference between a checked design and its stage-A capture (ruling T9-b); [] when it conforms.
 
     `bound, tree` is the caller's settings_xml.capture_tree of the stage-A capture (the binding and the XML parsed
-    from exactly the verified bytes); conformance never binds or reads that capture again.
+    from exactly the verified bytes); `basis_tree` and `manifests` are what the design check bound and read
+    (physicell_design.Checked: the basis capture's tree, None without a basis, and each handoff's manifest).
+    conformance binds no capture and reads no file.
 
     The cell definitions (plus nothing else), their cycles, the substrates (the untouched library default substrate
     of a new configuration aside) with their label, values, units and Dirichlet settings, the domain and max_time
     (with a basis: the basis capture's), the MaBoSS models on exactly the design's carriers, each holding exactly the
     .bnd/.cfg bytes (sha256) of its design handoff's bnd_file/cfg_file, no PhysiBoSS link and no enabled rules
     ruleset."""
-    root = Path(root)
-    basis_tree = None
-    if design["basis"] is not None:
-        basis_tree = sx.capture_tree(root, design["basis"]["capture"])[1]
     problems: list[str] = []
+    if design["basis"] is not None and basis_tree is None:
+        problems.append(f"the basis capture {design['basis']['capture']} was not bound by the design check")
     _cells(design, tree, problems)
-    _carrier_models(tree, bound["manifest"], _handoff_models(root, design, problems), problems)
+    _carrier_models(tree, bound["manifest"], _handoff_models(design, manifests, problems), problems)
     _substrates(design, tree, problems)
     _domain(design, tree, basis_tree, problems)
     parents = {child: parent for parent in tree.iter() for child in parent}
@@ -446,9 +449,10 @@ def capture_dictionary(root: Path, invocation_rel: str, capture_rel: str, design
     bound, tree = sx.capture_tree(root, capture_rel)  # bound once: conformance and the record use this binding
     if bound["session"] != session:
         raise ValueError(f"invocation session {session} is not the capture's session {bound['session']}")
-    design, design_sha, problems = pd.load_and_check(root, design_rel)
-    if problems:
-        raise ValueError("the design is not valid: " + "; ".join(problems))
+    checked = pd.load_checked(root, design_rel)  # binds the basis and reads each handoff once
+    design, design_sha = checked.data, checked.digest
+    if checked.errors:
+        raise ValueError("the design is not valid: " + "; ".join(checked.errors))
     # the design's session is a lineage anchor; this run's session is bound to the design by its dispatch, and the
     # parsed tool_calls.json is the record of that very dispatch (review M2: same invocation folder)
     folder = PurePosixPath(invocation).parent.as_posix()
@@ -459,7 +463,7 @@ def capture_dictionary(root: Path, invocation_rel: str, capture_rel: str, design
         # dispatched_with says which record it refused and why (no task.txt, line 1 or 2, approval, binding)
         raise ValueError(f"lineage of {folder} (its tool_calls.json must be the record of a verified dispatch of the "
                          f"design): {exc}") from exc
-    problems = conformance(root, design, bound, tree)
+    problems = conformance(design, bound, tree, checked.basis_tree, checked.manifests)
     if problems:
         raise ValueError(f"the stage-A capture {capture_rel} does not conform to the design: " + "; ".join(problems))
     path = root / invocation

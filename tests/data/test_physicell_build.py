@@ -425,8 +425,9 @@ class SettingsCopyTests(Base):
         self.verification_path = self.root / VERIFICATION
         self.write_verification()
 
-    def recompute(self, root, projection, after):
+    def recompute(self, root, projection, after, after_binding):
         self.assertEqual((projection, after), ("runs/orchestrator/p1/physicell_projection.json", CAPTURE_REL))
+        self.assertEqual(after_binding[0], sx.capture(root, CAPTURE_REL))  # _verification's own binding is passed
         return json.loads(self.verification_path.read_text(encoding="utf-8"))
 
     def write_verification(self, **overrides):

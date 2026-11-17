@@ -624,7 +624,7 @@ def _check_physicell_input(root, value, first_line):
     physicell_projection approval binds path and sha256, and record_session_id is the approval's session_id and
     the projection's capture session; stage B replays the projection's design, so its MaBoSS handoffs are bound to the
     STAGE_GATE upstream exactly as for the design form (_check_design_upstream on the design the projection check
-    re-checked, physicell_projection.load_and_check_with_design; it is not read again).
+    re-checked, physicell_projection.load_checked(...).design; it is not read again).
     record_session_id is a lineage anchor, never a live session: the configurator starts a new PhysiCell session,
     builds the design (loading a design's basis XML, if any; for a projection, replaying the projection's design)
     and never passes record_session_id to a tool.
@@ -653,7 +653,8 @@ def _check_physicell_input(root, value, first_line):
     else:
         from scripts.physicell import physicell_projection
         require = approvals.require_physicell_projection_approval
-        data, actual, errors, design = physicell_projection.load_and_check_with_design(root, rel)
+        checked = physicell_projection.load_checked(root, rel)
+        data, actual, errors, design = checked.data, checked.digest, checked.errors, checked.design
     if actual != digest:
         raise ValueError(f"{rel} has sha256 {actual[:12]}, not the DATA_INPUT sha256 {digest[:12]} "
                          f"(changed since approval {approval_id}?)")
