@@ -286,6 +286,41 @@ class DictionaryTests(Base):
         self.write(self.design)  # still a valid design, but not the one stage A was dispatched with
         self.refused(self.good(), "lineage")
 
+    def test_lineage_refusal_carries_lineage_s_reason(self):
+        # PR #17 review 4588364259: the capture_dictionary refusal says why lineage refused, never "has no task.txt"
+        # when there is one
+        task = self.root / f"runs/multicellular-configurator/{STAGE_A}/invocation/agent-1/task.txt"
+        lines = task.read_text().splitlines()
+        payload = json.loads(lines[1][len("DATA_INPUT "):])
+        cases = {
+            "malformed line 1": (["Build it.", *lines[1:]], r"line 1 is not a STAGE_GATE line\)$"),
+            "line 2 not DATA_INPUT": ([lines[0], "Build the design.", *lines[2:]],
+                                      r"agent-1/task.txt \(line 2 is not a DATA_INPUT line\)$"),
+            "malformed line 2": ([lines[0], "DATA_INPUT {", *lines[2:]],
+                                 r"agent-1/task.txt \(line 2 is not a strict JSON DATA_INPUT object: .*\)$"),
+            "line 2 of another form": ([lines[0], "DATA_INPUT " + json.dumps({**payload, "x": 1}), *lines[2:]],
+                                       r"agent-1/task.txt \(line 2 is not the design DATA_INPUT form "),
+            "refused approval": ([lines[0], "DATA_INPUT " + json.dumps({**payload, "approval": "bogus"}), *lines[2:]],
+                                 r"decision_id not found.*\)$"),
+            "unrelated upstream": (['STAGE_GATE {"upstream_session_id": "maboss-unrelated", "outputs": ["A"]}',
+                                    *lines[1:]], r"upstream_session_id maboss-unrelated; every design handoff must "
+                                                 r"be under runs/boolean-dynamics-modeler/maboss-unrelated/\)$"),
+        }
+        for name, (text, reason) in cases.items():
+            with self.subTest(case=name):
+                task.write_text("\n".join(text) + "\n")
+                with self.assertRaises(ValueError) as caught:
+                    self.run_capture(self.good())
+                message = str(caught.exception)
+                self.assertNotIn("has no task.txt", message)
+                self.assertRegex(message, r"^lineage of runs/multicellular-configurator/.*/agent-1 \(its "
+                                          r"tool_calls.json must be the record of a verified dispatch of the design\): "
+                                          r"lineage: no invocation record")
+                self.assertRegex(message, reason)
+        task.unlink()
+        with self.assertRaisesRegex(ValueError, r"agent-1/task.txt does not exist$"):
+            self.run_capture(self.good())
+
     def test_line_two_with_an_extra_or_missing_key_is_not_lineage(self):
         # parked minor 3: only the exact design form satisfies dispatched_with
         from scripts import state
@@ -406,7 +441,7 @@ class DictionaryTests(Base):
     def test_tool_calls_must_sit_beside_the_dispatched_task(self):
         # review M2: the parsed tool_calls.json is in the invocation folder whose task.txt has the design line
         other = f"runs/multicellular-configurator/{STAGE_A}/invocation/agent-2/tool_calls.json"
-        self.refused(self.good(), "agent-2.*no task.txt with the design's DATA_INPUT line", rel=other)
+        self.refused(self.good(), "lineage of .*/agent-2 .*agent-2/task.txt does not exist$", rel=other)
         dispatch_design(self.root, agent="agent-2")
         self.assertTrue(self.run_capture(self.good(), rel=other).is_file())
 

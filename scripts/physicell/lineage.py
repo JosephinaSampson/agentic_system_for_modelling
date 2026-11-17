@@ -63,7 +63,9 @@ def dispatched_with(root: Path, session: str, key: str, rel: str, sha256: str, i
     <invocation_id>/task.txt when given) whose line 2 is a well-formed `key` (design or projection) DATA_INPUT line
     naming exactly `rel` and `sha256`, whose line 1 is a well-formed STAGE_GATE bound to `design`, whose approval is
     a real approval of that stage binding exactly `rel` and `sha256` and whose record_session_id is the approval's
-    session_id (the module docstring); ValueError if none (naming the records refused and why). `design` is the
+    session_id (the module docstring); ValueError if none, naming each record refused and why (no task.txt; line 2
+    not a DATA_INPUT line, not strict JSON or not the `key` form; another file or sha256; a refused STAGE_GATE,
+    binding, approval or record_session_id). `design` is the
     checked design: the file `rel` itself for key "design", the projection's design for key "projection", as the
     caller's check loaded it. `session` and `invocation_id` must be identifiers."""
     if key not in FORMS:
@@ -82,19 +84,27 @@ def dispatched_with(root: Path, session: str, key: str, rel: str, sha256: str, i
     if invocation_id is not None:
         folder_rel = f"{folder_rel}/{invocation_id}"
         reject_symlinks(folder / invocation_id, root)
-    other_sha, unverified = [], []
-    for task in sorted(folder.glob(pattern)) if folder.is_dir() else []:
+    malformed, other_file, other_sha, unverified = [], [], [], []
+    tasks = sorted(folder.glob(pattern)) if folder.is_dir() else []
+    for task in tasks:
         reject_symlinks(task, root)
+        task_rel = task.relative_to(root).as_posix()
         lines = task.read_text(encoding="utf-8", errors="replace").splitlines()
         if len(lines) < 2 or not lines[1].startswith(PREFIX):
+            malformed.append(f"{task_rel} (line 2 is not a DATA_INPUT line)")
             continue
         try:
             value = strict_json(lines[1][len(PREFIX):].encode("utf-8"))
-        except ValueError:
+        except ValueError as exc:
+            malformed.append(f"{task_rel} (line 2 is not a strict JSON DATA_INPUT object: {exc})")
             continue
-        if not isinstance(value, dict) or set(value) != FORMS[key] or value.get(key) != rel:
+        if not isinstance(value, dict) or set(value) != FORMS[key]:
+            malformed.append(f"{task_rel} (line 2 is not the {key} DATA_INPUT form "
+                             f"{{{', '.join(sorted(FORMS[key]))}}})")
             continue
-        task_rel = task.relative_to(root).as_posix()
+        if value.get(key) != rel:
+            other_file.append(f"{task_rel} ({key} {value.get(key)!r})")
+            continue
         if value.get("sha256") != sha256:
             other_sha.append(f"{task_rel} (sha256 {value.get('sha256')})")
             continue
@@ -104,10 +114,19 @@ def dispatched_with(root: Path, session: str, key: str, rel: str, sha256: str, i
             unverified.append(f"{task_rel} ({exc})")
             continue
         return task_rel
-    hint = f"; records naming it with another sha256: {', '.join(other_sha)}" if other_sha else ""
+    where = f"{folder_rel}/task.txt" if invocation_id is not None else f"{folder_rel}/*/task.txt"
+    if not tasks:
+        hint = f": {where} does not exist" if invocation_id is not None else f": there is no {where}"
+    else:
+        hint = ""
+    if malformed:
+        hint += f"; records whose line 2 is not a {key} DATA_INPUT line: {'; '.join(malformed)}"
+    if other_file:
+        hint += f"; records naming another {key}: {', '.join(other_file)}"
+    if other_sha:
+        hint += f"; records naming it with another sha256: {', '.join(other_sha)}"
     if unverified:
         hint += ("; records naming it that no verified dispatch could have produced (STAGE_GATE and its binding to "
                  f"the design, approval, record_session_id): {'; '.join(unverified)}")
-    where = f"{folder_rel}/task.txt" if invocation_id is not None else f"{folder_rel}/*/task.txt"
     raise ValueError(f"lineage: no invocation record {where} has as its line 2 the DATA_INPUT line naming {key} "
                      f"{rel} with sha256 {sha256}{hint}")

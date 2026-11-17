@@ -456,8 +456,9 @@ def capture_dictionary(root: Path, invocation_rel: str, capture_rel: str, design
         lineage.dispatched_with(root, session, "design", design_rel, design_sha, PurePosixPath(invocation).parts[4],
                                 design=design)
     except ValueError as exc:
-        raise ValueError(f"lineage: the invocation folder {folder} has no task.txt with the design's DATA_INPUT line "
-                         f"(its tool_calls.json must be the record of the dispatched run): {exc}") from exc
+        # dispatched_with says which record it refused and why (no task.txt, line 1 or 2, approval, binding)
+        raise ValueError(f"lineage of {folder} (its tool_calls.json must be the record of a verified dispatch of the "
+                         f"design): {exc}") from exc
     problems = conformance(root, design, bound, tree)
     if problems:
         raise ValueError(f"the stage-A capture {capture_rel} does not conform to the design: " + "; ".join(problems))
