@@ -71,7 +71,8 @@ if __package__ in (None, ""):  # run as a script: make the repo importable
 from scripts import gate, state  # noqa: E402
 from scripts.data import approvals  # noqa: E402
 from scripts.data import sources as user_sources  # noqa: E402
-from scripts.data.common import finite_number, project_root, reject_symlinks, sha256_file, strict_json  # noqa: E402
+from scripts.data.common import (bound_json, finite_number, project_root, reject_symlinks, sha256_file,  # noqa: E402
+                                 strict_json)
 from scripts.physicell import settings_xml as sx  # noqa: E402
 
 KEYS = ("kind", "schema_version", "basis", "session", "domain", "cycle_models", "cell_definitions", "substrates",
@@ -153,13 +154,7 @@ def handoff_manifest(root: Path, ref: dict) -> dict:
     must be ref["sha256"] and the object is parsed (strict_json) from those very bytes; ValueError otherwise. The one
     reader of a design handoff after gate.check: the design check reads each handoff once with it and hands the
     manifests on (Checked.manifests) to conformance and the projection check."""
-    raw = state.artifact(Path(root), ref["handoff"]).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
-        raise ValueError("it changed since the design check")
-    manifest = strict_json(raw)
-    if not isinstance(manifest, dict):
-        raise ValueError("it is not a JSON object")
-    return manifest
+    return bound_json(state.artifact(Path(root), ref["handoff"]), ref["sha256"], "it", "the design check")[1]
 
 
 def write_new(root: Path, path: Path, text: str) -> None:

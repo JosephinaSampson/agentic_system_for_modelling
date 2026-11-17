@@ -10,7 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from scripts.data.common import RUNS_ROOT
+from scripts.data.common import RUNS_ROOT, bound_bytes, json_object
 
 
 def _state():
@@ -136,10 +136,7 @@ def _artifact_approval(root: Path, record_id: str, stage: str, rel: str, sha256:
         raise ValueError(f"decision {record_id} artifact must be {rel}")
     if approved.get("sha256") != sha256:
         raise ValueError(f"decision {record_id} approves a different sha256 than {sha256}")
-    raw = state.artifact(root, rel).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != sha256:
-        raise ValueError(f"{rel} changed since approval {record_id} (sha256 mismatch)")
-    return record, raw
+    return record, bound_bytes(state.artifact(root, rel), sha256, rel, f"approval {record_id}")
 
 
 def _require_artifact_approval(root: Path, record_id: str, stage: str, rel: str, sha256: str) -> dict:
@@ -156,15 +153,9 @@ def require_seeds_approval(root: Path, record_id: str, seeds_rel: str, sha256: s
     return _require_artifact_approval(root, record_id, "data_seeds", seeds_rel, sha256)
 
 
-def _ode_mapping_outputs(root: Path, rel: str, sha256: str) -> tuple[str | None, set]:
-    """(ODE session, measurement ids used by rules + fitted names) of an ode_mapping.json, tolerant of shape.
-
-    The bytes are read once; their digest must equal `sha256` and the outputs come from those same bytes.
-    """
-    state = _state()
-    raw = state.artifact(Path(root), rel).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != sha256:
-        raise ValueError(f"{rel} changed during approval check (sha256 mismatch)")
+def _ode_mapping_outputs(rel: str, raw: bytes) -> tuple[str | None, set]:
+    """(ODE session, measurement ids used by rules + fitted names) of an ode_mapping.json, tolerant of shape, from
+    the bytes _artifact_approval read and hashed (the file is not read again)."""
     try:
         data = json.loads(raw.decode("utf-8"))
     except ValueError as exc:
@@ -196,9 +187,9 @@ def require_ode_mapping_approval(root: Path, record_id: str, rel: str, sha256: s
     ode-modeler gate does not re-run the check: it requires the job.json beside the calibration proposal to
     name this same mapping path, sha256 and approval, and calls this function.
     """
-    record = _require_artifact_approval(root, record_id, "ode_mapping", rel, sha256)
+    record, raw = _artifact_approval(root, record_id, "ode_mapping", rel, sha256)
     _state().validate_record(Path(root), record)
-    session, expected = _ode_mapping_outputs(root, rel, sha256)
+    session, expected = _ode_mapping_outputs(rel, raw)
     if record.get("session_id") != session:
         raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
                          f"but the mapping binds ODE session {session!r}")
@@ -233,9 +224,8 @@ def require_calibration_approval(root: Path, record_id: str, rel: str, sha256: s
     if approved.get("sha256") != sha256:
         raise ValueError(f"decision {record_id} approves a different sha256 than {sha256}")
     state.validate_record(root, record)
-    raw = state.artifact(root, rel).read_bytes()  # one read: the hash and the parsed proposal agree
-    if hashlib.sha256(raw).hexdigest() != sha256:
-        raise ValueError(f"{rel} changed since approval {record_id} (sha256 mismatch)")
+    # one read: the hash and the parsed proposal agree
+    raw = bound_bytes(state.artifact(root, rel), sha256, rel, f"approval {record_id}")
     try:
         proposal = strict_json(raw)
     except (ValueError, RecursionError) as exc:
@@ -304,18 +294,6 @@ def require_proposal_job(root: Path, rel: str, proposal: dict) -> dict:
     return job
 
 
-def _json_object(rel: str, raw: bytes) -> dict:
-    """The JSON object parsed (strict_json) from the bytes of `rel` already read and hashed by the caller."""
-    from scripts.data.common import strict_json
-    try:
-        data = strict_json(raw)
-    except (ValueError, RecursionError) as exc:
-        raise ValueError(f"cannot read {rel}: {exc}") from None
-    if not isinstance(data, dict):
-        raise ValueError(f"{rel} must be a JSON object")
-    return data
-
-
 def _physicell_design_facts(rel: str, data: dict) -> tuple[str | None, list]:
     """(session anchor, cell definition and substrate names) of a physicell_design.json, tolerant of shape: the
     basis capture's session, else the purpose <p> of runs/orchestrator/<p>/... (a lineage anchor)."""
@@ -354,7 +332,7 @@ def _require_physicell_approval(root: Path, record_id: str, rel: str, sha256: st
     session_words, outputs_words = what
     record, raw = _artifact_approval(root, record_id, stage, rel, sha256)
     _state().validate_record(Path(root), record)
-    session, names = facts_fn(rel, _json_object(rel, raw))
+    session, names = facts_fn(rel, json_object(raw, rel))
     if record.get("session_id") != session:
         raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
                          f"but {session_words} {session!r}")

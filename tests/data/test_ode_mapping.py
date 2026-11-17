@@ -863,6 +863,36 @@ class ApprovalTests(OdeFixture):
         with self.assertRaisesRegex(ValueError, "ode_mapping"):
             approvals.require_ode_mapping_approval(self.root, "stg-1", MAP, digest)
 
+    def test_mapping_read_once_per_approval_check(self):
+        # PR #17 review 4588365410: the ode_mapping file is read and hashed once per approval check; its outputs come
+        # from those same bytes (state.validate_record re-hashes the record's artifact itself: not counted)
+        self.complete()
+        digest = sha(self.root / MAP)
+        self.add({"id": "ok-1", "kind": "stage_approval", "stage": "ode_mapping", "session_id": SESSION,
+                  "outputs": ["M1", "M2", "M3", "M4", "M5", "M6", "kf1", "kf2"],
+                  "artifact": {"path": MAP, "sha256": digest}})
+        reads, validating = [], []
+        read_bytes, read_text, validate = Path.read_bytes, Path.read_text, state.validate_record
+
+        def counted(original):
+            def read(where, *args, **kwargs):
+                if where.name == "ode_mapping.json" and not validating:
+                    reads.append(where.name)
+                return original(where, *args, **kwargs)
+            return read
+
+        def validate_record(*args):
+            validating.append(1)
+            try:
+                return validate(*args)
+            finally:
+                validating.pop()
+        with mock.patch.object(Path, "read_bytes", counted(read_bytes)), \
+                mock.patch.object(Path, "read_text", counted(read_text)), \
+                mock.patch.object(state, "validate_record", validate_record):
+            self.assertEqual(approvals.require_ode_mapping_approval(self.root, "ok-1", MAP, digest)["id"], "ok-1")
+        self.assertEqual(reads, ["ode_mapping.json"])
+
     def test_mapping_approval_runs_validate_record(self):
         # PR 16 review gate.py:575: every caller (build, gate) gets validate_record
         self.complete()

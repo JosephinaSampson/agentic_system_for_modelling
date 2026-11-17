@@ -489,11 +489,12 @@ class HandoffManifestTests(ProjectionBase):
         with mock.patch.object(Path, "read_bytes", counting):
             manifest = pd.handoff_manifest(self.root, ref)
         self.assertEqual((len(reads), manifest), (1, json.loads((self.root / ref["handoff"]).read_text())))
-        with self.assertRaisesRegex(ValueError, "^it changed since the design check$"):
+        # PR #17 review 4588365410: the shared helper's wording (scripts.data.common.bound_json)
+        with self.assertRaisesRegex(ValueError, r"^it changed since the design check \(sha256 mismatch\)$"):
             pd.handoff_manifest(self.root, {**ref, "sha256": "0" * 64})
         path = self.root / ref["handoff"]
         path.write_bytes(b"[1]")
-        with self.assertRaisesRegex(ValueError, "not a JSON object"):
+        with self.assertRaisesRegex(ValueError, "^it must be a JSON object$"):
             pd.handoff_manifest(self.root, {**ref, "sha256": sha(path)})
 
 

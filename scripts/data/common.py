@@ -81,3 +81,33 @@ def finite_number(value) -> bool:
 def strict_json(raw: bytes):
     """Parse UTF-8 JSON, refusing duplicate keys and NaN/Infinity."""
     return json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_keys, parse_constant=_no_constant)
+
+
+# Read once, check the sha256, parse: the one helper (and wording) for a file bound by a recorded sha256, so a caller
+# uses exactly the bytes it checked and never reads the file again.
+
+def bound_bytes(path: Path, sha256: str, what: str, since: str) -> bytes:
+    """The bytes of `path`, read once; ValueError "<what> changed since <since> (sha256 mismatch)" unless they hash
+    to `sha256`."""
+    raw = Path(path).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != sha256:
+        raise ValueError(f"{what} changed since {since} (sha256 mismatch)")
+    return raw
+
+
+def json_object(raw: bytes, what: str) -> dict:
+    """The JSON object strict_json parses from `raw` (bytes of `what` its caller read and hashed); ValueError
+    "cannot read <what>: ..." or "<what> must be a JSON object"."""
+    try:
+        data = strict_json(raw)
+    except (ValueError, RecursionError) as exc:
+        raise ValueError(f"cannot read {what}: {exc}") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"{what} must be a JSON object")
+    return data
+
+
+def bound_json(path: Path, sha256: str, what: str, since: str) -> tuple[bytes, dict]:
+    """(bytes, JSON object) of `path`: bound_bytes, then json_object of those very bytes."""
+    raw = bound_bytes(path, sha256, what, since)
+    return raw, json_object(raw, what)
