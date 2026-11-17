@@ -8,6 +8,7 @@ and _verified checks one brief against durable state only, never the live regist
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from scripts import gate, state
@@ -29,15 +30,16 @@ def _verified(root: Path, key: str, rel: str, sha256: str, first_line: str, valu
     if "standalone_decision_id" in stage_gate:
         gate.standalone(root, "multicellular", stage_gate["standalone_decision_id"], stage_gate["outputs"])
     else:
-        # the outputs of the approval each design handoff was verified against (durable: DECISIONS.md is
-        # append-only); never the live gate.check, so a later supersession does not invalidate a past build
+        # the outputs of any recorded approval of one of the design's handoffs, binding its exact path and sha256
+        # (durable: DECISIONS.md is append-only; the design check verifies every handoff itself). Never the live
+        # gate.check, and never only the latest approval: a later re-approval does not undo a past dispatch.
         recs = state.records((root / "DECISIONS.md").read_text(encoding="utf-8"))
-        for item in design["intracellular"]:
-            approval = pd.handoff_approval(recs, item["maboss"])
-            if approval["outputs"] != stage_gate["outputs"]:
-                raise ValueError(f"STAGE_GATE outputs {stage_gate['outputs']} are not the outputs {approval['outputs']} "
-                                 f"of approval {approval.get('id')} of the design's MaBoSS handoff "
-                                 f"{item['maboss']['handoff']}")
+        named = [a.get("outputs") for item in design["intracellular"]
+                 for a in pd.handoff_approvals(recs, item["maboss"])]
+        if stage_gate["outputs"] not in named:
+            known = sorted({json.dumps(o) for o in named})
+            raise ValueError(f"STAGE_GATE outputs {stage_gate['outputs']} are not the outputs of any recorded approval "
+                             f"of the design's MaBoSS handoffs ({', '.join(known) or 'none'})")
     record = REQUIRE[key](root, value["approval"], rel, sha256)  # runs validate_record
     if value["record_session_id"] != record.get("session_id"):
         raise ValueError(f"its record_session_id {value['record_session_id']!r} is not the session_id "

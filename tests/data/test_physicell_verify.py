@@ -753,7 +753,7 @@ class ProjectionLineageTests(VerifyBase):
                                "may import no MaBoSS handoff"),
                               # PR #17 review 4588363532: the upstream gate's outputs are checked too
                               ('STAGE_GATE {"upstream_session_id": "maboss-session", "outputs": ["zzz"]}',
-                               r"STAGE_GATE outputs \['zzz'\] are not the outputs \['A', 'B'\] of approval")):
+                               r"STAGE_GATE outputs \['zzz'\] are not the outputs of any recorded approval")):
             with self.subTest(gate=first):
                 path = self.invocation()
                 lines = path.read_text().splitlines()

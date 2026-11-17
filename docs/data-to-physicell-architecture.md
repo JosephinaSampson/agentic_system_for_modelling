@@ -142,8 +142,11 @@ outline:
      and in lineage alike);
   3. that `STAGE_GATE` is bound to the design (for a projection, to its design; `gate.design_upstream`).
      `upstream_session_id` is the session of every design MaBoSS handoff, and its `outputs` are
-     exactly those of the boolean-dynamics `stage_approval` each handoff was verified against
-     (`physicell_design.handoff_approval`, the record the design check resolves).
+     exactly those of a recorded boolean-dynamics `stage_approval` of one of the design's handoffs,
+     binding its exact path and sha256 (`physicell_design.handoff_approvals`). The design check
+     verifies every handoff against its own latest approval and review. A design may import several
+     handoffs of one MaBoSS session (one per cell type), and a later re-approval of the same artifact
+     does not undo an earlier dispatch.
      `standalone_decision_id` is allowed only for a design without handoffs, and its
      `standalone_approval` must exist for stage multicellular with exactly those outputs
      (`gate.standalone`);

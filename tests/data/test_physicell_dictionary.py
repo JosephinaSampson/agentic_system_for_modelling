@@ -9,7 +9,7 @@ from pathlib import Path
 
 from scripts.physicell import capture_dictionary as cd
 from scripts.capture.record_physicell_config import record_physicell
-from tests.data.test_physicell_design import REL, STAGE_A, Base, built_capture, dispatch_design
+from tests.data.test_physicell_design import MABOSS, REL, STAGE_A, Base, built_capture, dispatch_design
 
 P = "mcp__physicell-agent__"
 SIGNALS_TOOL, BEHAVIORS_TOOL = "list_all_available_signals", "list_all_available_behaviors"
@@ -385,7 +385,8 @@ class DictionaryTests(Base):
                  # PR #17 review 4588363532: an upstream gate's outputs are those of the handoff's approval
                  "upstream gate with other outputs": ('STAGE_GATE {"upstream_session_id": "maboss-session", '
                                                       '"outputs": ["zzz"]}', r"STAGE_GATE outputs \['zzz'\] are not "
-                                                      r"the outputs \['A', 'B'\] of approval")}
+                                                      r"the outputs of any recorded approval of the design's MaBoSS "
+                                                      r"handoffs \(\[\"A\", \"B\"\]\)")}
         for name, (first, reason) in cases.items():
             with self.subTest(case=name):
                 task.write_text("\n".join([first, *lines[1:]]) + "\n")
@@ -394,6 +395,29 @@ class DictionaryTests(Base):
                 self.refused(self.good(), "lineage: no invocation record")
         task.write_text("\n".join(lines) + "\n")
         self.assertTrue(self.run_capture(self.good()).is_file())  # the design's own MaBoSS upstream passes
+
+    def test_re_approval_with_other_outputs_keeps_an_earlier_lineage(self):
+        # round-3 follow-up item 4: lineage accepts the outputs of any recorded approval of the design's handoff
+        # (exact path and sha256), so re-approving the same artifact with other outputs does not undo the lineage of
+        # a capture dispatched under the earlier outputs; outputs no approval names are still refused
+        from scripts import state
+        from scripts.physicell import lineage
+        digest = state.digest(self.root / REL)
+        ref = self.design["intracellular"][0]["maboss"]
+        state.update(self.root, "record", {
+            "id": "approval-again", "kind": "stage_approval", "session_id": MABOSS, "stage": "boolean-dynamics",
+            "downstream_stage": "multicellular", "outputs": ["A"], "approved_by": "researcher",
+            "authorization": "approved", "artifact": {"path": ref["handoff"], "sha256": ref["sha256"]}})
+        self.assertTrue(lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest,
+                                                design=self.design).endswith("task.txt"))  # gate ["A", "B"]
+        task = self.root / f"runs/multicellular-configurator/{STAGE_A}/invocation/agent-1/task.txt"
+        lines = task.read_text().splitlines()
+        task.write_text("\n".join([lines[0].replace('["A", "B"]', '["A"]'), *lines[1:]]) + "\n")
+        self.assertTrue(lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest,
+                                                design=self.design).endswith("task.txt"))  # gate ["A"]
+        task.write_text("\n".join([lines[0].replace('["A", "B"]', '["zzz"]'), *lines[1:]]) + "\n")
+        with self.assertRaisesRegex(ValueError, r"\['zzz'\] are not the outputs of any recorded approval"):
+            lineage.dispatched_with(self.root, STAGE_A, "design", REL, digest, design=self.design)
 
     def test_standalone_lineage_needs_a_design_without_handoffs_and_the_record(self):
         # PR #17 review 4587425869: standalone_decision_id only for a design importing no MaBoSS handoff, and only

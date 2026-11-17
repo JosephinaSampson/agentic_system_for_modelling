@@ -166,7 +166,17 @@ def verify_manifest(root, data, expected_type, session, outputs=None):
     return data
 
 
-def check(root, stage, session, outputs):
+def check(root, stage, session, outputs, artifact=None, current=None):
+    """The durable and live checks of an upstream session for `stage` with exactly `outputs`.
+
+    Without `artifact`: the session's latest approval of exactly these outputs and its latest review decide.
+    With `artifact` (one of several exports of the session, each reviewed and approved on its own, e.g. a MaBoSS
+    handoff per cell type) and `current` (every artifact of this session the caller imports, `artifact` among them):
+    when the session's latest approval of these outputs, or its latest review, is of one of `current`, the approval
+    and the review used are this artifact's own latest ones; otherwise they are those latest ones, as without
+    `artifact` (so a later export the caller does not import still supersedes it). With current == [artifact] this
+    is exactly the check without `artifact`."""
+    current = [artifact] if artifact is not None and current is None else current
     if stage not in UPSTREAM:
         raise ValueError("unknown downstream stage")
     identifier(session)
@@ -185,6 +195,9 @@ def check(root, stage, session, outputs):
     if not approvals:
         raise ValueError("no researcher approval names this session, downstream stage and exact outputs")
     approval = approvals[-1]
+    if artifact is not None and approval.get("artifact") in current:
+        own = [r for r in approvals if r.get("artifact") == artifact]
+        approval = own[-1] if own else approval
     validate_record(root, approval)
     manifest = checked_artifact(root, approval["artifact"])
     prefix = f"runs/{role}/{session}/"
@@ -212,6 +225,9 @@ def check(root, stage, session, outputs):
     if not reviews:
         raise ValueError("independent scientific review and reproducibility audit have not been recorded")
     review = reviews[-1]
+    if artifact is not None and review.get("artifact") in current:
+        own = [r for r in reviews if r.get("artifact") == artifact]
+        review = own[-1] if own else review
     validate_record(root, review)
     if review["outcome"] not in {"approved", "approved_with_limitations"} or review["artifact"] != approval["artifact"]:
         raise ValueError("latest independent review blocks or covers a different artifact revision")

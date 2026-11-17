@@ -1453,6 +1453,71 @@ class PhysiCellDataInputTests(ProjectionBase):
         self.assertEqual((status, launched), (2, False))
         self.assertEqual(error, "stage gate failed: boom")
 
+    def second_handoff_of_the_same_session(self):
+        """A second maboss-to-physicell handoff of MC_MABOSS (for tumor_hypoxic, declared outputs ["A"]), reviewed
+        and approved after the first (one MaBoSS session exporting a handoff per cell type)."""
+        from tests.data.test_physicell_design import file_ref
+        folder = self.root / "runs/boolean-dynamics-modeler" / MC_MABOSS
+        manifest = {"schema_name": "mcp-biomodelling-handoff", "schema_version": "1.0",
+                    "handoff_type": "maboss-to-physicell", "source": {"server": "MaBoSS", "session_id": MC_MABOSS},
+                    "network": {"nodes": ["A", "B", "C"], "output_nodes": ["A"]},
+                    "bnd_file": file_ref(self.root, folder / "model.bnd", "MaBoSS", MC_MABOSS, "maboss_bnd"),
+                    "cfg_file": file_ref(self.root, folder / "model.cfg", "MaBoSS", MC_MABOSS, "maboss_cfg"),
+                    "lineage": [], "simulation": {}, "target": {"cell_type": "tumor_hypoxic"}}
+        path = folder / "handoff-hypoxic.json"
+        path.write_text(json.dumps(manifest))
+        ref = {"path": str(path.relative_to(self.root)), "sha256": sha(path)}
+        review = {"id": "review-hypoxic", "kind": "stage_review", "session_id": MC_MABOSS,
+                  "stage": "boolean-dynamics", "outcome": "approved", "artifact": ref}
+        for role in ("scientific-reviewer", "reproducibility-auditor"):
+            report = self.root / "runs" / f"{role}-hypoxic.md"
+            report.write_text("independent bounded review")
+            review[role] = {"path": str(report.relative_to(self.root)), "sha256": sha(report)}
+        state.update(self.root, "record", review)
+        state.update(self.root, "record", {
+            "id": "approval-hypoxic", "kind": "stage_approval", "session_id": MC_MABOSS, "stage": "boolean-dynamics",
+            "downstream_stage": "multicellular", "outputs": ["A"], "approved_by": "researcher",
+            "authorization": "approved", "artifact": ref})
+        return ref
+
+    def test_two_handoffs_of_one_maboss_session(self):
+        # round-3 follow-up item 4: a design importing two handoffs of one MaBoSS session (one per cell type), each
+        # approved with its own outputs, passes the design check, the dispatch gate and lineage
+        from scripts.physicell import lineage, physicell_design
+        hypoxic = self.second_handoff_of_the_same_session()
+        data = json.loads(json.dumps(self.design))
+        data["intracellular"].append({"cell_definition": "tumor_hypoxic",
+                                      "maboss": {"handoff": hypoxic["path"], "sha256": hypoxic["sha256"]}})
+        self.write(data, DESIGN_B)
+        self.assertEqual(physicell_design.check(self.root, DESIGN_B), [])
+        self.approve_design("design-2", DESIGN_B, data)
+        # the STAGE_GATE names the outputs of the session's latest reviewed and approved export
+        gate_line = "STAGE_GATE " + json.dumps({"upstream_session_id": MC_MABOSS, "outputs": ["A"]})
+        prompt = self.task(self.design_line(rel=DESIGN_B, approval="design-2"), gate_line=gate_line)
+        self.accepted(prompt)
+        task = self.root / "runs/multicellular-configurator/mc-stage-two/invocation/agent-1/task.txt"
+        task.parent.mkdir(parents=True)
+        task.write_text(prompt + "\n")
+        digest = sha(self.root / DESIGN_B)
+        self.assertTrue(lineage.dispatched_with(self.root, "mc-stage-two", "design", DESIGN_B, digest,
+                                                design=data).endswith("task.txt"))
+        # an output list no approval of the design's handoffs names is still refused
+        task.write_text(prompt.replace('"outputs": ["A"]', '"outputs": ["zzz"]', 1) + "\n")
+        with self.assertRaisesRegex(ValueError, r"STAGE_GATE outputs \['zzz'\] are not the outputs of any"):
+            lineage.dispatched_with(self.root, "mc-stage-two", "design", DESIGN_B, digest, design=data)
+        # nothing else is loosened: a later reviewed export of the session that the design does not import still
+        # supersedes both handoffs in the design check
+        folder = self.root / "runs/boolean-dynamics-modeler" / MC_MABOSS
+        later = folder / "handoff-later.json"
+        later.write_bytes((folder / "handoff.json").read_bytes() + b"\n")
+        review = json.loads(json.dumps([r for r in state.records((self.root / "DECISIONS.md").read_text())
+                                        if r.get("id") == "review-hypoxic"][0]))
+        review.update(id="review-later", artifact={"path": str(later.relative_to(self.root)), "sha256": sha(later)})
+        state.update(self.root, "record", review)
+        problems = physicell_design.check(self.root, DESIGN_B)
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(all("latest independent review blocks or covers a different artifact" in p for p in problems))
+
     def test_codex_executor_fails_closed_when_the_gate_cannot_be_imported(self):
         # round-3 follow-up: the gate import is inside the fail-closed block, so an import error refuses too
         import scripts
