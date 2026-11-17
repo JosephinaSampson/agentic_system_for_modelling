@@ -156,8 +156,8 @@ The procedure is in [ODE workflow](ode-workflow.md). In outline:
   Keep the mapping unchanged until the proposal is applied. For a changed mapping use a new
   purpose; the earlier proposal stays scoreable but cannot be applied.
 - **Gzip bytes depend on the host,** so bundle hashes are stable per host, not across zlib builds.
-- **Applying a calibration is Claude-only for now:** the Codex executor verifies the `DATA_INPUT` line as
-  the hook does, but the Codex ode-modeler returns `blocked`.
+- **Applying a calibration is Claude-only for now:** the Codex executor runs the hook's check on the
+  `DATA_INPUT` line and then refuses it before launch; the Codex ode-modeler would return `blocked`.
 - **Cancel cannot reach a process group whose supervisor died.**
 - **Foreign-host SLURM restarts** depend on `sacct`.
 - **Calibration does not change structure.** Structural misfit returns to topology review.

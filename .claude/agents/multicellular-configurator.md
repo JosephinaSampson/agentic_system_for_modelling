@@ -120,7 +120,8 @@ The orchestrator compares the stage-A capture with the design before anything el
   Apply only the projection entries. Then export (Cell Rules CSV before XML).
 
 Report every applied entry id with its requested and stored values, and label the values `data-derived` (projection
-path and sha256, approval id). The dispatch hook, and under Codex the runtime, verify this DATA_INPUT before launch.
+path and sha256, approval id). The dispatch hook verifies this DATA_INPUT before launch; under Codex the runtime refuses
+this DATA_INPUT (Claude-only for now).
 Return `blocked` when the DATA_INPUT line, the basis XML, a declared name or an entry does not match the
 configuration.
 

@@ -27,6 +27,18 @@ from .models import SpecialistInvocationRequest, SpecialistExecutionResult, Exec
 from .lifecycle import validate_transition
 
 
+# DATA_INPUT forms the Codex runtime refuses before launch (checked first, so a wrong brief gets its own refusal).
+CLAUDE_ONLY_DATA_INPUT = {
+    "multicellular_configurator": (
+        "a PhysiCell design or projection DATA_INPUT is Claude-only for now: its lineage and dictionary need the "
+        "Claude invocation record runs/multicellular-configurator/<session>/invocation/<id>/ (task.txt, "
+        "tool_calls.json), which the Codex runtime does not write; dispatch it from Claude"),
+    "ode_modeler": (
+        "applying a calibration DATA_INPUT is Claude-only for now: the Codex ode-modeler has no calibration "
+        "procedure and would return blocked; dispatch it from Claude"),
+}
+
+
 def prepare(request: SpecialistInvocationRequest) -> SpecialistExecutionResult:
     """Persist the bounded input before preflight or any child can start."""
     started_at = utc_now()
@@ -136,13 +148,17 @@ def _run(request: SpecialistInvocationRequest, execution: SpecialistExecutionRes
     # The same check as the Claude dispatch hook (.claude/scripts/stage_gate_guard.py), before any launch: every
     # brief of a role with a DATA_INPUT form (network-curator, boolean-dynamics-modeler, multicellular-configurator,
     # ode-modeler) gets check_data_input_and_stage_gate, i.e. its DATA_INPUT line and the job-file and model-input
-    # mention rules. A gated dispatch whose STAGE_GATE that check did not resolve then runs check_task. Fail
+    # mention rules; a valid PhysiCell design/projection or ODE calibration DATA_INPUT is then refused as Claude-only
+    # (CLAUDE_ONLY_DATA_INPUT). A gated dispatch whose STAGE_GATE that check did not resolve then runs check_task. Fail
     # closed, as the hook: any exception, including an import failure of the gate, refuses the dispatch.
     try:
         from scripts import gate
         gate_result = None
         if request.specialist in gate.DATA_INPUT_LINE:
-            _, gate_result = gate.check_data_input_and_stage_gate(PROJECT_ROOT, request.specialist, request.task)
+            data_input, gate_result = gate.check_data_input_and_stage_gate(
+                PROJECT_ROOT, request.specialist, request.task)
+            if data_input is not None and request.specialist in CLAUDE_ONLY_DATA_INPUT:
+                raise ValueError(CLAUDE_ONLY_DATA_INPUT[request.specialist])
         if needs_gate:
             if gate_result is None:
                 gate_result = gate.check_task(PROJECT_ROOT, request.specialist, request.task)

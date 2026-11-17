@@ -213,6 +213,15 @@ class MabossDataInputTests(DataInputFixture):
         super().setUp()
         self.stage_gate_ready()
 
+    def test_codex_executor_launches_neko_and_maboss_data_input_briefs(self):
+        # PR #17 review 4594813584: only the PhysiCell and calibration forms are Claude-only; the NeKo and MaBoSS
+        # DATA_INPUT briefs still launch after passing the check
+        for specialist, prompt in (("network_curator", self.neko_task()),
+                                   ("boolean_dynamics_modeler", self.maboss_task())):
+            with self.subTest(specialist=specialist):
+                status, error, launched, _ = executor_run(self.root, specialist, prompt)
+                self.assertEqual((status, launched, error), (2, True, "stop at preflight"))
+
     def test_maboss_mapping_ok(self):
         result = gate.check_data_input(self.root, "boolean_dynamics_modeler", self.maboss_task())
         self.assertEqual(result, {"mapping": self.mapping_rel, "sha256": sha(self.root / self.mapping_rel),
@@ -972,6 +981,13 @@ class OdeCalibrationInputTests(HoldoutFixture):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertRegex(result.stderr, pattern)
 
+    def test_codex_executor_refuses_the_calibration_brief(self):
+        # PR #17 review 4594813584: applying a calibration is Claude-only; the executor refuses it before launch
+        self.assertEqual(self.hook("ode-modeler", self.task()).returncode, 0)
+        status, error, launched, _ = executor_run(self.root, "ode_modeler", self.task())
+        self.assertEqual((status, launched), (2, False), error)
+        self.assertRegex(error, "^stage gate failed: .*Claude-only for now")
+
     def test_accepted_brief_passes(self):
         result = self.hook("ode-modeler", self.task())
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1402,20 +1418,7 @@ class PhysiCellDataInputTests(ProjectionBase):
         self.assertEqual(physicell_projection.load_and_check(self.root, MC_PROJ), (data, digest, errors))
 
     def executor_run(self, specialist, prompt):
-        """(exit status, handoff_error, whether the Codex launch was reached, stage_gate events) of one Codex
-        executor dispatch; the launch is stopped at its first preflight step."""
-        from types import SimpleNamespace
-        from scripts.codex.specialist_runtime import executor
-        from scripts.codex.specialist_runtime.models import SpecialistInvocationRequest
-        request = SpecialistInvocationRequest(specialist, prompt)
-        execution = SimpleNamespace(started_at="2026-11-17T00:00:00+00:00", invocation_id="test", handoff_error=None)
-        events = []
-        with mock.patch.object(executor, "PROJECT_ROOT", self.root), \
-                mock.patch.object(executor, "resolve_codex_executable",
-                                  side_effect=ValueError("stop at preflight")) as launch:
-            status = executor._run(request, execution, transition=lambda x: None, event_callback=events.append,
-                                   cancellation_requested=lambda: False)
-        return status, execution.handoff_error, launch.called, [e for e in events if e["type"] == "stage_gate"]
+        return executor_run(self.root, specialist, prompt)
 
     def test_codex_executor_runs_the_hook_check(self):
         # PR #17 review 4588366029: the Codex executor runs check_data_input_and_stage_gate as the hook does, so the
@@ -1436,15 +1439,23 @@ class PhysiCellDataInputTests(ProjectionBase):
         status, error, launched, _ = self.executor_run("network_curator", "Build from runs/data-analyst/x/seeds.")
         self.assertEqual((status, launched), (2, False), error)
         self.assertIn(gate.DATA_REFUSAL, error)
-        # a valid STAGE_GATE-only brief and both valid DATA_INPUT forms still launch, with the STAGE_GATE resolved once
-        for prompt in (f"{MC_GATE}\nImport the approved handoff.", self.task(self.design_line()),
-                       self.task(self.projection_line())):
+        # a valid STAGE_GATE-only brief still launches, with the STAGE_GATE resolved once
+        with mock.patch.object(gate, "check_task", wraps=gate.check_task) as tasks:
+            status, error, launched, events = self.executor_run("multicellular_configurator",
+                                                                f"{MC_GATE}\nImport the approved handoff.")
+        self.assertEqual((status, launched, tasks.call_count), (2, True, 1), error)
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]["result"]["passed"])
+        # PR #17 review 4594813584: both valid DATA_INPUT forms pass the check but are Claude-only (lineage needs the
+        # Claude invocation record), so the executor refuses them before launch
+        for prompt in (self.task(self.design_line()), self.task(self.projection_line())):
             with self.subTest(prompt=prompt.splitlines()[1]):
-                with mock.patch.object(gate, "check_task", wraps=gate.check_task) as tasks:
-                    status, error, launched, events = self.executor_run("multicellular_configurator", prompt)
-                self.assertEqual((status, launched, tasks.call_count), (2, True, 1), error)
-                self.assertEqual(len(events), 1)
-                self.assertTrue(events[0]["result"]["passed"])
+                self.accepted(prompt)  # the hook
+                status, error, launched, _ = self.executor_run("multicellular_configurator", prompt)
+                self.assertEqual((status, launched), (2, False), error)
+                self.assertRegex(error, "^stage gate failed: a PhysiCell design or projection DATA_INPUT is Claude-only "
+                                        "for now: .*runs/multicellular-configurator/<session>/invocation/<id>/ .*which "
+                                        "the Codex runtime does not write")
 
     def test_codex_executor_fails_closed_on_any_exception(self):
         from scripts.codex.specialist_runtime import executor  # noqa: F401 - the module under test
@@ -1725,6 +1736,23 @@ class PhysiCellDataInputTests(ProjectionBase):
         # nor a data-analyst path or session
         self.refused(f"{MC_GATE}\nUse runs/data-analyst/x.", "data-analyst")
         self.refused(self.task(self.design_line(), tail=" data-20990101T000000Z-deadbeef"), "data-analyst")
+
+
+def executor_run(root, specialist, prompt):
+    """(exit status, handoff_error, whether the Codex launch was reached, stage_gate events) of one Codex executor
+    dispatch in project `root`; the launch is stopped at its first preflight step."""
+    from types import SimpleNamespace
+    from scripts.codex.specialist_runtime import executor
+    from scripts.codex.specialist_runtime.models import SpecialistInvocationRequest
+    request = SpecialistInvocationRequest(specialist, prompt)
+    execution = SimpleNamespace(started_at="2026-11-17T00:00:00+00:00", invocation_id="test", handoff_error=None)
+    events = []
+    with mock.patch.object(executor, "PROJECT_ROOT", root), \
+            mock.patch.object(executor, "resolve_codex_executable",
+                              side_effect=ValueError("stop at preflight")) as launch:
+        status = executor._run(request, execution, transition=lambda x: None, event_callback=events.append,
+                               cancellation_requested=lambda: False)
+    return status, execution.handoff_error, launch.called, [e for e in events if e["type"] == "stage_gate"]
 
 
 def load_hook():

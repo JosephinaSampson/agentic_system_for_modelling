@@ -25,7 +25,8 @@ forms; dictionary capture with stage-A conformance; export verification; the `ph
 skill; `ROADMAP.md`.
 
 **Not covered here:** running or calibrating PhysiCell; spatial initial conditions; ODE-derived
-proposals and direct ODE coupling; MCP server changes.
+proposals and direct ODE coupling; Codex parity (the Codex executor refuses the design and projection
+forms before launch); MCP server changes.
 
 ## 2. Key decisions and rationale
 
@@ -133,9 +134,9 @@ outline:
   design or projection it was built from by an invocation record
   `runs/multicellular-configurator/<session>/invocation/<id>/task.txt` of the capture's session. The
   recorded brief is lineage only when it is one the dispatch check could have passed, judged from
-  durable files alone. That check is the Claude hook or the Codex executor, which runs the same
-  `check_data_input_and_stage_gate`; lineage cannot tell which one ran, or whether one did. The brief
-  must meet all of these conditions:
+  durable files alone. That check is the Claude hook. A Codex run is recorded under
+  `specialist-invocations/`, which lineage does not read, so the Codex executor refuses these forms
+  before launch. The brief must meet all of these conditions:
   1. line 2 is exactly the design (or projection) `DATA_INPUT` form naming that path and sha256;
   2. line 1 is a well-formed `STAGE_GATE` (`gate.stage_gate_form`, the one STAGE_GATE parser:
      `check_task` and the MaBoSS mapping checks use it too, so duplicate keys are refused at dispatch
@@ -236,7 +237,11 @@ Also:
   that resolved no `STAGE_GATE`) before any launch, failing closed on any error, including an import
   failure. It keeps one pre-existing exemption that the hook does not have: a dispatch without a
   `STAGE_GATE`, bound to an already recorded session and asking only for the inspection tools,
-  skips `check_task`. `check_data_input` still runs on it.
+  skips `check_task`. `check_data_input` still runs on it. After that check passes, the executor
+  refuses a design or projection `DATA_INPUT`, and an ode-modeler calibration `DATA_INPUT`, as
+  Claude-only before launch: the Codex runtime does not write the
+  `runs/multicellular-configurator/<session>/invocation/<id>/` record that lineage and the dictionary
+  need, and the Codex ode-modeler has no calibration procedure.
 
 ## 9. Roadmap
 
