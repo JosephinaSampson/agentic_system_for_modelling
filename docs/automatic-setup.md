@@ -1,6 +1,7 @@
 # Automatic local setup
 
-Run inside Linux or WSL with Python 3.11+ and Git installed:
+Run on Linux or macOS with Python 3.11+ and Git installed. Windows users must run
+inside WSL:
 
 ```text
 python scripts/setup.py
@@ -24,9 +25,9 @@ python scripts/setup.py --config setup/input.example.json --non-interactive
 ```
 
 Use an absolute script path when invoking from outside the repository. Native
-Windows/macOS setup is rejected; run the Windows workflow inside WSL. This does
-not install WSL or configure a Windows-to-WSL desktop bridge. A desktop parent
-still needs the externally enforced isolation described in `AGENTS.md`.
+Windows setup is rejected; run the Windows workflow inside WSL. This does not
+install WSL or configure a Windows-to-WSL desktop bridge. A desktop parent still
+needs the externally enforced isolation described in `AGENTS.md`.
 
 ## Detection and environment
 
@@ -36,7 +37,10 @@ Only selected clients must be installed; discovered clients are checked using
 `--version`. Missing requirements are reported together where possible.
 
 The default environment lives at `.setup/environment`. Auto mode chooses Conda
-when available, otherwise Python's virtualenv support. Override it with
+when available, otherwise Python's virtualenv support. On macOS, it checks that
+Conda targets the host architecture and selects a native Python virtual environment
+instead of an incompatible Conda installation. An explicitly selected incompatible
+Conda target fails with a remediation message. Override the manager with
 `--manager conda` or `--manager venv`; `--manager-path` identifies Conda or the
 Python interpreter used to create the environment. `--env-prefix` selects another
 new environment location. Conda installs Python 3.11 and pip from conda-forge; venv
@@ -46,7 +50,9 @@ system Graphviz is required. `--graphviz-path /absolute/path/to/dot` (JSON/saved
 setting `graphviz_path`) remains an optional override: when supplied, its directory
 is added to server PATH alongside stable system directories. Setup never
 auto-discovers `dot`, does not copy the calling IDE's full PATH, and does not run
-sudo or alter system packages.
+sudo or alter system packages. On macOS, the stable server PATH also includes
+Homebrew's standard `/opt/homebrew` locations for Apple Silicon; Intel Homebrew's
+`/usr/local` locations are already included.
 
 `setup/dependencies.toml` pins the released pair
 `mcp-biomodelling-servers==2.5.2` and `nekomata==1.10.3`. The MCP release includes

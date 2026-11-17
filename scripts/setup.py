@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install and configure the local biological-modelling workflow (Linux/WSL)."""
+"""Install and configure the local biological-modelling workflow."""
 from __future__ import annotations
 
 import argparse
@@ -125,7 +125,7 @@ def plan(args, root: Path, manifest: dict) -> tuple[dict, list[str]]:
     system = detect.system_info()
     errors = snapshot_errors(root, manifest["version"])
     if system["system"] not in manifest["supported_systems"]:
-        errors.append("This installer supports Linux/WSL. Run inside WSL on Windows; native Windows/macOS are not validated.")
+        errors.append("This installer supports Linux and macOS. On Windows, run inside WSL.")
     if not detect.discover("git"):
         errors.append("Git is missing; install Git and rerun setup")
     interactive = sys.stdin.isatty() and not (args.non_interactive or args.check or args.dry_run)
@@ -173,9 +173,11 @@ def plan(args, root: Path, manifest: dict) -> tuple[dict, list[str]]:
     prefix = None if plugin_mode else Path(values.get("env_prefix", str(root/".setup/environment"))).expanduser().absolute()
     reuse = mode == "reuse"
     manager = None if plugin_mode else values.get("manager", "auto")
+    manager_requested = manager
     manager_path = values.get("manager_path")
     executable = None
     uvx = None
+    manager_warning = None
     if plugin_mode:
         try:
             uvx = detect.discover("uvx", values.get("uv_path"))
@@ -186,11 +188,32 @@ def plan(args, root: Path, manifest: dict) -> tuple[dict, list[str]]:
         elif uvx and Path(uvx).name != "uvx":
             errors.append("--uv-path must name the uvx executable")
     elif not reuse:
-        if manager == "auto":
-            manager = "conda" if detect.discover("conda") else "venv"
         try:
-            executable = (detect.discover("conda", manager_path) if manager == "conda"
-                          else detect.discover("python", manager_path or sys.executable))
+            conda = None
+            if manager in {"auto", "conda"}:
+                conda = detect.discover("conda", manager_path)
+            if manager == "auto":
+                manager = "conda" if conda else "venv"
+            if manager == "conda" and system["system"] == "Darwin":
+                if conda is None:
+                    conda = detect.discover("conda", manager_path)
+                expected_platform = {
+                    "arm64": "osx-arm64",
+                    "aarch64": "osx-arm64",
+                    "x86_64": "osx-64",
+                    "amd64": "osx-64",
+                }.get(system["architecture"].lower())
+                actual_platform = detect.conda_platform(conda)
+                if expected_platform is None or actual_platform != expected_platform:
+                    reason = (f"Conda targets {actual_platform}, but this macOS host requires "
+                              f"{expected_platform or 'a native macOS package platform'}")
+                    if manager_requested == "auto" and not manager_path:
+                        manager = "venv"
+                        manager_warning = reason + "; using the native Python environment instead"
+                    else:
+                        errors.append(reason + "; use --manager venv with a native Python interpreter")
+            executable = (conda if manager == "conda" else
+                          detect.discover("python", manager_path or sys.executable))
         except SetupError as error:
             errors.append(str(error))
         if not executable:
@@ -235,6 +258,7 @@ def plan(args, root: Path, manifest: dict) -> tuple[dict, list[str]]:
     resolved = {"backend_sources": source_manifest, "pinned_sources": pinned_sources, "client": selection, "clients": clients, "client_versions": versions,
                 "system": system, "env_prefix": str(prefix) if prefix else None, "manager": manager,
                 "environment_mode": mode, "uv_path": uvx,
+                "manager_warning": manager_warning,
                 "biomass": values.get("biomass", "disabled"), "graphviz_path": graphviz,
                 "manager_path": executable, "codex_home": home, "package_source": source,
                 "package": f'{manifest["package"]}=={manifest["version"]}',

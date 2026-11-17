@@ -23,4 +23,5 @@ pypath_log/
 # Data analyst environments and cache
 .venv-data/
 .venv-cellprofiler/
+.venv-cellprofiler-rosetta/
 data-cache/

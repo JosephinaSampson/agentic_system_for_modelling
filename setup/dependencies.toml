@@ -1,5 +1,5 @@
 schema_version = 1
-supported_systems = ["Linux"]
+supported_systems = ["Linux", "Darwin"]
 python_minimum = "3.11"
 python_environment = "3.11"
 index_url = "https://pypi.org/simple"

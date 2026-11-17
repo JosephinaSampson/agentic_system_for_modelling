@@ -40,6 +40,12 @@ class GraphvizPathTests(unittest.TestCase):
         self.transient = self.directory / "codex-transient-helper"
         self.transient.mkdir()
 
+    def test_macos_transport_path_includes_apple_silicon_homebrew(self):
+        with mock.patch.object(environment.platform, "system", return_value="Darwin"):
+            path = environment.transport_path(self.prefix)
+        self.assertIn("/opt/homebrew/bin", path.split(os.pathsep))
+        self.assertIn("/opt/homebrew/sbin", path.split(os.pathsep))
+
     def test_discovered_graphviz_survives_runtime_and_both_generated_clients(self):
         with mock.patch.dict(os.environ, {"PATH": f"{self.transient}:{self.graphviz.parent}:/usr/bin"}):
             found = detect.discover("dot")

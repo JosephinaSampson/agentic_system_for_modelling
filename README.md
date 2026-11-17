@@ -91,7 +91,7 @@ The policy the orchestrator follows is [`CLAUDE.md`](CLAUDE.md) (Claude) and
 
 ## Requirements
 
-- Linux or WSL, Git, Python 3.11+
+- Linux, macOS, or WSL, Git, Python 3.11+
 - Claude Code (custom agents and skills) and/or a local Codex client 0.153.0+
 - One of:
   - [uv](https://docs.astral.sh/uv/) — servers start exactly like the marketplace

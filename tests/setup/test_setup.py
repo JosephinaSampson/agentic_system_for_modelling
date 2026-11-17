@@ -206,6 +206,45 @@ class SetupTests(unittest.TestCase):
         self.assertGreaterEqual(len(report['errors']), 3)
         self.assertFalse((self.root/'.setup').exists())
 
+    def test_macos_is_a_supported_setup_platform(self):
+        args = setup.parser().parse_args(['--client', 'claude', '--manager', 'venv', '--dry-run'])
+        with mock.patch.object(detect, 'system_info',
+                               return_value={'system': 'Darwin', 'architecture': 'arm64', 'wsl': False,
+                                             'python': '3.12.0'}), \
+             mock.patch.object(detect, 'discover', return_value='/tools/executable'), \
+             mock.patch.object(detect, 'client_version', return_value='2.0.0'):
+            report = setup.execute(args, self.root)
+        self.assertTrue(report['passed'], report['errors'])
+
+    def test_auto_manager_avoids_x86_conda_on_apple_silicon(self):
+        args = setup.parser().parse_args(['--client', 'claude', '--dry-run'])
+        def discover(name, override=None):
+            return {'git': '/tools/git', 'claude': '/tools/claude', 'conda': '/tools/conda',
+                    'python': '/tools/python'}.get(name)
+        with mock.patch.object(detect, 'system_info',
+                               return_value={'system': 'Darwin', 'architecture': 'arm64', 'wsl': False,
+                                             'python': '3.12.0'}), \
+             mock.patch.object(detect, 'discover', side_effect=discover), \
+             mock.patch.object(detect, 'client_version', return_value='2.0.0'), \
+             mock.patch.object(detect, 'conda_platform', return_value='osx-64'):
+            resolved, errors = setup.plan(args, self.root, self.manifest)
+        self.assertFalse(errors)
+        self.assertEqual(resolved['manager'], 'venv')
+        self.assertEqual(resolved['manager_path'], '/tools/python')
+        self.assertIn('using the native Python environment', resolved['manager_warning'])
+
+    def test_explicit_non_native_conda_is_rejected_on_macos(self):
+        args = setup.parser().parse_args(['--client', 'claude', '--manager', 'conda', '--dry-run'])
+        with mock.patch.object(detect, 'system_info',
+                               return_value={'system': 'Darwin', 'architecture': 'arm64', 'wsl': False,
+                                             'python': '3.12.0'}), \
+             mock.patch.object(detect, 'discover', side_effect=lambda name, override=None:
+                               {'git': '/tools/git', 'claude': '/tools/claude', 'conda': '/tools/conda'}.get(name)), \
+             mock.patch.object(detect, 'client_version', return_value='2.0.0'), \
+             mock.patch.object(detect, 'conda_platform', return_value='osx-64'):
+            _, errors = setup.plan(args, self.root, self.manifest)
+        self.assertTrue(any('requires osx-arm64' in error and '--manager venv' in error for error in errors))
+
     def test_successful_plan_never_installs_or_writes(self):
         args = setup.parser().parse_args(['--client', 'codex', '--manager', 'venv', '--dry-run',
                                         '--codex-home', str(self.home)])

@@ -527,16 +527,20 @@ class RuntimeReviewTests(unittest.TestCase):
         self.assertEqual((code, started, kept), (0, True, False))
 
     def test_process_identities_of_different_schemes_are_not_compared(self):
-        # review 2 follow-up N2: a "ps:" identity recorded where /proc gives "linux:" is no proof of pid reuse
+        # A recorded identity from another platform's scheme is no proof of PID reuse.
         self.job()
         child = self.live_child()
-        code, started, kept, _ = self.calibrate(pid=child.pid, started_at=run.now(), process_start="ps:Mon Jan  1")
+        current = run._process_start(child.pid)
+        self.assertIsNotNone(current)
+        other_scheme = "ps:Mon Jan  1" if current[0].startswith("linux:") else "linux:boot:123"
+        code, started, kept, _ = self.calibrate(pid=child.pid, started_at=run.now(), process_start=other_scheme)
         self.assertEqual((code, started, kept), (3, False, True))
-        # without a boot id the identity is unknown (btime moves with the wall clock): no identity is recorded
-        with mock.patch.object(run, "_boot_id", return_value=None):
-            identity, started_epoch = run._process_start(child.pid)
-        self.assertIsNone(identity)
-        self.assertIsInstance(started_epoch, float)
+        if sys.platform.startswith("linux"):
+            # Without a boot id the identity is unknown (btime moves with the wall clock).
+            with mock.patch.object(run, "_boot_id", return_value=None):
+                identity, started_epoch = run._process_start(child.pid)
+            self.assertIsNone(identity)
+            self.assertIsInstance(started_epoch, float)
 
     def test_takeover_overrides_only_an_owner_that_cannot_be_checked(self):
         # review 2 launch.py:454 / run.py:216: an explicit, documented escape hatch for a foreign-host owner

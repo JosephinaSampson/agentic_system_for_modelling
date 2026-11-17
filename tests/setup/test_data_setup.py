@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -29,13 +30,24 @@ class DataSetupTests(unittest.TestCase):
         self.pins = dict(re.findall(r'(?m)^([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)\s*$',
                                     (ROOT/'setup/data-requirements.lock').read_text()))
         self.assertGreater(len(self.pins), 50)
-        self.installed = {'python': '3.12', 'distributions': {n: [v] for n, v in self.pins.items()}}
+        self.installed = {'python': '3.12', 'architecture': platform.machine(),
+                          'distributions': {n: [v] for n, v in self.pins.items()}}
+        self.data_architecture = platform.machine()
+        self.cellprofiler_architecture = platform.machine()
 
     def fake_run(self, argv, *args, **kwargs):
         # Answers the installed-metadata query; every other command just "succeeds".
         if argv[-1] == data_env.METADATA_PROBE:
             self.assertEqual(argv[1:4], ['-E', '-s', '-c'])
             return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(self.installed), stderr='')
+        if argv[-1] == data_env.ARCHITECTURE_PROBE:
+            if '.venv-cellprofiler/bin/python' in argv[0]:
+                architecture = self.cellprofiler_architecture
+            elif '.venv-data/bin/python' in argv[0]:
+                architecture = self.data_architecture
+            else:
+                architecture = platform.machine()
+            return subprocess.CompletedProcess(argv, 0, stdout=architecture, stderr='')
         return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
 
     def patched_run(self):
@@ -55,7 +67,9 @@ class DataSetupTests(unittest.TestCase):
             result = data_env.ensure(self.root, '/bin/uv', check=False, with_cellprofiler=False)
         py = str(self.root/'.venv-data/bin/python')
         self.assertEqual([c.args[0] for c in run.call_args_list], [
-            ['/bin/uv', 'venv', str(self.root/'.venv-data'), '--python', '3.12'],
+            ['/bin/uv', 'venv', str(self.root/'.venv-data'), '--python', '3.12',
+             '--managed-python'],
+            [py, '-c', data_env.ARCHITECTURE_PROBE],
             ['/bin/uv', 'pip', 'sync', '--python', py, str(self.root/'setup/data-requirements.lock')],
             [py, '-E', '-s', '-c', IMPORT_PROBE],
             [py, '-E', '-s', '-c', data_env.METADATA_PROBE]])
@@ -67,10 +81,12 @@ class DataSetupTests(unittest.TestCase):
         with self.patched_run() as run:
             result = data_env.ensure(self.root, '/bin/uv', check=False, with_cellprofiler=True)
         cp = self.root/'.venv-cellprofiler'
-        argv = [c.args[0] for c in run.call_args_list][4:]
+        argv = [c.args[0] for c in run.call_args_list][5:]
         self.assertEqual(argv, [
-            ['/bin/uv', 'venv', str(cp), '--python', '3.9'],
+            ['/bin/uv', 'venv', str(cp), '--python', '3.9', '--managed-python'],
+            [str(cp/'bin/python'), '-c', data_env.ARCHITECTURE_PROBE],
             ['/bin/uv', 'pip', 'install', '--python', str(cp/'bin/python'), '-r',
+             str(self.root/'setup/data-requirements-cellprofiler.txt'), '--build-constraints',
              str(self.root/'setup/data-requirements-cellprofiler.txt')],
             [str(cp/'bin/cellprofiler'), '--version']])
         self.assertTrue(result['passed'])
@@ -84,6 +100,7 @@ class DataSetupTests(unittest.TestCase):
             result = data_env.ensure(self.root, '/bin/uv', check=False, with_cellprofiler=False)
         py = str(self.root/'.venv-data/bin/python')
         self.assertEqual([c.args[0] for c in run.call_args_list], [
+            [py, '-c', data_env.ARCHITECTURE_PROBE],
             ['/bin/uv', 'pip', 'sync', '--python', py, str(self.root/'setup/data-requirements.lock')],
             [py, '-E', '-s', '-c', IMPORT_PROBE],
             [py, '-E', '-s', '-c', data_env.METADATA_PROBE]])
@@ -96,8 +113,10 @@ class DataSetupTests(unittest.TestCase):
         cp = self.root/'.venv-cellprofiler'
         argv = [c.args[0] for c in run.call_args_list]
         self.assertFalse(any(a[1:2] == ['venv'] for a in argv))
-        self.assertEqual(argv[-2:], [
+        self.assertEqual(argv[-3:], [
+            [str(cp/'bin/python'), '-c', data_env.ARCHITECTURE_PROBE],
             ['/bin/uv', 'pip', 'install', '--python', str(cp/'bin/python'), '-r',
+             str(self.root/'setup/data-requirements-cellprofiler.txt'), '--build-constraints',
              str(self.root/'setup/data-requirements-cellprofiler.txt')],
             [str(cp/'bin/cellprofiler'), '--version']])
 
@@ -105,7 +124,8 @@ class DataSetupTests(unittest.TestCase):
         with self.patched_run() as run:
             result = data_env.ensure(self.root, '/bin/uv', check=True, with_cellprofiler=False)
         self.assertEqual([c.args[0][1:] for c in run.call_args_list],
-                         [['-E', '-s', '-c', IMPORT_PROBE], ['-E', '-s', '-c', data_env.METADATA_PROBE]])
+                         [['-c', data_env.ARCHITECTURE_PROBE],
+                          ['-E', '-s', '-c', IMPORT_PROBE], ['-E', '-s', '-c', data_env.METADATA_PROBE]])
         self.assertTrue(result['passed'], result['errors'])
 
     def check(self):
@@ -142,6 +162,25 @@ class DataSetupTests(unittest.TestCase):
         result = self.check()
         self.assertFalse(result['passed'])
         self.assertTrue(any('3.11' in e and '3.12' in e for e in result['errors']), result['errors'])
+
+    def test_existing_wrong_architecture_data_env_is_not_modified(self):
+        self._touch('.venv-data')
+        self.data_architecture = 'x86_64' if platform.machine() == 'arm64' else 'arm64'
+        with self.patched_run() as run:
+            result = data_env.ensure(self.root, '/bin/uv', check=False, with_cellprofiler=False)
+        self.assertFalse(result['passed'])
+        self.assertTrue(any('Data environment architecture' in error for error in result['errors']))
+        self.assertFalse(any(call.args[0][:2] == ['/bin/uv', 'pip'] for call in run.call_args_list))
+
+    def test_existing_wrong_architecture_cellprofiler_env_is_not_modified(self):
+        self._touch('.venv-data'); self._touch('.venv-cellprofiler')
+        self.cellprofiler_architecture = 'x86_64' if platform.machine() == 'arm64' else 'arm64'
+        with self.patched_run() as run:
+            result = data_env.ensure(self.root, '/bin/uv', check=False, with_cellprofiler=True)
+        self.assertFalse(result['passed'])
+        self.assertTrue(any('CellProfiler environment architecture' in error for error in result['errors']))
+        self.assertFalse(any(call.args[0][:2] == ['/bin/uv', 'pip']
+                             and 'install' in call.args[0] for call in run.call_args_list))
 
     def test_install_mode_verifies_lock_after_sync(self):
         self.installed['distributions']['anndata'] = ['0.0.1']

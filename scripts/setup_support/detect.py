@@ -1,6 +1,7 @@
 """Bounded executable discovery and platform diagnostics."""
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -133,3 +134,15 @@ def client_version(name: str, executable: str) -> str:
     if name == "codex" and version < (0, 153, 0):
         raise SetupError("Codex 0.153.0 or newer is required")
     return ".".join(map(str, version))
+
+
+def conda_platform(executable: str) -> str:
+    """Return Conda's package subdirectory (for example, osx-arm64)."""
+    try:
+        info = json.loads(run([executable, "info", "--json"], timeout=30).stdout)
+    except (ValueError, TypeError) as error:
+        raise SetupError("Could not read Conda's platform from `conda info --json`") from error
+    value = info.get("platform") if isinstance(info, dict) else None
+    if not isinstance(value, str) or not value:
+        raise SetupError("Conda did not report a package platform")
+    return value

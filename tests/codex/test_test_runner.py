@@ -14,6 +14,18 @@ from scripts.codex import launcher_config
 
 
 class TestRunnerTests(unittest.TestCase):
+    def test_macos_suite_temp_path_is_resolved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            alias = root / "alias"
+            target = root / "target"
+            target.mkdir()
+            alias.symlink_to(target, target_is_directory=True)
+            with mock.patch.object(run_tests.sys, "platform", "darwin"), \
+                 mock.patch.dict(run_tests.os.environ, {"TMPDIR": str(alias)}):
+                env = run_tests.suite_environment()
+        self.assertEqual(env["TMPDIR"], str(target))
+
     def test_failure_is_propagated_and_both_suites_run(self) -> None:
         with mock.patch.object(run_tests, "run_suite", side_effect=[1] + [0] * (len(run_tests.SUITES) - 1)) as command:
             self.assertEqual(run_tests.main(), 1)

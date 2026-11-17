@@ -415,7 +415,7 @@ def run(tmp: Path) -> None:
     tdir.mkdir(parents=True)
     shutil.copy2(tpath, tdir / f"agent-{agent_id}.jsonl")
     rproc = subprocess.run(
-        ["python3", "scripts/data/receive.py", "--session", sid, "--agent-id", agent_id,
+        [sys.executable, "scripts/data/receive.py", "--session", sid, "--agent-id", agent_id,
          "--transcript-root", str(troot)], cwd=root, env=env, text=True, capture_output=True)
     assert rproc.returncode == 0, rproc.stdout + rproc.stderr
     assert rproc.stdout.strip().splitlines()[-1] == f"RECEIVED {sid} OK", rproc.stdout

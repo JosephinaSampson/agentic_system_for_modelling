@@ -18,8 +18,54 @@ cite them when you use results. The agent is Claude-only until Codex parity.
 
 `python3 scripts/setup.py --with-data` creates `.venv-data`. `--with-cellprofiler` additionally
 installs CellProfiler 4.2.8.1 into `.venv-cellprofiler` (Python 3.9). It requires system
-packages providing `mysql_config` (for example `libmysqlclient-dev`) and a JDK. This
-install was not verified on the development machine.
+packages providing `mysql_config` (for example `libmysqlclient-dev`) and a JDK.
+On macOS, install those prerequisites with Homebrew and expose them to the setup
+process before running it:
+
+```bash
+brew install mysql-client openjdk
+export JAVA_HOME="$(brew --prefix openjdk)/libexec/openjdk.jdk/Contents/Home"
+export PATH="$(brew --prefix mysql-client)/bin:$JAVA_HOME/bin:$PATH"
+export LDFLAGS="-L$(brew --prefix mysql-client)/lib -L$(brew --prefix zstd)/lib -L$(brew --prefix openssl@3)/lib"
+export CPPFLAGS="-I$(brew --prefix mysql-client)/include -I$(brew --prefix zstd)/include -I$(brew --prefix openssl@3)/include"
+python3 scripts/setup.py --client claude --with-data --with-cellprofiler
+```
+
+The CellProfiler package is legacy software; its native `python-javabridge` extension
+requires NumPy 1.x, which is constrained for both installation and isolated source
+builds. CellProfiler 4.2.8.1 also pins scikit-learn 0.24.2 and scikit-image 0.18.3,
+which do not publish macOS arm64 wheels; consequently, `--with-cellprofiler` cannot
+complete natively on Apple Silicon from these pinned PyPI dependencies. Setup reports
+install or version-check failures and does not claim CellProfiler readiness unless
+its version command passes.
+
+On Apple Silicon, CellProfiler can instead run in a separate x86_64/Rosetta Conda
+environment. This manual alternative requires Rosetta and the Xcode Command Line
+Tools; it is separate from the native `.venv-cellprofiler` checked by
+`scripts/setup.py --with-cellprofiler`:
+
+```bash
+CONDA_SUBDIR=osx-64 conda create --yes --prefix .venv-cellprofiler-rosetta \
+  --override-channels --channel conda-forge \
+  python=3.9 pip openjdk=17 mysql-connector-c=6.1.11
+
+CELLPROFILER_ENV="$PWD/.venv-cellprofiler-rosetta"
+SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+export JAVA_HOME="$CELLPROFILER_ENV/lib/jvm"
+export PATH="$CELLPROFILER_ENV/bin:$PATH"
+export CC="$(xcrun --find clang)"
+export ARCHFLAGS="-arch x86_64"
+export CFLAGS="-isysroot $SDKROOT"
+export LDFLAGS="-L$CELLPROFILER_ENV/lib -isysroot $SDKROOT"
+export CPPFLAGS="-I$CELLPROFILER_ENV/include -isysroot $SDKROOT"
+uv pip install --python "$CELLPROFILER_ENV/bin/python" \
+  -r setup/data-requirements-cellprofiler.txt \
+  --build-constraints setup/data-requirements-cellprofiler.txt
+arch -x86_64 "$CELLPROFILER_ENV/bin/cellprofiler" --version
+```
+
+The CellProfiler environment reports `x86_64`; it does not change the architecture
+or packages of `.venv-data` or the core modelling environment.
 
 ## Smoke test
 
