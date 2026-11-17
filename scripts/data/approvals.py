@@ -213,7 +213,6 @@ def require_calibration_approval(root: Path, record_id: str, rel: str, sha256: s
       * session_id is the proposal's ODE session;
       * the proposal belongs to its job (require_proposal_job).
     """
-    from scripts.data.common import strict_json
     state = _state()
     root = Path(root)
     record = load_record(root, record_id)
@@ -225,12 +224,8 @@ def require_calibration_approval(root: Path, record_id: str, rel: str, sha256: s
         raise ValueError(f"decision {record_id} approves a different sha256 than {sha256}")
     state.validate_record(root, record)
     # one read: the hash and the parsed proposal agree
-    raw = bound_bytes(state.artifact(root, rel), sha256, rel, f"approval {record_id}")
-    try:
-        proposal = strict_json(raw)
-    except (ValueError, RecursionError) as exc:
-        raise ValueError(f"cannot read {rel}: {exc}") from None
-    if not isinstance(proposal, dict) or proposal.get("kind") != "calibration_proposal":
+    proposal = json_object(bound_bytes(state.artifact(root, rel), sha256, rel, f"approval {record_id}"), rel)
+    if proposal.get("kind") != "calibration_proposal":
         raise ValueError(f"{rel} is not a calibration_proposal")
     model = proposal.get("model")
     session = model.get("ode_session") if isinstance(model, dict) else None

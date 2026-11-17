@@ -913,6 +913,13 @@ class ApprovalTests(OdeFixture):
                   "outputs": ["job"], "artifact": {"path": "job.json", "sha256": digest}})
         with self.assertRaisesRegex(ValueError, "calibration_proposal"):
             approvals.require_calibration_approval(self.root, "cal-1", "job.json", digest)
+        # round-3 follow-up: parsed with the shared common.json_object (one wording), the kind check kept
+        (self.root / "job.json").write_text("[1]")
+        digest = sha(self.root / "job.json")
+        self.add({"id": "cal-2", "kind": "stage_approval", "stage": "ode_calibration", "session_id": SESSION,
+                  "outputs": ["job"], "artifact": {"path": "job.json", "sha256": digest}})
+        with self.assertRaisesRegex(ValueError, "^job.json must be a JSON object$"):
+            approvals.require_calibration_approval(self.root, "cal-2", "job.json", digest)
         with self.assertRaisesRegex(ValueError, "sha256"):
             approvals.require_calibration_approval(self.root, "cal-1", "job.json", "0" * 64)
 
