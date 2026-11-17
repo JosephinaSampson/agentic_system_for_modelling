@@ -651,6 +651,13 @@ class BuildHandoffTests(VerifyBase):
         self.assertEqual(dict(binds), once)
         assert_read_only_by_bindings(self, binds, reads)
 
+    def test_after_binding_must_be_of_the_new_capture(self):
+        # round-3 follow-up: compute refuses a caller's binding of another capture than new_capture_rel
+        after = self.export()
+        self.assertTrue(ve.compute(self.root, PROJ, after, sx.capture_tree(self.root, after))["passed"])
+        with self.assertRaisesRegex(ValueError, f"after_binding is of {self.capture}, not of {after}"):
+            ve.compute(self.root, PROJ, after, sx.capture_tree(self.root, self.capture))
+
     def forge(self, after, **changes):
         """A verification file written by hand for `after`: passed true and the real after binding."""
         bound = sx.capture(self.root, after)

@@ -393,7 +393,13 @@ def compute(root: Path, projection_rel: str, new_capture_rel: str, after_binding
     # capture_section bound it once and compared its manifest_sha256 with capture.sha256; the trees are deep-copied
     # below before any change
     before, before_xml = checked.capture
-    after, after_xml = sx.capture_tree(root, new_capture_rel) if after_binding is None else after_binding
+    if after_binding is None:
+        after, after_xml = sx.capture_tree(root, new_capture_rel)
+    else:
+        after, after_xml = after_binding
+        bound_rel = f"runs/{sx.SPECIALIST}/{after.get('session')}/configs/{after.get('capture')}"
+        if bound_rel != new_capture_rel:
+            raise ValueError(f"after_binding is of {bound_rel}, not of {new_capture_rel}")
     if after["session"] == before["session"]:
         raise ValueError(f"lineage: the new capture {new_capture_rel} is in session {after['session']}, the "
                          f"projection's capture session; stage B runs in a new session")
