@@ -4,7 +4,8 @@ Every configurator run is a new PhysiCell session (record_session_id is only a l
 bound to the stage-A design or the stage-B projection it was built from by its invocation record
 runs/multicellular-configurator/<session>/invocation/<id>/task.txt. The rule (which recorded brief is lineage) is
 stated once, in docs/data-to-physicell-architecture.md under "Dispatch lineage"; dispatched_with reads the records
-and _verified checks one brief against durable state only, never the live registry. Stdlib only.
+and _verified checks one brief against durable records only, never the live registry (the design check that every
+step re-runs is live). Stdlib only.
 """
 from __future__ import annotations
 
@@ -31,8 +32,10 @@ def _verified(root: Path, key: str, rel: str, sha256: str, first_line: str, valu
         gate.standalone(root, "multicellular", stage_gate["standalone_decision_id"], stage_gate["outputs"])
     else:
         # the outputs of any recorded approval of one of the design's handoffs, binding its exact path and sha256
-        # (durable: DECISIONS.md is append-only; the design check verifies every handoff itself). Never the live
-        # gate.check, and never only the latest approval: a later re-approval does not undo a past dispatch.
+        # (durable: DECISIONS.md is append-only), never the live gate.check, and never only the latest approval: a
+        # later re-approval does not undo a past dispatch. Lineage alone is durable; the design check every step
+        # re-runs is live (gate.check per handoff), so a superseded MaBoSS session is refused there: re-approve and
+        # rebuild.
         recs = state.records((root / "DECISIONS.md").read_text(encoding="utf-8"))
         named = [a.get("outputs") for item in design["intracellular"]
                  for a in pd.handoff_approvals(recs, item["maboss"])]

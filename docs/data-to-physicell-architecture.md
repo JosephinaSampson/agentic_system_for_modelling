@@ -154,8 +154,13 @@ outline:
      sha256 (`approvals.require_physicell_design_approval` / `require_physicell_projection_approval`),
      and its `record_session_id` is that approval's `session_id`.
 
-  The live registry state the dispatch check also read (the MaBoSS session active and exported, its
-  review) is not re-checked, so a later supersession does not invalidate a past build. A refusal
+  Lineage itself uses only durable records (DECISIONS.md and the invocation records): it does not
+  re-read the live registry state the dispatch check read. The design check, though, is live, and every
+  step re-runs it: `capture_dictionary.py`, the projection check, `verify_export.py` and
+  `build.py --verification`. Each design handoff goes through `gate.check`, which requires an active,
+  exported MaBoSS row and a current review and approval. So after the MaBoSS session is superseded (a
+  later edit needs re-review and re-approval, CLAUDE.md), these steps refuse. Re-approve the new export
+  and the design, then rebuild from stage A. A refusal
   names each record it refused and why. `capture_dictionary.py` requires the record in the same
   invocation folder as the parsed `tool_calls.json`; the projection check binds its capture to the
   design; `verify_export.py` binds the stage-B capture (a session other than stage A's) to the
@@ -220,7 +225,10 @@ Also:
 - **Build:** PhysiCell archive hashes are trust on first use; 1.14.2 is a default pin; no
   Windows-native build. `setting` paths depend on the pinned server's XML layout.
 - **The Codex executor runs the hook's check** (`check_data_input_and_stage_gate`, then `check_task` when
-  that resolved no `STAGE_GATE`) before any launch, failing closed on any error.
+  that resolved no `STAGE_GATE`) before any launch, failing closed on any error, including an import
+  failure. It keeps one pre-existing exemption that the hook does not have: a dispatch without a
+  `STAGE_GATE`, bound to an already recorded session and asking only for the inspection tools,
+  skips `check_task`. `check_data_input` still runs on it.
 
 ## 9. Roadmap
 
