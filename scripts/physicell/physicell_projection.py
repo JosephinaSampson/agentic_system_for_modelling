@@ -26,8 +26,8 @@ Schema (schema_version 1; every key below is required):
     setting          {path, value, value_unit, transform, factor, target_unit?, target_unit_justification?, tool_hint}
   unmapped: [{from, reason}]     every cited source/proposal row that no entry uses, with the reason
 
-Q is a quantity {value, value_unit, transform, factor, target_unit?, model_value} (a setting entry carries the same
-keys itself). model_value is the number the configurator applies verbatim (it does no arithmetic): the orchestrator
+Q is a quantity {value, value_unit, transform, factor, target_unit?, target_unit_justification?, model_value} (a
+setting entry carries the same keys itself). model_value is the number the configurator applies verbatim (it does no arithmetic): the orchestrator
 pastes the value the check computes and prints (a missing or "TODO" model_value is refused with it), and the check
 requires it to equal the model value within relative 1e-12. The model value is
   identity v*factor, unit_factor v*factor, reciprocal factor/v, ln2_over factor*ln(2)/v
@@ -36,9 +36,11 @@ requires it to equal the model value within relative 1e-12. The model value is
     entry's justification explains it); unit_factor with factor 1 is refused (it converts nothing: use identity
     with matching units);
   - identity, reciprocal or ln2_over with factor == 1: derived, never converted: identity keeps value_unit,
-    reciprocal/ln2_over give "1/<u>" (or <rest> when u is "1/<rest>"); a compound unit (containing "/", "*", "(" or
-    spaces) is never inverted, so that combination is refused (convert with a factor != 1 instead). A
-    target_unit given here must equal the derived unit exactly.
+    reciprocal/ln2_over give "1/<u>" (or <rest> when u is "1/<rest>"). A target_unit given here must equal the
+    derived unit exactly;
+  - reciprocal or ln2_over of a compound unit (containing "/", "*", "(" or spaces) with factor == 1: never
+    inverted automatically, so target_unit is required together with a non-empty target_unit_justification (the
+    researcher states the inverted unit, e.g. um/min -> min/um); without them it is refused.
 Units are never inferred. This holds for setting entries and rule and link quantities alike.
 
 Checks: names exactly as in the captured dictionary (signals; behaviors per cell definition) and, for PhysiBoSS
@@ -83,6 +85,7 @@ TRANSFORMS = ("identity", "unit_factor", "reciprocal", "ln2_over")
 ACTIONS = ("activation", "inhibition")
 DIRECTIONS = ("increases", "decreases")
 QUANTITY = ("value", "value_unit", "transform", "factor", "model_value")
+TARGET = ("target_unit", "target_unit_justification")  # optional quantity keys
 MODEL_VALUE_TOL = 1e-12
 COMMON = ("entry_id", "kind", "from", "justification")
 KINDS = {
@@ -129,7 +132,9 @@ def converted_unit(q: dict) -> str:
     A conversion (factor != 1, or unit_factor) needs target_unit, the researcher's approved converted unit; a
     unit_factor of 1 is refused (it converts nothing). Without a conversion (identity, reciprocal or ln2_over with
     factor 1) the unit is derived, and a given target_unit must be exactly that derived unit: a factor-1
-    "conversion" between different units converts nothing."""
+    "conversion" between different units converts nothing. The one exception is the reciprocal (or ln2_over) of a
+    compound unit at factor 1, which is not derivable: it takes target_unit with a non-empty
+    target_unit_justification (q's own, or the setting entry's)."""
     if not isinstance(q, dict):
         raise ValueError("a quantity must be an object")
     unit = q.get("value_unit")
@@ -153,9 +158,11 @@ def converted_unit(q: dict) -> str:
     if transform in ("reciprocal", "ln2_over"):
         inner = unit[2:] if unit.startswith("1/") else unit
         if not inner or any(c in inner for c in COMPOUND):
-            raise ValueError(f"the reciprocal of the compound unit {unit!r} is not derivable with factor 1"
-                             + (f" (target_unit {target!r} cannot be checked)" if "target_unit" in q else "")
-                             + f": {convert}")
+            # not derivable (a compound unit is never inverted): the researcher states it, and justifies it
+            if "target_unit" in q and pd.real_text(q.get("target_unit_justification")):
+                return target
+            raise ValueError(f"the {transform} of the compound unit {unit!r} at factor 1 is not derivable (units are "
+                             "never inferred): give target_unit and a non-empty target_unit_justification")
         derived = inner if unit.startswith("1/") else f"1/{unit}"
     if "target_unit" in q and target != derived:
         raise ValueError(f"target_unit {target!r} is not the derived unit {derived!r} of {transform} of {unit!r} "
@@ -402,9 +409,12 @@ class _Checker(pd.Citations):
 
     def quantity(self, label: str, key: str, q) -> float | None:
         if not isinstance(q, dict) or not set(QUANTITY) - {"model_value"} <= set(q) \
-                or set(q) - set(QUANTITY) - {"target_unit"}:
-            self.error(f"{label}: {key} must be {{{', '.join(QUANTITY)}}} and optionally target_unit")
+                or set(q) - set(QUANTITY) - set(TARGET):
+            self.error(f"{label}: {key} must be {{{', '.join(QUANTITY)}}} and optionally target_unit and "
+                       "target_unit_justification")
             return None
+        if "target_unit_justification" in q and "target_unit" not in q:
+            self.error(f"{label}: {key}: target_unit_justification without target_unit; give both or neither")
         try:
             converted_unit(q)
         except ValueError as exc:
@@ -517,7 +527,7 @@ class _Checker(pd.Citations):
             self.error(f"{label}: target_unit_justification without target_unit; give both or neither")
         if not pd.real_text(e["tool_hint"]):
             self.error(f"{label}: tool_hint must name the configurator tool to use, not {e['tool_hint']!r}")
-        q = {k: e[k] for k in (*QUANTITY, "target_unit") if k in e}
+        q = {k: e[k] for k in (*QUANTITY, *TARGET) if k in e}
         unit = None
         try:
             unit = converted_unit(q)

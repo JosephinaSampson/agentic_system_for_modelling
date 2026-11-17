@@ -392,11 +392,15 @@ class SettingTests(ProjectionBase):
         # the same target_unit as the derived unit is fine (it states the unit, it converts nothing)
         self.assertEqual(self.errors(self.setting(target_unit="1/min")), [])
 
-    def test_factor_one_compound_reciprocal_with_target_unit_refused(self):
+    def test_factor_one_compound_reciprocal_needs_a_justified_target_unit(self):
+        # PR #17 review 4588365128: the reciprocal of a compound unit at factor 1 takes the researcher's justified
+        # target_unit (it is not derivable); without the justification it is refused, never pointed at a factor
         data = self.setting(value=2, value_unit="min/cell", transform="reciprocal", target_unit="1/min",
-                            target_unit_justification="j")
-        self.assertRefused(data, "set1", "not derivable", "factor != 1", "justification")
-        # PR #17 review 4587426548: the hint no longer points at a factor-1 unit_factor
+                            target_unit_justification="cells per minute, the reciprocal of min/cell")
+        self.assertEqual(self.errors(data), [])
+        data = self.setting(value=2, value_unit="min/cell", transform="reciprocal", target_unit="1/min")
+        self.assertRefused(data, "set1", "not derivable", "target_unit_justification")
+        self.assertNotIn("factor !=", " ".join(self.errors(data)))
         self.assertNotIn("unit_factor", " ".join(self.errors(data)))
 
     def test_unit_factor_of_one_refused(self):
@@ -519,10 +523,48 @@ class TransformTests(unittest.TestCase):
         for bad in (q(1, "h", "unit_factor"), q(1, "1/h", "unit_factor", 1.0, target_unit="1/min")):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "a unit_factor of 1 converts nothing"):
                 pp.converted_unit(bad)
+        # PR #17 review 4588365128: a compound reciprocal at factor 1 takes a justified target_unit; identity at
+        # factor 1 must still match, and a simple unit's reciprocal is still derived and checked
+        self.assertEqual(pp.converted_unit(q(4, "um/min", "reciprocal", target_unit="min/um",
+                                             target_unit_justification="time per distance")), "min/um")
+        self.assertEqual(pp.converted_unit(q(4, "um/min", "ln2_over", target_unit="min/um",
+                                             target_unit_justification="time per distance")), "min/um")
+        for bad in (q(4, "um/min", "reciprocal", target_unit="min/um"),
+                    q(4, "um/min", "reciprocal", target_unit="min/um", target_unit_justification=" "),
+                    q(4, "um/min", "reciprocal", target_unit_justification="time per distance")):
+            with self.subTest(bad=bad), self.assertRaisesRegex(
+                    ValueError, "give target_unit and a non-empty target_unit_justification"):
+                pp.converted_unit(bad)
+        for bad in (q(1, "1/hour", target_unit="1/min", target_unit_justification="j"),
+                    q(1, "hour", "reciprocal", target_unit="1/min", target_unit_justification="j")):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "is not the derived unit"):
+                pp.converted_unit(bad)
 
 
 class QuantityTargetUnitTests(ProjectionBase):
     """PR #17 review 4586110579: rule and link quantities follow the setting's target_unit rules."""
+
+    def test_compound_reciprocal_at_factor_one_with_a_justified_target_unit(self):
+        # PR #17 review 4588365128: um/min -> min/um at factor 1 has an accepted form, with no made-up factor
+        data, entry = self.entry("rule1")
+        entry["half_max"] = q(4.0, "um/min", "reciprocal", target_unit="min/um",
+                              target_unit_justification="the reciprocal of a speed, a time per distance")
+        self.assertEqual(self.errors(data), [])
+        self.assertEqual(pp.model_value(entry["half_max"]), 0.25)
+        self.assertEqual(pp.converted_unit(entry["half_max"]), "min/um")
+        for drop in ("target_unit_justification", "target_unit"):
+            with self.subTest(without=drop):
+                data, entry = self.entry("rule1")
+                entry["half_max"] = q(4.0, "um/min", "reciprocal", target_unit="min/um",
+                                      target_unit_justification="j")
+                del entry["half_max"][drop]
+                self.assertRefused(data, "rule1", "half_max", "not derivable")
+                errors = " ".join(self.errors(data))
+                self.assertNotIn("factor !=", errors)
+                if drop == "target_unit_justification":
+                    self.assertIn("give target_unit and a non-empty target_unit_justification", errors)
+                else:
+                    self.assertIn("target_unit_justification without target_unit", errors)
 
     def test_rule_quantity_identity_target_unit_refused(self):
         data, entry = self.entry("rule1")

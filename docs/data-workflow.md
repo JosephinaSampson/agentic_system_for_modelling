@@ -413,7 +413,7 @@ bytes (the captured dependency sha256 equals the handoff manifest's `bnd_file`/`
 export is refused), no PhysiBoSS link and no enabled rules ruleset. The library
 default substrate `substrate` that `create_simulation_domain` inserts is accepted only untouched.
 
-**Values.** A quantity is `{value, value_unit, transform, factor, target_unit?, model_value}` (a `setting` entry
+**Values.** A quantity is `{value, value_unit, transform, factor, target_unit?, target_unit_justification?, model_value}` (a `setting` entry
 carries these keys itself). The model value is `value*factor`
 (`identity`, `unit_factor`), `factor/value` (`reciprocal`) or `factor*ln(2)/value` (`ln2_over`). `model_value` is that
 number, pasted by the orchestrator from the check's message (the check refuses a missing, `TODO` or different
@@ -422,7 +422,8 @@ inferred: `target_unit` is required for a conversion (factor not 1, or `unit_fac
 conversion explained in the entry's justification; `unit_factor` with factor 1 is refused ("a unit_factor of 1
 converts nothing; use identity with matching units"). With `identity`, `reciprocal` or `ln2_over` and factor 1 the unit
 is derived (the value unit, or its reciprocal) and a `target_unit`, if given, must equal it: a factor-1 "conversion"
-from `1/hour` to `1/min` is refused. Factor 1 with the reciprocal of a compound unit is refused: use a factor != 1. These rules hold for setting entries and rule and link quantities alike, and a setting's converted
+from `1/hour` to `1/min` is refused. The reciprocal (or `ln2_over`) of a compound unit at factor 1 is not derivable:
+it needs `target_unit` with a non-empty `target_unit_justification` (e.g. `um/min` to `min/um`), and is refused without them. These rules hold for setting entries and rule and link quantities alike, and a setting's converted
 unit must equal the XML `units` attribute exactly. Names must match the captured dictionary
 and, for PhysiBoSS links, the cell definition's MaBoSS handoff. One writer per (cell definition, behavior): one rule,
 or one output link, never both, counting what the capture already has.
