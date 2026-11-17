@@ -3,13 +3,16 @@
 Every configurator run is a new PhysiCell session (record_session_id is only a lineage anchor), so a capture is
 bound to the stage-A design or the stage-B projection it was built from by its invocation record:
 runs/multicellular-configurator/<session>/invocation/<id>/task.txt keeps the dispatched brief, whose line 2 is the
-DATA_INPUT line the dispatch hook verified. A recorded brief is lineage only when it is one the hook could have
-passed, judged from durable state alone (the Codex runtime, for one, never runs check_data_input):
+DATA_INPUT line the dispatch check verified (the Claude hook, or the Codex executor, which runs the same check).
+Lineage cannot tell which check ran, or whether one did: a recorded brief is lineage only when it is one that check
+could have passed, judged from durable state alone:
   - line 1 is a well-formed STAGE_GATE (gate.stage_gate_form, the parser check_task uses);
   - that STAGE_GATE is bound to the design (for a projection, the projection's design) as the hook binds it
     (gate.design_upstream): with upstream_session_id, the design's MaBoSS handoffs all come from exactly that
-    session; standalone_decision_id only for a design without MaBoSS handoffs, and the standalone_approval record
-    must exist for stage multicellular with exactly those outputs (gate.standalone);
+    session, and its outputs are exactly those of the boolean-dynamics stage_approval each handoff was verified
+    against (physicell_design.handoff_approval, the record the design check resolves); standalone_decision_id
+    only for a design without MaBoSS handoffs, and the standalone_approval record must exist for stage
+    multicellular with exactly those outputs (gate.standalone);
   - line 2's approval is a real approval of the matching stage binding exactly this path and sha256
     (approvals.require_physicell_design_approval / require_physicell_projection_approval), and its
     record_session_id is that approval's session_id.
@@ -23,6 +26,7 @@ from pathlib import Path
 from scripts import gate, state
 from scripts.data import approvals
 from scripts.data.common import reject_symlinks, strict_json
+from scripts.physicell import physicell_design as pd
 from scripts.physicell import settings_xml as sx
 
 PREFIX = "DATA_INPUT "
@@ -37,6 +41,16 @@ def _verified(root: Path, key: str, rel: str, sha256: str, first_line: str, valu
     gate.design_upstream(design, stage_gate)
     if "standalone_decision_id" in stage_gate:
         gate.standalone(root, "multicellular", stage_gate["standalone_decision_id"], stage_gate["outputs"])
+    else:
+        # the outputs of the approval each design handoff was verified against (durable: DECISIONS.md is
+        # append-only); never the live gate.check, so a later supersession does not invalidate a past build
+        recs = state.records((root / "DECISIONS.md").read_text(encoding="utf-8"))
+        for item in design["intracellular"]:
+            approval = pd.handoff_approval(recs, item["maboss"])
+            if approval["outputs"] != stage_gate["outputs"]:
+                raise ValueError(f"STAGE_GATE outputs {stage_gate['outputs']} are not the outputs {approval['outputs']} "
+                                 f"of approval {approval.get('id')} of the design's MaBoSS handoff "
+                                 f"{item['maboss']['handoff']}")
     record = REQUIRE[key](root, value["approval"], rel, sha256)  # runs validate_record
     if value["record_session_id"] != record.get("session_id"):
         raise ValueError(f"its record_session_id {value['record_session_id']!r} is not the session_id "

@@ -346,7 +346,11 @@ class DictionaryTests(Base):
                                                 "may import no MaBoSS handoff"),
                  "unrelated MaBoSS upstream": ('STAGE_GATE {"upstream_session_id": "maboss-unrelated", '
                                                '"outputs": ["A"]}', "maboss-session.*upstream_session_id "
-                                               "maboss-unrelated")}
+                                               "maboss-unrelated"),
+                 # PR #17 review 4588363532: an upstream gate's outputs are those of the handoff's approval
+                 "upstream gate with other outputs": ('STAGE_GATE {"upstream_session_id": "maboss-session", '
+                                                      '"outputs": ["zzz"]}', r"STAGE_GATE outputs \['zzz'\] are not "
+                                                      r"the outputs \['A', 'B'\] of approval")}
         for name, (first, reason) in cases.items():
             with self.subTest(case=name):
                 task.write_text("\n".join([first, *lines[1:]]) + "\n")

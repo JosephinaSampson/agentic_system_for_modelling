@@ -736,7 +736,10 @@ class ProjectionLineageTests(VerifyBase):
         for first, reason in (('STAGE_GATE {"upstream_session_id": "maboss-unrelated", "outputs": ["A"]}',
                                "upstream_session_id maboss-unrelated"),
                               ('STAGE_GATE {"standalone_decision_id": "never-recorded", "outputs": ["zzz"]}',
-                               "may import no MaBoSS handoff")):
+                               "may import no MaBoSS handoff"),
+                              # PR #17 review 4588363532: the upstream gate's outputs are checked too
+                              ('STAGE_GATE {"upstream_session_id": "maboss-session", "outputs": ["zzz"]}',
+                               r"STAGE_GATE outputs \['zzz'\] are not the outputs \['A', 'B'\] of approval")):
             with self.subTest(gate=first):
                 path = self.invocation()
                 lines = path.read_text().splitlines()

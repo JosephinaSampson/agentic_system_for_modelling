@@ -279,6 +279,23 @@ class Citations:
                 self.error(f"data proposal {data_id} is never cited")
 
 
+def handoff_approval(recs: list, ref: dict) -> dict:
+    """The researcher stage_approval a design's MaBoSS handoff is verified against (ref = its intracellular maboss
+    {handoff, sha256}, a path under runs/boolean-dynamics-modeler/<session>/): the latest boolean-dynamics
+    stage_approval of that session for the multicellular stage binding exactly this path and sha256, among the
+    DECISIONS.md records `recs` (append-only, durable); ValueError if none. The design check runs gate.check with its
+    outputs; lineage requires an upstream STAGE_GATE to name exactly those outputs."""
+    rel, digest = ref["handoff"], ref["sha256"]
+    session = PurePosixPath(rel).parts[2]
+    candidates = [r for r in recs if r.get("kind") == "stage_approval" and r.get("session_id") == session
+                  and r.get("stage") == "boolean-dynamics" and r.get("downstream_stage") == "multicellular"
+                  and isinstance(r.get("artifact"), dict) and r["artifact"].get("path") == rel
+                  and r["artifact"].get("sha256") == digest]
+    if not candidates:
+        raise ValueError("no researcher approval of this exact handoff path and sha256 for the multicellular stage")
+    return candidates[-1]
+
+
 class _Checker(Citations):
     def __init__(self, root: Path):
         super().__init__(root)
@@ -558,17 +575,11 @@ class _Checker(Citations):
             return
         session = parts[2]
         try:
-            recs = state.records((self.root / "DECISIONS.md").read_text(encoding="utf-8"))
-            candidates = [r for r in recs if r.get("kind") == "stage_approval" and r.get("session_id") == session
-                          and r.get("stage") == "boolean-dynamics" and r.get("downstream_stage") == "multicellular"
-                          and isinstance(r.get("artifact"), dict) and r["artifact"].get("path") == rel
-                          and r["artifact"].get("sha256") == digest]
-            if not candidates:
-                raise ValueError("no researcher approval of this exact handoff path and sha256 for the "
-                                 "multicellular stage")
+            approval = handoff_approval(state.records((self.root / "DECISIONS.md").read_text(encoding="utf-8")),
+                                        maboss)
             # The gate's own check: registry row active+exported, approval of exact outputs, independent
             # review before approval, the manifest and its parent chain verified, artifact hash unchanged.
-            result = gate.check(self.root, "multicellular", session, candidates[-1]["outputs"])
+            result = gate.check(self.root, "multicellular", session, approval["outputs"])
             if result["artifact"] != {"path": rel, "sha256": digest}:
                 raise ValueError("the gate's approved handoff is a different artifact (superseded re-export?)")
             # The gate verified these exact bytes; import attaches the model to the manifest's target cell type.
