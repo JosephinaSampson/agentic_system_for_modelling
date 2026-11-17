@@ -230,7 +230,7 @@ class _Checker(pd.Citations):
         self.xml = None
         self.parents: dict = {}
         self.design_ref: dict | None = None
-        self.design: dict | None = None        # the design design_section loaded and checked (None if it failed)
+        self.design: dict | None = None        # the design, set only when every design_section check passed
         self.design_cells: list | None = None
         self.maboss: dict | None = None        # cell -> {"inputs": [...], "outputs": [...]}
         self.signals: list | None = None
@@ -281,6 +281,7 @@ class _Checker(pd.Citations):
                 or not all(pd.is_text(v) for v in ref.values()):
             self.error("design must be exactly {path, sha256, approval} (non-empty strings)")
             return
+        first_error = len(self.errors)
         try:
             design, digest, problems = pd.load_and_check(self.root, ref["path"])
         except (ValueError, OSError, UnicodeDecodeError) as exc:
@@ -297,7 +298,6 @@ class _Checker(pd.Citations):
         except (ValueError, OSError) as exc:
             self.error(f"design approval {ref['approval']}: {exc}")
             return
-        self.design = design  # exactly the bytes the projection pins (digest == ref["sha256"]), checked and approved
         if self.session is not None:
             try:  # the design's session is a lineage anchor: the capture's session must have been built from it
                 lineage.dispatched_with(self.root, self.session, "design", ref["path"], digest, design=design)
@@ -325,6 +325,10 @@ class _Checker(pd.Citations):
                     "outputs": list(dict.fromkeys(list(network["output_nodes"]) + readouts))}
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 self.error(f"design MaBoSS handoff {handoff['handoff']}: {exc}")
+        if len(self.errors) == first_error and self.capture is not None:
+            # exactly the bytes the projection pins (digest == ref["sha256"]): re-checked, approved, and (with the
+            # capture bound) lineage-bound and conforming; a design any of these refused is never handed back
+            self.design = design
 
     def dictionary_section(self, ref, design_ref) -> None:
         if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}:
@@ -650,9 +654,10 @@ def load_and_check(root: Path, rel: str) -> tuple[dict, str, list[str]]:
 
 
 def load_and_check_with_design(root: Path, rel: str) -> tuple[dict, str, list[str], dict | None]:
-    """load_and_check, plus the projection's design as its check loaded, re-checked and approval-bound it (the
-    bytes of design.path whose sha256 is design.sha256); None when the design section failed (then a problem is
-    listed). Callers needing the design use it instead of reading the design again."""
+    """load_and_check, plus the projection's design as its check loaded it (the bytes of design.path whose sha256 is
+    design.sha256), only when every check of the design passed: re-checked, approved, the capture's session
+    dispatched with it (lineage), the capture conforming to it and its handoffs read; None otherwise (then a problem
+    is listed). Callers needing the design use it instead of reading the design again."""
     root = Path(root)
     data, digest = _load(root, rel)
     checker = _Checker(root)

@@ -439,6 +439,27 @@ class CaptureBoundOnceTests(ProjectionBase):
         assert_read_only_by_bindings(self, binds, reads)
 
 
+class CheckedDesignTests(ProjectionBase):
+    """PR #17 review 4588363747: the projection check hands back its design only when every check of the design
+    section passed (loaded, sha-pinned, re-checked, approved, lineage-bound and conforming)."""
+
+    def test_design_failing_lineage_is_not_returned(self):
+        self.write_projection(self.projection())
+        self.assertIsNotNone(pp.load_and_check_with_design(self.root, PROJ)[3])
+        for task in (self.root / f"runs/multicellular-configurator/{STAGE_A}/invocation").glob("*/task.txt"):
+            task.unlink()
+        _, _, errors, design = pp.load_and_check_with_design(self.root, PROJ)
+        self.assertTrue(any("was not dispatched with it" in e for e in errors), errors)
+        self.assertIsNone(design)
+
+    def test_design_failing_conformance_is_not_returned(self):
+        self.write_projection(self.projection())
+        with mock.patch.object(pp.cd, "conformance", return_value=["a difference"]):
+            _, _, errors, design = pp.load_and_check_with_design(self.root, PROJ)
+        self.assertTrue(any("does not conform to the design: a difference" in e for e in errors), errors)
+        self.assertIsNone(design)
+
+
 class HandoffManifestTests(ProjectionBase):
     """PR #17 review 4587428064: one helper, physicell_design.handoff_manifest, reads a design's MaBoSS handoff once,
     checks the design's sha256 and parses it; the design check, conformance and the projection check all use it."""
