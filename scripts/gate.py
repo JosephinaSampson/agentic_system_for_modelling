@@ -297,11 +297,16 @@ def stage_gate_form(line):
     return value
 
 
-def check_task(root, specialist, task):
+def check_task(root, specialist, task, design=None):
     """A literal first-line envelope makes dispatch context machine-checkable.
 
     The task still contains the full bounded scientific instructions. A prompt
     assertion alone cannot pass: matching durable records and hashes are required.
+
+    With `design` (a checked physicell_design, for a configurator brief that applies a design or a projection's
+    design): design_upstream binds the gate to the design first; an upstream gate is then resolved per design
+    handoff, as the design check does (check with artifact= that handoff and current= every design handoff), and
+    the first handoff whose current approval names exactly the gate outputs passes it.
     """
     if specialist not in SPECIALIST_STAGE:
         return None
@@ -310,9 +315,21 @@ def check_task(root, specialist, task):
         raise ValueError("downstream dispatch requires first-line STAGE_GATE JSON; run scripts/gate.py first")
     value = stage_gate_form(first)  # the shape: one parser for the hook, the executor and lineage
     stage = SPECIALIST_STAGE[specialist]
+    if design is not None:
+        design_upstream(design, value)  # the design alone decides; no record is read
     if "standalone_decision_id" in value:
         return standalone(root, stage, value["standalone_decision_id"], value["outputs"])
-    return check(root, stage, value["upstream_session_id"], value["outputs"])
+    if design is None:
+        return check(root, stage, value["upstream_session_id"], value["outputs"])
+    # several handoffs of one session (one export per cell type): the design check's per-handoff rule
+    current = [{"path": i["maboss"]["handoff"], "sha256": i["maboss"]["sha256"]} for i in design["intracellular"]]
+    refusals = []
+    for ref in current:
+        try:
+            return check(root, stage, value["upstream_session_id"], value["outputs"], artifact=ref, current=current)
+        except ValueError as exc:
+            refusals.append(f"{ref['path']}: {exc}")
+    raise ValueError("no design handoff has a current approval of the STAGE_GATE outputs: " + "; ".join(refusals))
 
 
 # Detection runs on a normalised copy of the prompt (see _detection_text); any spelling
@@ -652,11 +669,9 @@ def design_upstream(design, stage_gate):
 
 
 def _check_design_upstream(root, design, first_line):
-    """check_task resolves the line-1 STAGE_GATE of the configurator brief, then design_upstream binds the checked
-    design's MaBoSS handoffs to it; the check_task result is returned (the dispatch hook reuses it)."""
-    gate_result = check_task(root, "multicellular_configurator", first_line)
-    design_upstream(design, gate_result)
-    return gate_result
+    """check_task resolves the line-1 STAGE_GATE of the configurator brief against the checked design
+    (design_upstream, then the per-handoff rule); its result is returned (the dispatch hook reuses it)."""
+    return check_task(root, "multicellular_configurator", first_line, design=design)
 
 
 def _check_physicell_input(root, value, first_line):
@@ -1102,6 +1117,18 @@ def resolve_condition(root, decision_id):
     return {"decision_id": decision_id, "satisfied": result, "evidence": record["evidence"], "supporting_pmids": footer["supporting_pmids"], "mutation_performed": False}
 
 
+def _check_with_design(root, stage, session, outputs, design_rel):
+    """`gate.py check --design`: the design check, then the dispatch's resolution of this STAGE_GATE against it."""
+    if stage != "multicellular":
+        raise ValueError("--design applies to the multicellular stage only")
+    from scripts.physicell import physicell_design
+    design, _, errors = physicell_design.load_and_check(Path(root), design_rel)
+    if errors:
+        raise ValueError(f"design check failed for {design_rel}: " + "; ".join(errors))
+    line = "STAGE_GATE " + json.dumps({"upstream_session_id": session, "outputs": outputs})
+    return check_task(Path(root), "multicellular_configurator", line, design=design)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
@@ -1110,11 +1137,19 @@ def main():
     checker.add_argument("downstream_stage", choices=list(UPSTREAM))
     checker.add_argument("upstream_session")
     checker.add_argument("--outputs", nargs="+", required=True)
+    checker.add_argument("--design", help="multicellular only: runs/orchestrator/<p>/physicell_design.json; resolve "
+                                          "the gate against the checked design, as the dispatch does")
     condition = sub.add_parser("resolve")
     condition.add_argument("decision_id")
     args = parser.parse_args()
     try:
-        result = check(args.root, args.downstream_stage, args.upstream_session, args.outputs) if args.command == "check" else resolve_condition(args.root, args.decision_id)
+        if args.command == "check" and args.design is not None:
+            result = _check_with_design(args.root, args.downstream_stage, args.upstream_session, args.outputs,
+                                        args.design)
+        elif args.command == "check":
+            result = check(args.root, args.downstream_stage, args.upstream_session, args.outputs)
+        else:
+            result = resolve_condition(args.root, args.decision_id)
         print(json.dumps(result, indent=2))
         return 0 if result.get("passed", result.get("satisfied")) else 1
     except (ValueError, OSError, KeyError, TypeError) as exc:

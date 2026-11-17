@@ -143,10 +143,12 @@ outline:
   3. that `STAGE_GATE` is bound to the design (for a projection, to its design; `gate.design_upstream`).
      `upstream_session_id` is the session of every design MaBoSS handoff, and its `outputs` are
      exactly those of a recorded boolean-dynamics `stage_approval` of one of the design's handoffs,
-     binding its exact path and sha256 (`physicell_design.handoff_approvals`). The design check
-     verifies every handoff against its own latest approval and review. A design may import several
-     handoffs of one MaBoSS session (one per cell type), and a later re-approval of the same artifact
-     does not undo an earlier dispatch.
+     binding its exact path and sha256 (`physicell_design.handoff_approvals`). The dispatch accepts the
+     outputs of a current approval of any design handoff (see Gate below), which is always a recorded
+     one, so lineage accepts every brief the dispatch accepted. The design check verifies every handoff
+     against its own latest approval and review. A design may import several handoffs of one MaBoSS
+     session (one per cell type), and a later re-approval of the same artifact does not undo an earlier
+     dispatch.
      `standalone_decision_id` is allowed only for a design without handoffs, and its
      `standalone_approval` must exist for stage multicellular with exactly those outputs
      (`gate.standalone`);
@@ -170,8 +172,14 @@ outline:
   `runs/boolean-dynamics-modeler/<that session>/` (at least one); with `standalone_decision_id`,
   none. Projection form: `record_session_id` = the capture session; its design and approval are
   re-checked, and the design's handoffs are bound to the `STAGE_GATE` exactly as in the design form
-  (stage B replays the design). The line-1 `STAGE_GATE` check is unchanged and runs once per dispatch:
-  the hook reuses the `check_task` result these bindings produced (`gate.check_data_input_and_stage_gate`).
+  (stage B replays the design). For both forms the line-1 `STAGE_GATE` is resolved against the design
+  (`gate.check_task(..., design=)`): `design_upstream` first; then a standalone gate, or, for an upstream
+  gate, the design check's per-handoff rule (`gate.check` with `artifact` = each design handoff and
+  `current` = all of them), so its `outputs` must be those of a current approval of any design handoff.
+  `gate.py check multicellular <session> --outputs ... --design <design>` runs the same resolution for
+  the orchestrator to quote. A `STAGE_GATE`-only brief keeps the session-level `check_task`. The gate
+  runs once per dispatch: the hook reuses the `check_task` result these bindings produced
+  (`gate.check_data_input_and_stage_gate`).
 - **Build:** `--verification` must be a passed `physicell_verification` whose after capture re-binds
   byte for byte and whose recomputed `entries`, `unexpected_changes`, `before`, `after` and
   `projection` equal the file's. The packaged XML and dependencies are copied into `config/`

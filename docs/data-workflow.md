@@ -430,8 +430,12 @@ package, through the configured modelling Python (`.setup/local.json` `env_prefi
 handoff of the design comes from the `STAGE_GATE` upstream MaBoSS session; with a `standalone_decision_id` the
 design has none. Projection form: `record_session_id` = the approval's session = the projection's capture session,
 and the projection's design and its approval are re-checked; stage B replays that design, so its MaBoSS handoffs
-must come from the `STAGE_GATE` upstream as in the design form. The design, projection and dictionary may be named
-only on the `DATA_INPUT` line.
+must come from the `STAGE_GATE` upstream as in the design form. With either form the `STAGE_GATE` is resolved against
+the design, handoff by handoff, as the design check does: its `outputs` must be those of the current approval of
+one of the design's handoffs (a design may import several handoffs of one MaBoSS session, one per cell type). To run
+and quote that resolution before dispatch, add the design: `python3 scripts/gate.py check multicellular <MaBoSS
+session> --outputs ... --design runs/orchestrator/P/physicell_design.json` (it runs the design check first). The
+design, projection and dictionary may be named only on the `DATA_INPUT` line.
 
 **Verification.** `verify_export.py` re-checks the projection, requires the stage-B capture to come from a new
 session whose invocation record (`runs/multicellular-configurator/<session>/invocation/*/task.txt`) has this
