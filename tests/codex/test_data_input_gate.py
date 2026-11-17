@@ -1518,6 +1518,83 @@ class PhysiCellDataInputTests(ProjectionBase):
         self.assertEqual(len(problems), 2, problems)
         self.assertTrue(all("latest independent review blocks or covers a different artifact" in p for p in problems))
 
+    def two_handoff_design(self, hypoxic):
+        data = json.loads(json.dumps(self.design))
+        data["intracellular"].append({"cell_definition": "tumor_hypoxic",
+                                      "maboss": {"handoff": hypoxic["path"], "sha256": hypoxic["sha256"]}})
+        self.write(data, DESIGN_B)
+        return data
+
+    def re_review_and_approve(self, ref, suffix):
+        """A fresh review and then approval of `ref` (the hypoxic handoff, outputs ["A"])."""
+        review = json.loads(json.dumps([r for r in state.records((self.root / "DECISIONS.md").read_text())
+                                        if r.get("id") == "review-hypoxic"][0]))
+        review.update(id=f"review-hypoxic-{suffix}", artifact=ref)
+        state.update(self.root, "record", review)
+        state.update(self.root, "record", {
+            "id": f"approval-hypoxic-{suffix}", "kind": "stage_approval", "session_id": MC_MABOSS,
+            "stage": "boolean-dynamics", "downstream_stage": "multicellular", "outputs": ["A"],
+            "approved_by": "researcher", "authorization": "approved", "artifact": ref})
+
+    def test_a_newer_export_is_not_masked_by_a_later_sibling_review(self):
+        # security review of b2529b5: review A1, approve A1; review and approve the hypoxic handoff; review X (a
+        # re-export of A1 the design does not import); review and approve the hypoxic handoff again. X must still
+        # supersede A1: its review is newer than A1's own
+        from scripts.physicell import physicell_design
+        hypoxic = self.second_handoff_of_the_same_session()
+        folder = self.root / "runs/boolean-dynamics-modeler" / MC_MABOSS
+        later = folder / "handoff-later.json"
+        later.write_bytes((folder / "handoff.json").read_bytes() + b"\n")
+        xref = {"path": str(later.relative_to(self.root)), "sha256": sha(later)}
+        review = json.loads(json.dumps([r for r in state.records((self.root / "DECISIONS.md").read_text())
+                                        if r.get("id") == "review-hypoxic"][0]))
+        review.update(id="review-X", artifact=xref)
+        state.update(self.root, "record", review)
+        self.re_review_and_approve(hypoxic, "2")
+        self.two_handoff_design(hypoxic)
+        problems = physicell_design.check(self.root, DESIGN_B)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertRegex(problems[0], r"^intracellular\[0\]: .*a newer export runs/boolean-dynamics-modeler/"
+                                      r"maboss-session/handoff-later.json of MaBoSS session maboss-session was "
+                                      r"reviewed after .*import it in the design or re-review")
+
+    def test_a_newer_approved_export_is_not_masked_by_a_later_sibling_approval(self):
+        # likewise an approval (any outputs) of an export the design does not import, recorded after A1's own
+        # approval, refuses even when a sibling is re-approved after it
+        from scripts.physicell import physicell_design
+        hypoxic = self.second_handoff_of_the_same_session()
+        folder = self.root / "runs/boolean-dynamics-modeler" / MC_MABOSS
+        later = folder / "handoff-later.json"
+        later.write_bytes((folder / "handoff.json").read_bytes() + b"\n")
+        state.update(self.root, "record", {
+            "id": "approval-X", "kind": "stage_approval", "session_id": MC_MABOSS, "stage": "boolean-dynamics",
+            "downstream_stage": "multicellular", "outputs": ["B"], "approved_by": "researcher",
+            "authorization": "approved", "artifact": {"path": str(later.relative_to(self.root)), "sha256": sha(later)}})
+        self.re_review_and_approve(hypoxic, "2")
+        self.two_handoff_design(hypoxic)
+        problems = physicell_design.check(self.root, DESIGN_B)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertRegex(problems[0], r"^intracellular\[0\]: .*a newer export .*handoff-later.json of MaBoSS session "
+                                      r"maboss-session was approved after this handoff's own approval "
+                                      r"approval-maboss-session; import it in the design or re-review")
+
+    def test_sibling_re_review_without_a_newer_export_passes(self):
+        # the same ordering without X: the hypoxic handoff re-reviewed and re-approved after A1 still passes
+        from scripts.physicell import physicell_design
+        hypoxic = self.second_handoff_of_the_same_session()
+        self.re_review_and_approve(hypoxic, "2")
+        self.two_handoff_design(hypoxic)
+        self.assertEqual(physicell_design.check(self.root, DESIGN_B), [])
+
+    def test_gate_check_with_artifact_refuses_another_artifact_s_approval(self):
+        # security review of b2529b5 (minor): gate.check never returns passed for an approval of another artifact
+        a1 = self.design["intracellular"][0]["maboss"]
+        a1 = {"path": a1["handoff"], "sha256": a1["sha256"]}
+        other = {"path": f"runs/boolean-dynamics-modeler/{MC_MABOSS}/handoff-other.json", "sha256": "0" * 64}
+        self.assertTrue(gate.check(self.root, "multicellular", MC_MABOSS, ["A", "B"], artifact=a1)["passed"])
+        with self.assertRaisesRegex(ValueError, "different artifact"):
+            gate.check(self.root, "multicellular", MC_MABOSS, ["A", "B"], artifact=other, current=[a1, other])
+
     def test_codex_executor_fails_closed_when_the_gate_cannot_be_imported(self):
         # round-3 follow-up: the gate import is inside the fail-closed block, so an import error refuses too
         import scripts
