@@ -1654,6 +1654,27 @@ class PhysiCellDataInputTests(ProjectionBase):
             "authorization": "approved", "artifact": a1})
         self.assertTrue(gate.check(self.root, "multicellular", MC_MABOSS, ["A", "B"], artifact=a1, current=[])["passed"])
 
+    def test_design_upstream_needs_a_design(self):
+        # round 5: a missing design never falls back to the session-level STAGE_GATE rule
+        with self.assertRaisesRegex(ValueError, "no checked design"):
+            gate._check_design_upstream(self.root, None, MC_GATE)
+
+    def test_unreviewed_handoff_is_refused_as_unreviewed(self):
+        # round 5: a handoff approved but never reviewed is named as unreviewed, not as blocked
+        a1 = self.design["intracellular"][0]["maboss"]
+        a1 = {"path": a1["handoff"], "sha256": a1["sha256"]}
+        folder = self.root / "runs/boolean-dynamics-modeler" / MC_MABOSS
+        new = folder / "handoff-unreviewed.json"
+        new.write_bytes((folder / "handoff.json").read_bytes() + b"\n")
+        ref = {"path": str(new.relative_to(self.root)), "sha256": sha(new)}
+        state.update(self.root, "record", {
+            "id": "approval-unreviewed", "kind": "stage_approval", "session_id": MC_MABOSS, "stage": "boolean-dynamics",
+            "downstream_stage": "multicellular", "outputs": MC_OUTPUTS, "approved_by": "researcher",
+            "authorization": "approved", "artifact": ref})
+        with self.assertRaisesRegex(ValueError, "no independent review of runs/boolean-dynamics-modeler/maboss-session/"
+                                                "handoff-unreviewed.json has been recorded"):
+            gate.check(self.root, "multicellular", MC_MABOSS, MC_OUTPUTS, artifact=ref, current=[a1])
+
     def test_gate_check_with_artifact_refuses_another_artifact_s_approval(self):
         # security review of b2529b5 (minor): gate.check never returns passed for an approval of another artifact
         a1 = self.design["intracellular"][0]["maboss"]

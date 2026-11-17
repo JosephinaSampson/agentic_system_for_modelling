@@ -246,7 +246,9 @@ def check(root, stage, session, outputs, artifact=None, current=None):
     review = reviews[-1]
     if artifact is not None:
         own = [r for r in reviews if r.get("artifact") == artifact]
-        review = own[-1] if own else review
+        if not own:
+            raise ValueError(f"no independent review of {_artifact_path(artifact)} has been recorded")
+        review = own[-1]
         _newer_export(recs[recs.index(review) + 1:], "stage_review", session, upstream_stage, current, "reviewed",
                       review, None)
         _newer_export(recs[recs.index(approval) + 1:], "stage_approval", session, upstream_stage, current,
@@ -662,6 +664,8 @@ def design_upstream(design, stage_gate):
 def _check_design_upstream(root, design, first_line):
     """check_task resolves the line-1 STAGE_GATE of the configurator brief against the checked design
     (design_upstream, then the per-handoff rule); its result is returned (the dispatch hook reuses it)."""
+    if design is None:  # check_task(design=None) is the session-level rule: never fall back to it here
+        raise ValueError("no checked design to bind the STAGE_GATE to")
     return check_task(root, "multicellular_configurator", first_line, design=design)
 
 

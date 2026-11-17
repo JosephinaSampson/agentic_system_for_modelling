@@ -235,7 +235,7 @@ class DataHandoffInstructionTests(unittest.TestCase):
                 "relative tolerance 1e-9", "Return `blocked` on any difference",
                 "Apply each quantity's `model_value` verbatim", "do no arithmetic",
                 "Apply only the projection entries. Then export (Cell Rules CSV before XML).",
-                "under Codex the runtime refuses\nthis DATA_INPUT (Claude-only for now)"),
+                "The dispatch hook verifies this DATA_INPUT before launch."),
             ".claude/skills/physicell-workflow/SKILL.md": PHYSICELL_DATA_RULES + (
                 "`DATA_INPUT` on line 2", "load the basis capture's packaged XML with\n  `load_xml_configuration()`",
                 "(`<basis capture>/package/config/PhysiCell_settings.xml`, as an absolute path under\n  the project root)",
@@ -258,8 +258,8 @@ class DataHandoffInstructionTests(unittest.TestCase):
                 "ODE calibration checklist", "holdout_score.json", "results_sha256",
                 "PhysiCell data-stage checklist", "hashes:", "lineage:", "task.txt", "verification file:",
                 "build report:"),
-            ".claude/skills/validate-stage/SKILL.md": ("data_mapping", "mapping.py check", "data_seeds", "--stage-gate"),
-            "CLAUDE.md": ("DATA_INPUT", "data_mapping", "never paste data values", "seeds.json", "sha256 + locator", "--standalone-network", "draft --from",
+            ".claude/skills/validate-stage/SKILL.md": ("data_mapping", "mapping.py check", "data_seeds", "--stage-gate", "--design"),
+            "CLAUDE.md": ("for a projection, the projection's design", "DATA_INPUT", "data_mapping", "never paste data values", "seeds.json", "sha256 + locator", "--standalone-network", "draft --from",
                           "configurator discovery run (`STAGE_GATE` without `DATA_INPUT`) calling `get_available_cycle_models`",
                           "validate-stage on the stage-A capture before the projection is drafted against it",
                           "validate-stage on the verified capture before build\nor closure",
@@ -280,7 +280,7 @@ class DataHandoffInstructionTests(unittest.TestCase):
                                       "| review B | validate-stage", "The stage-A row has `Derived from` = the",
                                       "The stage-B row has `Derived from` = the stage-A session"),
             "docs/agentic-operations.md": ("score_holdout.py", "dispatch.jsonl", "hosts.json", "import_results.py",
-                                           "Discovery (a new configuration only)", "passes validate-stage before the projection"),
+                                           "Discovery (a new configuration only)", "passes validate-stage before the projection", "--design"),
         }
         for path, phrases in expected.items():
             text = (ROOT / path).read_text(encoding="utf-8")

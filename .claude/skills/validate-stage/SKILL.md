@@ -50,7 +50,10 @@ Preserve independent reviewer/auditor requirements; missing definitions remain b
 2. Before downstream dispatch, complete `validate-stage`, wait for both independent
    reviews, and obtain researcher approval of exact session/revision and outputs.
    Record both with `scripts/state.py record`. Run and quote
-   `python3 scripts/gate.py check <downstream-stage> <upstream-session> --outputs ...`.
+   `python3 scripts/gate.py check <downstream-stage> <upstream-session> --outputs ...`. For a multicellular
+   dispatch that applies a PhysiCell design or projection, add `--design <the design; for a projection, the
+   design it names>`: the dispatch resolves the gate per design handoff, so without `--design` a design that
+   imports several handoffs of one MaBoSS session can be refused here while the dispatch accepts it.
    Prefix the task with `STAGE_GATE {"upstream_session_id":"...","outputs":["..."]}`.
    The Agent/Task hook checks the durable records again. An approved standalone
    source uses `standalone_decision_id` instead; never invent an exemption.
@@ -75,7 +78,7 @@ downstream dispatch. Persist reports under runs/orchestrator/reviews/<session>/.
 Use scripts/state.py record for a stage_review record identifying exact session,
 artifact hash, both report paths/hashes and outcome approved, approved_with_limitations,
 revision_required or blocked. Then obtain and record researcher stage_approval for
-that exact artifact and declared outputs. Run scripts/gate.py check and quote its
+that exact artifact and declared outputs. Run scripts/gate.py check (with `--design` as in step 2) and quote its
 JSON result before dispatch; a review recommendation is not researcher approval.
 A later blocking review or changed artifact invalidates the earlier gate.
 

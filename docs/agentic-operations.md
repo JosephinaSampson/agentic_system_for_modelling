@@ -85,6 +85,7 @@ Run and quote:
 ```bash
 python3 scripts/gate.py check boolean-dynamics FULL_NEKO_SESSION --outputs NODE_A NODE_B
 python3 scripts/gate.py check multicellular FULL_MABOSS_SESSION --outputs READOUT_A READOUT_B
+python3 scripts/gate.py check multicellular FULL_MABOSS_SESSION --outputs READOUT_A READOUT_B --design runs/orchestrator/P/physicell_design.json  # design or projection dispatch
 python3 scripts/gate.py check biomass_ode FULL_NEKO_SESSION --outputs NODE_ID_1 NODE_ID_2 ...
 ```
 
