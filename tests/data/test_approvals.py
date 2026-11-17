@@ -16,6 +16,46 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+class BoundBytesTests(unittest.TestCase):
+    """PR #17 review 4588365410: one helper reads a file once, checks its sha256 and parses a JSON object, with one
+    wording; the design handoff reader and the artifact approvals use it."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "file.json"
+        self.path.write_bytes(b'{"a": 1}')
+
+    def test_read_once_checked_and_parsed(self):
+        from unittest import mock
+        from scripts.data import common
+        reads = []
+        original = Path.read_bytes
+
+        def counting(where):
+            reads.append(where)
+            return original(where)
+        digest = sha(self.path)
+        with mock.patch.object(Path, "read_bytes", counting):
+            raw, data = common.bound_json(self.path, digest, "x.json", "approval d1")
+        self.assertEqual((len(reads), raw, data), (1, b'{"a": 1}', {"a": 1}))
+        with self.assertRaisesRegex(ValueError, r"^x.json changed since approval d1 \(sha256 mismatch\)$"):
+            common.bound_json(self.path, "0" * 64, "x.json", "approval d1")
+        for text, message in ((b"[1]", r"^x.json must be a JSON object$"),
+                              (b'{"a": 1, "a": 2}', r"^cannot read x.json: "), (b"{", r"^cannot read x.json: ")):
+            self.path.write_bytes(text)
+            with self.assertRaisesRegex(ValueError, message):
+                common.bound_json(self.path, sha(self.path), "x.json", "approval d1")
+
+    def test_callers_share_the_helper(self):
+        from scripts.data import common
+        from scripts.physicell import physicell_design
+        self.assertFalse(hasattr(approvals, "_json_object"))
+        self.assertIs(approvals.bound_bytes, common.bound_bytes)
+        self.assertIs(approvals.json_object, common.json_object)
+        self.assertIs(physicell_design.bound_json, common.bound_json)
+
+
 class ApprovalTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

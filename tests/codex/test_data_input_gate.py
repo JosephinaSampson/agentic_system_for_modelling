@@ -12,6 +12,9 @@ from unittest import mock
 from scripts import gate, state
 from scripts.data import mapping
 from tests.data.test_jobs_holdout import HoldoutFixture
+from tests.data.test_physicell_design import MABOSS as MC_MABOSS, REL as DESIGN_REL, SESSION as MC_SESSION
+from tests.data.test_physicell_design import STAGE_A as MC_STAGE_A
+from tests.data.test_physicell_projection import DICT as MC_DICT, PROJ as MC_PROJ, ProjectionBase
 from tests.data.test_ode_mapping import SESSION as ODE_SESSION
 from tests.data.test_mapping import (BNET, BNET_TEXT, NEKO, SOURCE, STANDALONE_BNET, STANDALONE_OUTPUTS,
                                      MappingFixture, run_cli, sha)
@@ -210,6 +213,15 @@ class MabossDataInputTests(DataInputFixture):
         super().setUp()
         self.stage_gate_ready()
 
+    def test_codex_executor_launches_neko_and_maboss_data_input_briefs(self):
+        # PR #17 review 4594813584: only the PhysiCell and calibration forms are Claude-only; the NeKo and MaBoSS
+        # DATA_INPUT briefs still launch after passing the check
+        for specialist, prompt in (("network_curator", self.neko_task()),
+                                   ("boolean_dynamics_modeler", self.maboss_task())):
+            with self.subTest(specialist=specialist):
+                status, error, launched, _ = executor_run(self.root, specialist, prompt)
+                self.assertEqual((status, launched, error), (2, True, "stop at preflight"))
+
     def test_maboss_mapping_ok(self):
         result = gate.check_data_input(self.root, "boolean_dynamics_modeler", self.maboss_task())
         self.assertEqual(result, {"mapping": self.mapping_rel, "sha256": sha(self.root / self.mapping_rel),
@@ -303,6 +315,16 @@ class MabossDataInputTests(DataInputFixture):
             gate.check_data_input(self.root, "boolean_dynamics_modeler", self.maboss_task(approval="dec-map-bad"))
 
 
+class MabossGateOnceTests(DataInputFixture):
+    def test_stage_gate_checked_once_per_dispatch(self):
+        # PR #17 review 4586113358: check_mapping_network's STAGE_GATE result is reused by the hook
+        self.stage_gate_ready()
+        for name, prompt in (("mapping", self.maboss_task()), ("STAGE_GATE only", f"{STAGE_GATE}\nSimulate.")):
+            with self.subTest(form=name):
+                status, err, tasks, checks = gate_calls(self.root, "boolean-dynamics-modeler", prompt)
+                self.assertEqual((status, tasks, checks), (0, 1, 1), err)
+
+
 class ScopeTests(DataInputFixture):
     def test_data_path_without_data_input_refused(self):
         prose = f"see {self.seeds} for the seeds"
@@ -347,8 +369,7 @@ class ScopeTests(DataInputFixture):
 
     def test_other_specialists_unaffected(self):
         task = f"Review the evidence; see {self.seeds}.\nDATA_INPUT not-json"
-        for specialist in ("literature_reviewer", "multicellular_configurator", "data_analyst",
-                           "scientific_reviewer", "reproducibility_auditor"):
+        for specialist in ("literature_reviewer", "data_analyst", "scientific_reviewer", "reproducibility_auditor"):
             self.assertIsNone(gate.check_data_input(self.root, specialist, task))
         result = self.hook("literature-reviewer", task)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -769,7 +790,7 @@ class ReadoutOutputsTests(DataInputFixture):
         self.assertError(mapping.check(self.root, rel, stage_gate=SA_GATE), "MAPK1", "STAGE_GATE outputs")
 
 
-MENTION = "seeds and mapping files may be named only on the DATA_INPUT line"
+MENTION = "may be named only on the DATA_INPUT line"
 
 
 class OrchestratorMentionTests(DataInputFixture):
@@ -959,6 +980,13 @@ class OdeCalibrationInputTests(HoldoutFixture):
         result = self.hook("ode-modeler", prompt)
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertRegex(result.stderr, pattern)
+
+    def test_codex_executor_refuses_the_calibration_brief(self):
+        # PR #17 review 4594813584: applying a calibration is Claude-only; the executor refuses it before launch
+        self.assertEqual(self.hook("ode-modeler", self.task()).returncode, 0)
+        status, error, launched, _ = executor_run(self.root, "ode_modeler", self.task())
+        self.assertEqual((status, launched), (2, False), error)
+        self.assertRegex(error, "^stage gate failed: .*Claude-only for now")
 
     def test_accepted_brief_passes(self):
         result = self.hook("ode-modeler", self.task())
@@ -1194,6 +1222,634 @@ class OdeCalibrationInputTests(HoldoutFixture):
                 self.proposal_path.write_text(json.dumps(broken, indent=2) + "\n", encoding="utf-8")
                 self.approve_calibration(f"cal-h{n}")
                 self.refused(self.task(line=self.line(approval=f"cal-h{n}")), pattern)
+
+
+MC_OUTPUTS = ["A", "B"]
+MC_GATE = "STAGE_GATE " + json.dumps({"upstream_session_id": MC_MABOSS, "outputs": MC_OUTPUTS})
+MC_NAMES = ["default", "tumor", "tumor_hypoxic", "oxygen", "drug"]
+DESIGN_B = "runs/orchestrator/p2/physicell_design.json"
+
+
+class PhysiCellDataInputTests(ProjectionBase):
+    """The multicellular-configurator DATA_INPUT (line 2, after STAGE_GATE): an approved stage-A design or an
+    approved stage-B projection, each re-checked at dispatch. The design is anchored on its basis session
+    (MC_SESSION); the projection is bound to its stage-A capture's session (MC_STAGE_A)."""
+
+    def setUp(self):
+        super().setUp()
+        path = self.write_projection(self.projection())
+        state.update(self.root, "record", {
+            "id": "proj-1", "kind": "stage_approval", "session_id": MC_STAGE_A, "stage": "physicell_projection",
+            "outputs": ["in1", "out1", "rule1", "set1"], "approved_by": "researcher", "authorization": "approved",
+            "artifact": {"path": MC_PROJ, "sha256": sha(path)}})
+
+    hook = DataInputFixture.hook
+
+    def design_line(self, rel=DESIGN_REL, digest=None, approval="design-1", session=MC_SESSION, **extra):
+        payload = {"design": rel, "sha256": digest or sha(self.root / rel), "approval": approval,
+                   "record_session_id": session, **extra}
+        return "DATA_INPUT " + json.dumps(payload)
+
+    def projection_line(self, rel=MC_PROJ, digest=None, approval="proj-1", session=MC_STAGE_A, **extra):
+        payload = {"projection": rel, "sha256": digest or sha(self.root / rel), "approval": approval,
+                   "record_session_id": session, **extra}
+        return "DATA_INPUT " + json.dumps(payload)
+
+    def task(self, line, gate_line=MC_GATE, tail=""):
+        return f"{gate_line}\n{line}\nApply exactly the approved file named on the DATA_INPUT line.{tail}"
+
+    def accepted(self, prompt):
+        result = self.hook("multicellular-configurator", prompt)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def refused(self, prompt, pattern):
+        result = self.hook("multicellular-configurator", prompt)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertRegex(result.stderr, pattern)
+
+    def approve_design(self, record_id, rel, data, session=MC_SESSION, stage="physicell_design"):
+        path = self.write(data, rel)
+        state.update(self.root, "record", {
+            "id": record_id, "kind": "stage_approval", "session_id": session, "stage": stage,
+            "outputs": MC_NAMES, "approved_by": "researcher", "authorization": "approved",
+            "artifact": {"path": rel, "sha256": sha(path)}})
+
+    def without_maboss(self):
+        data = json.loads(json.dumps(self.design))
+        data["intracellular"] = []
+        for item in data["coupling_plan"]:
+            item["route"] = "rules"
+        return data
+
+    def standalone_gate(self):
+        state.update(self.root, "record", {
+            "id": "sa-mc", "kind": "standalone_approval", "stage": "multicellular", "outputs": ["tissue"],
+            "artifact": {"path": "inputs/paper.txt", "sha256": sha(self.root / "inputs/paper.txt")},
+            "approved_by": "researcher", "authorization": "researcher: build my tissue model"})
+        return "STAGE_GATE " + json.dumps({"standalone_decision_id": "sa-mc", "outputs": ["tissue"]})
+
+    def test_both_forms_accepted(self):
+        self.accepted(self.task(self.design_line()))
+        self.accepted(self.task(self.projection_line()))
+        self.assertEqual(self.hook("plugin:multicellular-configurator",
+                                   self.task(self.design_line())).returncode, 0)
+        found = gate.check_data_input(self.root, "multicellular_configurator", self.task(self.design_line()))
+        self.assertEqual((found["design"], found["approval_id"], found["physicell_session"]),
+                         (DESIGN_REL, "design-1", MC_SESSION))
+        found = gate.check_data_input(self.root, "multicellular_configurator", self.task(self.projection_line()))
+        self.assertEqual((found["projection"], found["approval_id"], found["physicell_session"]),
+                         (MC_PROJ, "proj-1", MC_STAGE_A))
+
+    def test_stage_gate_only_briefs_unchanged(self):
+        self.accepted(f"{MC_GATE}\nImport the approved MaBoSS handoff onto tumor and export.")
+        self.assertIsNone(gate.check_data_input(self.root, "multicellular_configurator", f"{MC_GATE}\nConfigure."))
+        self.refused("Configure the tissue.", "STAGE_GATE")
+        self.refused(f"{self.design_line()}\nConfigure.", "STAGE_GATE|line 2")
+        bad_gate = "STAGE_GATE " + json.dumps({"upstream_session_id": MC_MABOSS, "outputs": ["A"]})
+        self.refused(self.task(self.design_line(), gate_line=bad_gate), "approval")
+        self.refused(self.task(self.projection_line(), gate_line=bad_gate), "approval")
+
+    def test_duplicate_key_stage_gate_refused_by_the_hook(self):
+        # PR #17 review 4587426903: one parser (gate.stage_gate_form) defines a well-formed STAGE_GATE; check_task
+        # refuses duplicate keys as lineage does, so the hook never dispatches a brief lineage would refuse
+        twice = ('STAGE_GATE {"upstream_session_id": "x", "upstream_session_id": "%s", "outputs": ["A", "B"]}'
+                 % MC_MABOSS)
+        for prompt in (f"{twice}\nImport the approved handoff.", self.task(self.design_line(), gate_line=twice),
+                       self.task(self.projection_line(), gate_line=twice)):
+            with self.subTest(prompt=prompt.splitlines()[1]):
+                self.refused(prompt, "STAGE_GATE has duplicate keys")
+        with self.assertRaisesRegex(ValueError, "STAGE_GATE has duplicate keys"):
+            gate.check_task(self.root, "multicellular_configurator", twice)
+        result = self.hook("boolean-dynamics-modeler", twice.replace(MC_MABOSS, "neko-1") + "\nImport.")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("STAGE_GATE has duplicate keys", result.stderr)
+        self.accepted(f"{MC_GATE}\nImport the approved handoff.")
+
+    def test_stage_gate_only_brief_naming_a_mapping_file_refused(self):
+        # Intended (CLAUDE.md): model input files, recognised by content, are named only on a DATA_INPUT line
+        rel = "runs/orchestrator/p5/mapping.json"
+        (self.root / rel).parent.mkdir(parents=True)
+        (self.root / rel).write_text(json.dumps({"schema_version": 1, "inputs": {}, "contexts": [],
+                                                 "perturbations": [], "readouts": [], "criteria": []}))
+        self.assertEqual(gate._model_input_kind(self.root / rel), "mapping")
+        self.refused(f"{MC_GATE}\nImport the handoff; scenarios are in {rel}.", f"mapping file {rel}.*no DATA_INPUT line")
+        self.refused(self.task(self.design_line(), tail=f" Scenarios: {rel}."), f"mapping file {rel}")
+
+    def test_wrong_sha_refused(self):
+        self.refused(self.task(self.design_line(digest="0" * 64)), "sha256")
+        self.refused(self.task(self.projection_line(digest="0" * 64)), "sha256")
+        self.refused(self.task(self.design_line(digest="ABC")), "sha256")
+        (self.root / MC_PROJ).write_text((self.root / MC_PROJ).read_text() + "\n")
+        self.refused(self.task(self.projection_line()), "sha256")
+
+    def test_wrong_stage_approval_refused(self):
+        self.refused(self.task(self.design_line(approval="proj-1")), "physicell_design")
+        self.refused(self.task(self.projection_line(approval="design-1")), "physicell_projection")
+        self.refused(self.task(self.design_line(approval="missing")), "decision_id")
+        self.approve_design("design-x", DESIGN_B, self.design, stage="physicell_projection")
+        self.refused(self.task(self.design_line(rel=DESIGN_B, approval="design-x")), "physicell_design")
+
+    def test_record_session_id_mismatch_refused(self):
+        self.refused(self.task(self.design_line(session="other-session")), "record_session_id")
+        self.refused(self.task(self.projection_line(session="other-session")), "record_session_id")
+        for session in ("", 1, None):
+            with self.subTest(session=session):
+                self.refused(self.task(self.design_line(session=session)), "record_session_id")
+                self.refused(self.task(self.projection_line(session=session)), "record_session_id")
+
+    def test_design_handoff_must_be_the_stage_gate_upstream(self):
+        # Review Focus 5: an approved, exported MaBoSS session that is not the design's handoff
+        self.make_handoff("maboss-other")
+        other_gate = "STAGE_GATE " + json.dumps({"upstream_session_id": "maboss-other", "outputs": MC_OUTPUTS})
+        self.accepted(f"{other_gate}\nImport the approved handoff.")  # the STAGE_GATE itself passes
+        self.refused(self.task(self.design_line(), gate_line=other_gate), f"{MC_MABOSS}.*maboss-other")
+        # handoffs from two MaBoSS sessions: refused, naming both
+        hypoxic = self.make_handoff("maboss-hyp", cell_type="tumor_hypoxic")
+        data = json.loads(json.dumps(self.design))
+        data["intracellular"].append({"cell_definition": "tumor_hypoxic",
+                                      "maboss": {"handoff": hypoxic["path"], "sha256": hypoxic["sha256"]}})
+        self.write(data, DESIGN_B)
+        self.assertEqual(self.errors_at(DESIGN_B), [])
+        self.approve_design("design-2", DESIGN_B, data)
+        self.refused(self.task(self.design_line(rel=DESIGN_B, approval="design-2")), "maboss-hyp.*maboss-session")
+        # a design without MaBoSS handoffs under an upstream STAGE_GATE, or with them under a standalone one
+        self.approve_design("design-3", "runs/orchestrator/p3/physicell_design.json", self.without_maboss())
+        line = self.design_line(rel="runs/orchestrator/p3/physicell_design.json", approval="design-3")
+        self.refused(self.task(line), "no MaBoSS handoff")
+        sa_gate = self.standalone_gate()
+        self.accepted(self.task(line, gate_line=sa_gate))
+        self.refused(self.task(self.design_line(), gate_line=sa_gate), "standalone.*MaBoSS")
+
+    def test_stage_gate_checked_once_per_dispatch(self):
+        # PR #17 review 4586113358: the hook reuses check_data_input's STAGE_GATE result; gate.check runs once for
+        # the STAGE_GATE plus once per design handoff (the design check's own binding of each handoff)
+        for name, prompt, checks in (("design", self.task(self.design_line()), 2),
+                                     ("projection", self.task(self.projection_line()), 2),
+                                     ("STAGE_GATE only", f"{MC_GATE}\nImport the approved handoff.", 1)):
+            with self.subTest(form=name):
+                status, err, tasks, gate_checks = gate_calls(self.root, "multicellular-configurator", prompt)
+                self.assertEqual((status, tasks, gate_checks), (0, 1, checks), err)
+        # still refused when the STAGE_GATE fails, with or without DATA_INPUT
+        bad = "STAGE_GATE " + json.dumps({"upstream_session_id": MC_MABOSS, "outputs": ["A"]})
+        for prompt in (self.task(self.design_line(), gate_line=bad), f"{bad}\nImport."):
+            status, err, tasks, _ = gate_calls(self.root, "multicellular-configurator", prompt)
+            self.assertEqual((status, tasks), (2, 1), err)
+
+    def test_projection_design_handoff_must_be_the_stage_gate_upstream(self):
+        # PR #17 review 4586110268: the projection form binds its design's MaBoSS handoffs to the line-1 STAGE_GATE
+        self.make_handoff("maboss-other")
+        other_gate = "STAGE_GATE " + json.dumps({"upstream_session_id": "maboss-other", "outputs": MC_OUTPUTS})
+        self.accepted(f"{other_gate}\nImport the approved handoff.")  # the STAGE_GATE itself passes
+        self.refused(self.task(self.projection_line(), gate_line=other_gate), f"{MC_MABOSS}.*maboss-other")
+        self.refused(self.task(self.projection_line(), gate_line=self.standalone_gate()), "standalone.*MaBoSS")
+        self.accepted(self.task(self.projection_line()))
+
+    def test_projection_dispatch_reuses_the_checked_design(self):
+        # PR #17 review 4587428496: the projection branch binds the design its projection check loaded and checked;
+        # the design is loaded once per projection dispatch (by that check), never again by the gate
+        from scripts.physicell import physicell_design, physicell_projection
+        hook = load_hook()
+        with mock.patch.object(physicell_design, "_load", wraps=physicell_design._load) as loads:
+            status, err = run_hook(hook, self.root, "multicellular-configurator", self.task(self.projection_line()))
+        self.assertEqual(status, 0, err)
+        self.assertEqual([c.args[1] for c in loads.call_args_list], [DESIGN_REL])
+        data, digest, errors, design, _ = physicell_projection.load_checked(self.root, MC_PROJ)
+        self.assertEqual((errors, design), ([], json.loads((self.root / DESIGN_REL).read_text())))
+        self.assertEqual(physicell_projection.load_and_check(self.root, MC_PROJ), (data, digest, errors))
+
+    def executor_run(self, specialist, prompt):
+        return executor_run(self.root, specialist, prompt)
+
+    def test_codex_executor_runs_the_hook_check(self):
+        # PR #17 review 4588366029: the Codex executor runs check_data_input_and_stage_gate as the hook does, so the
+        # briefs the hook blocks are refused before any Codex launch
+        self.make_handoff("maboss-other")
+        other_gate = "STAGE_GATE " + json.dumps({"upstream_session_id": "maboss-other", "outputs": MC_OUTPUTS})
+        job = "runs/orchestrator/p1/jobs/j1/job.json"
+        for name, prompt, pattern in (
+                ("design", self.task(self.design_line(), gate_line=other_gate), f"{MC_MABOSS}.*maboss-other"),
+                ("projection", self.task(self.projection_line(), gate_line=other_gate), f"{MC_MABOSS}.*maboss-other"),
+                ("job file", self.task(self.design_line(), tail=f" See {job}."), "calibration job path")):
+            with self.subTest(brief=name):
+                self.refused(prompt, pattern)  # the hook
+                status, error, launched, _ = self.executor_run("multicellular_configurator", prompt)
+                self.assertEqual((status, launched), (2, False), error)
+                self.assertRegex(error, "^stage gate failed: .*" + pattern)
+        # the DATA_INPUT rules now apply to the other gated roles' Codex dispatches too
+        status, error, launched, _ = self.executor_run("network_curator", "Build from runs/data-analyst/x/seeds.")
+        self.assertEqual((status, launched), (2, False), error)
+        self.assertIn(gate.DATA_REFUSAL, error)
+        # a valid STAGE_GATE-only brief still launches, with the STAGE_GATE resolved once
+        with mock.patch.object(gate, "check_task", wraps=gate.check_task) as tasks:
+            status, error, launched, events = self.executor_run("multicellular_configurator",
+                                                                f"{MC_GATE}\nImport the approved handoff.")
+        self.assertEqual((status, launched, tasks.call_count), (2, True, 1), error)
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]["result"]["passed"])
+        # PR #17 review 4594813584: both valid DATA_INPUT forms pass the check but are Claude-only (lineage needs the
+        # Claude invocation record), so the executor refuses them before launch
+        for prompt in (self.task(self.design_line()), self.task(self.projection_line())):
+            with self.subTest(prompt=prompt.splitlines()[1]):
+                self.accepted(prompt)  # the hook
+                status, error, launched, _ = self.executor_run("multicellular_configurator", prompt)
+                self.assertEqual((status, launched), (2, False), error)
+                self.assertRegex(error, "^stage gate failed: a PhysiCell design or projection DATA_INPUT is Claude-only "
+                                        "for now: .*runs/multicellular-configurator/<session>/invocation/<id>/ .*which "
+                                        "the Codex runtime does not write")
+
+    def test_codex_executor_fails_closed_on_any_exception(self):
+        from scripts.codex.specialist_runtime import executor  # noqa: F401 - the module under test
+        with mock.patch.object(gate, "check_data_input_and_stage_gate", side_effect=RuntimeError("boom")):
+            status, error, launched, _ = self.executor_run("multicellular_configurator", self.task(self.design_line()))
+        self.assertEqual((status, launched), (2, False))
+        self.assertEqual(error, "stage gate failed: boom")
+
+    def second_handoff_of_the_same_session(self, outputs=("A",)):
+        """A second maboss-to-physicell handoff of MC_MABOSS (for tumor_hypoxic, declared `outputs`), reviewed
+        and approved after the first (one MaBoSS session exporting a handoff per cell type)."""
+        outputs = list(outputs)
+        from tests.data.test_physicell_design import file_ref
+        folder = self.root / "runs/boolean-dynamics-modeler" / MC_MABOSS
+        manifest = {"schema_name": "mcp-biomodelling-handoff", "schema_version": "1.0",
+                    "handoff_type": "maboss-to-physicell", "source": {"server": "MaBoSS", "session_id": MC_MABOSS},
+                    "network": {"nodes": ["A", "B", "C"], "output_nodes": outputs},
+                    "bnd_file": file_ref(self.root, folder / "model.bnd", "MaBoSS", MC_MABOSS, "maboss_bnd"),
+                    "cfg_file": file_ref(self.root, folder / "model.cfg", "MaBoSS", MC_MABOSS, "maboss_cfg"),
+                    "lineage": [], "simulation": {}, "target": {"cell_type": "tumor_hypoxic"}}
+        path = folder / "handoff-hypoxic.json"
+        path.write_text(json.dumps(manifest))
+        ref = {"path": str(path.relative_to(self.root)), "sha256": sha(path)}
+        review = {"id": "review-hypoxic", "kind": "stage_review", "session_id": MC_MABOSS,
+                  "stage": "boolean-dynamics", "outcome": "approved", "artifact": ref}
+        for role in ("scientific-reviewer", "reproducibility-auditor"):
+            report = self.root / "runs" / f"{role}-hypoxic.md"
+            report.write_text("independent bounded review")
+            review[role] = {"path": str(report.relative_to(self.root)), "sha256": sha(report)}
+        state.update(self.root, "record", review)
+        state.update(self.root, "record", {
+            "id": "approval-hypoxic", "kind": "stage_approval", "session_id": MC_MABOSS, "stage": "boolean-dynamics",
+            "downstream_stage": "multicellular", "outputs": outputs, "approved_by": "researcher",
+            "authorization": "approved", "artifact": ref})
+        return ref
+
+    def test_two_handoffs_of_one_maboss_session(self):
+        # round-3 follow-up item 4: a design importing two handoffs of one MaBoSS session (one per cell type), each
+        # approved with its own outputs, passes the design check, the dispatch gate and lineage
+        from scripts.physicell import lineage, physicell_design
+        hypoxic = self.second_handoff_of_the_same_session()
+        data = json.loads(json.dumps(self.design))
+        data["intracellular"].append({"cell_definition": "tumor_hypoxic",
+                                      "maboss": {"handoff": hypoxic["path"], "sha256": hypoxic["sha256"]}})
+        self.write(data, DESIGN_B)
+        self.assertEqual(physicell_design.check(self.root, DESIGN_B), [])
+        self.approve_design("design-2", DESIGN_B, data)
+        # PR #17 review 4594813429: the dispatch resolves the STAGE_GATE against the design with the design check's
+        # per-handoff rule, so the outputs of the current approval of either handoff pass the hook, and lineage
+        # accepts exactly those briefs too
+        task = self.root / "runs/multicellular-configurator/mc-stage-two/invocation/agent-1/task.txt"
+        task.parent.mkdir(parents=True)
+        digest = sha(self.root / DESIGN_B)
+        prompts = {}
+        for outputs in (["A"], ["A", "B"]):
+            gate_line = "STAGE_GATE " + json.dumps({"upstream_session_id": MC_MABOSS, "outputs": outputs})
+            prompts[str(outputs)] = prompt = self.task(self.design_line(rel=DESIGN_B, approval="design-2"),
+                                                       gate_line=gate_line)
+            with self.subTest(outputs=outputs):
+                self.accepted(prompt)
+                task.write_text(prompt + "\n")
+                self.assertTrue(lineage.dispatched_with(self.root, "mc-stage-two", "design", DESIGN_B, digest,
+                                                        design=data).endswith("task.txt"))
+        # an output list no approval of the design's handoffs names is refused by both
+        zzz = prompts["['A']"].replace('"outputs": ["A"]', '"outputs": ["zzz"]', 1)
+        self.refused(zzz, "no design handoff has a current approval of the STAGE_GATE outputs")
+        task.write_text(zzz + "\n")
+        with self.assertRaisesRegex(ValueError, r"STAGE_GATE outputs \['zzz'\] are not the outputs of any"):
+            lineage.dispatched_with(self.root, "mc-stage-two", "design", DESIGN_B, digest, design=data)
+        # nothing else is loosened: a later reviewed export of the session that the design does not import still
+        # supersedes both handoffs in the design check
+        folder = self.root / "runs/boolean-dynamics-modeler" / MC_MABOSS
+        later = folder / "handoff-later.json"
+        later.write_bytes((folder / "handoff.json").read_bytes() + b"\n")
+        review = json.loads(json.dumps([r for r in state.records((self.root / "DECISIONS.md").read_text())
+                                        if r.get("id") == "review-hypoxic"][0]))
+        review.update(id="review-later", artifact={"path": str(later.relative_to(self.root)), "sha256": sha(later)})
+        state.update(self.root, "record", review)
+        problems = physicell_design.check(self.root, DESIGN_B)
+        self.assertEqual(len(problems), 2, problems)
+        # PR #17 review 4594813740: the newer-export scan alone refuses it, naming the export
+        self.assertTrue(all("a newer export runs/boolean-dynamics-modeler/maboss-session/handoff-later.json of MaBoSS "
+                            "session maboss-session was reviewed after" in p for p in problems), problems)
+        # and at dispatch, whatever the outputs
+        for prompt in prompts.values():
+            self.refused(prompt, "handoff-later.json|latest independent review")
+        gate_line = "STAGE_GATE " + json.dumps({"upstream_session_id": MC_MABOSS, "outputs": ["A"]})
+        with self.assertRaisesRegex(ValueError, "no design handoff has a current approval"):
+            gate.check_task(self.root, "multicellular_configurator", gate_line, design=data)
+
+    def test_two_handoffs_with_the_same_outputs_dispatch(self):
+        # PR #17 review 4594813429, probe 1: two handoffs of one session with the same outputs (one export per cell
+        # type). Records: review A, approve A, review H, approve H, re-approve A. The design check passes and so does
+        # the hook with MC_GATE; the session-level check_task (a STAGE_GATE-only brief) still refuses
+        from scripts.physicell import physicell_design
+        hypoxic = self.second_handoff_of_the_same_session(outputs=["A", "B"])
+        a = self.design["intracellular"][0]["maboss"]
+        state.update(self.root, "record", {
+            "id": "approval-A2", "kind": "stage_approval", "session_id": MC_MABOSS, "stage": "boolean-dynamics",
+            "downstream_stage": "multicellular", "outputs": MC_OUTPUTS, "approved_by": "researcher",
+            "authorization": "approved", "artifact": {"path": a["handoff"], "sha256": a["sha256"]}})
+        data = self.two_handoff_design(hypoxic)
+        self.assertEqual(physicell_design.check(self.root, DESIGN_B), [])
+        self.approve_design("design-2", DESIGN_B, data)
+        self.accepted(self.task(self.design_line(rel=DESIGN_B, approval="design-2")))
+        self.refused(f"{MC_GATE}\nImport the approved handoffs.", "latest independent review")
+        # gate.py check --design runs the same resolution for the orchestrator to quote
+        def cli(*extra):
+            return subprocess.run([sys.executable, str(state.ROOT / "scripts/gate.py"), "--root", str(self.root), "check",
+                                   "multicellular", MC_MABOSS, "--outputs", *MC_OUTPUTS, *extra],
+                                  capture_output=True, text=True)
+        result = cli("--design", DESIGN_B)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(json.loads(result.stdout)["passed"])
+        self.assertEqual(cli().returncode, 2)
+        result = cli("--design", DESIGN_B, "--outputs", "zzz")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no design handoff has a current approval", json.loads(result.stdout)["reason"])
+
+    def two_handoff_design(self, hypoxic):
+        data = json.loads(json.dumps(self.design))
+        data["intracellular"].append({"cell_definition": "tumor_hypoxic",
+                                      "maboss": {"handoff": hypoxic["path"], "sha256": hypoxic["sha256"]}})
+        self.write(data, DESIGN_B)
+        return data
+
+    def re_review_and_approve(self, ref, suffix):
+        """A fresh review and then approval of `ref` (the hypoxic handoff, outputs ["A"])."""
+        review = json.loads(json.dumps([r for r in state.records((self.root / "DECISIONS.md").read_text())
+                                        if r.get("id") == "review-hypoxic"][0]))
+        review.update(id=f"review-hypoxic-{suffix}", artifact=ref)
+        state.update(self.root, "record", review)
+        state.update(self.root, "record", {
+            "id": f"approval-hypoxic-{suffix}", "kind": "stage_approval", "session_id": MC_MABOSS,
+            "stage": "boolean-dynamics", "downstream_stage": "multicellular", "outputs": ["A"],
+            "approved_by": "researcher", "authorization": "approved", "artifact": ref})
+
+    def test_a_newer_export_is_not_masked_by_a_later_sibling_review(self):
+        # security review of b2529b5: review A1, approve A1; review and approve the hypoxic handoff; review X (a
+        # re-export of A1 the design does not import); review and approve the hypoxic handoff again. X must still
+        # supersede A1: its review is newer than A1's own
+        from scripts.physicell import physicell_design
+        hypoxic = self.second_handoff_of_the_same_session()
+        folder = self.root / "runs/boolean-dynamics-modeler" / MC_MABOSS
+        later = folder / "handoff-later.json"
+        later.write_bytes((folder / "handoff.json").read_bytes() + b"\n")
+        xref = {"path": str(later.relative_to(self.root)), "sha256": sha(later)}
+        review = json.loads(json.dumps([r for r in state.records((self.root / "DECISIONS.md").read_text())
+                                        if r.get("id") == "review-hypoxic"][0]))
+        review.update(id="review-X", artifact=xref)
+        state.update(self.root, "record", review)
+        self.re_review_and_approve(hypoxic, "2")
+        self.two_handoff_design(hypoxic)
+        problems = physicell_design.check(self.root, DESIGN_B)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertRegex(problems[0], r"^intracellular\[0\]: .*a newer export runs/boolean-dynamics-modeler/"
+                                      r"maboss-session/handoff-later.json of MaBoSS session maboss-session was "
+                                      r"reviewed after .*import it in the design or re-review")
+
+    def test_a_newer_approved_export_is_not_masked_by_a_later_sibling_approval(self):
+        # likewise an approval (any outputs) of an export the design does not import, recorded after A1's own
+        # approval, refuses even when a sibling is re-approved after it
+        from scripts.physicell import physicell_design
+        hypoxic = self.second_handoff_of_the_same_session()
+        folder = self.root / "runs/boolean-dynamics-modeler" / MC_MABOSS
+        later = folder / "handoff-later.json"
+        later.write_bytes((folder / "handoff.json").read_bytes() + b"\n")
+        state.update(self.root, "record", {
+            "id": "approval-X", "kind": "stage_approval", "session_id": MC_MABOSS, "stage": "boolean-dynamics",
+            "downstream_stage": "multicellular", "outputs": ["B"], "approved_by": "researcher",
+            "authorization": "approved", "artifact": {"path": str(later.relative_to(self.root)), "sha256": sha(later)}})
+        self.re_review_and_approve(hypoxic, "2")
+        self.two_handoff_design(hypoxic)
+        problems = physicell_design.check(self.root, DESIGN_B)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertRegex(problems[0], r"^intracellular\[0\]: .*a newer export .*handoff-later.json of MaBoSS session "
+                                      r"maboss-session was approved after this handoff's own approval "
+                                      r"approval-maboss-session; import it in the design or re-review")
+
+    def test_sibling_re_review_without_a_newer_export_passes(self):
+        # the same ordering without X: the hypoxic handoff re-reviewed and re-approved after A1 still passes
+        from scripts.physicell import physicell_design
+        hypoxic = self.second_handoff_of_the_same_session()
+        self.re_review_and_approve(hypoxic, "2")
+        self.two_handoff_design(hypoxic)
+        self.assertEqual(physicell_design.check(self.root, DESIGN_B), [])
+
+    def test_the_artifact_always_counts_as_current(self):
+        # PR #17 review 4594813740: a caller that leaves the artifact out of current never sees the artifact's own
+        # re-approval (here with other outputs) as a newer export
+        a1 = self.design["intracellular"][0]["maboss"]
+        a1 = {"path": a1["handoff"], "sha256": a1["sha256"]}
+        state.update(self.root, "record", {
+            "id": "approval-A-again", "kind": "stage_approval", "session_id": MC_MABOSS, "stage": "boolean-dynamics",
+            "downstream_stage": "multicellular", "outputs": ["A"], "approved_by": "researcher",
+            "authorization": "approved", "artifact": a1})
+        self.assertTrue(gate.check(self.root, "multicellular", MC_MABOSS, ["A", "B"], artifact=a1, current=[])["passed"])
+
+    def test_design_upstream_needs_a_design(self):
+        # round 5: a missing design never falls back to the session-level STAGE_GATE rule
+        with self.assertRaisesRegex(ValueError, "no checked design"):
+            gate._check_design_upstream(self.root, None, MC_GATE)
+
+    def test_unreviewed_handoff_is_refused_as_unreviewed(self):
+        # round 5: a handoff approved but never reviewed is named as unreviewed, not as blocked
+        a1 = self.design["intracellular"][0]["maboss"]
+        a1 = {"path": a1["handoff"], "sha256": a1["sha256"]}
+        folder = self.root / "runs/boolean-dynamics-modeler" / MC_MABOSS
+        new = folder / "handoff-unreviewed.json"
+        new.write_bytes((folder / "handoff.json").read_bytes() + b"\n")
+        ref = {"path": str(new.relative_to(self.root)), "sha256": sha(new)}
+        state.update(self.root, "record", {
+            "id": "approval-unreviewed", "kind": "stage_approval", "session_id": MC_MABOSS, "stage": "boolean-dynamics",
+            "downstream_stage": "multicellular", "outputs": MC_OUTPUTS, "approved_by": "researcher",
+            "authorization": "approved", "artifact": ref})
+        with self.assertRaisesRegex(ValueError, "no independent review of runs/boolean-dynamics-modeler/maboss-session/"
+                                                "handoff-unreviewed.json has been recorded"):
+            gate.check(self.root, "multicellular", MC_MABOSS, MC_OUTPUTS, artifact=ref, current=[a1])
+
+    def test_gate_check_with_artifact_refuses_another_artifact_s_approval(self):
+        # security review of b2529b5 (minor): gate.check never returns passed for an approval of another artifact
+        a1 = self.design["intracellular"][0]["maboss"]
+        a1 = {"path": a1["handoff"], "sha256": a1["sha256"]}
+        other = {"path": f"runs/boolean-dynamics-modeler/{MC_MABOSS}/handoff-other.json", "sha256": "0" * 64}
+        self.assertTrue(gate.check(self.root, "multicellular", MC_MABOSS, ["A", "B"], artifact=a1)["passed"])
+        with self.assertRaisesRegex(ValueError, "different artifact"):
+            gate.check(self.root, "multicellular", MC_MABOSS, ["A", "B"], artifact=other, current=[a1, other])
+
+    def test_codex_executor_fails_closed_when_the_gate_cannot_be_imported(self):
+        # round-3 follow-up: the gate import is inside the fail-closed block, so an import error refuses too
+        import scripts
+        prompt = self.task(self.design_line())
+        saved = scripts.gate
+        del scripts.gate
+        try:
+            with mock.patch.dict(sys.modules, {"scripts.gate": None}):
+                status, error, launched, _ = self.executor_run("multicellular_configurator", prompt)
+        finally:
+            scripts.gate = saved
+        self.assertEqual((status, launched), (2, False))
+        self.assertRegex(error, "^stage gate failed: .*scripts.gate")
+
+    def errors_at(self, rel):
+        from scripts.physicell import physicell_design
+        return physicell_design.check(self.root, rel)
+
+    def test_design_failing_check_refused(self):
+        data = json.loads(json.dumps(self.design))
+        data["unmapped"] = [{"item": "x", "reason": "TODO"}]
+        self.approve_design("design-bad", DESIGN_B, data)
+        self.refused(self.task(self.design_line(rel=DESIGN_B, approval="design-bad")), "check failed.*TODO")
+        # Review Focus 5: the approved design's MaBoSS handoff was superseded after approval
+        self.accepted(self.task(self.design_line()))
+        state.update(self.root, "registry-supersede", {"session_id": MC_MABOSS})
+        self.refused(self.task(self.design_line()), "design check failed.*maboss-session.*active")
+        self.refused(self.task(self.projection_line()), "projection check failed.*no longer passes")
+
+    def test_projection_rechecked_and_design_approval_enforced(self):
+        # a projection whose design approval is missing, though the projection itself is approved
+        data = self.projection()
+        data["design"]["approval"] = "nope"
+        path = self.root / "runs/orchestrator/p4/physicell_projection.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(data, indent=2))
+        rel = path.relative_to(self.root).as_posix()
+        state.update(self.root, "record", {
+            "id": "proj-2", "kind": "stage_approval", "session_id": MC_STAGE_A, "stage": "physicell_projection",
+            "outputs": ["in1", "out1", "rule1", "set1"], "approved_by": "researcher", "authorization": "approved",
+            "artifact": {"path": rel, "sha256": sha(path)}})
+        self.refused(self.task(self.projection_line(rel=rel, approval="proj-2")), "design approval nope")
+        # the dictionary binding is re-checked too
+        dictionary = self.root / MC_DICT
+        dictionary.write_text(dictionary.read_text() + "\n")
+        self.refused(self.task(self.projection_line()), "dictionary")
+
+    def test_extra_missing_or_mixed_keys_refused(self):
+        design = json.loads(self.design_line()[len("DATA_INPUT "):])
+        projection = json.loads(self.projection_line()[len("DATA_INPUT "):])
+        cases = {"extra": {**design, "accept": ["x"]}, "extra-projection": {**projection, "values": {}},
+                 "mixed": {**design, "projection": MC_PROJ}, "both": {**design, **projection}}
+        for drop in ("sha256", "approval", "record_session_id", "design"):
+            cases[f"no-{drop}"] = {k: v for k, v in design.items() if k != drop}
+        cases["no-projection-session"] = {k: v for k, v in projection.items() if k != "record_session_id"}
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                self.refused(self.task("DATA_INPUT " + json.dumps(payload)), "exactly")
+        for line in ("DATA_INPUT not-json", "DATA_INPUT []", 'DATA_INPUT {"design": 1}'):
+            with self.subTest(line=line):
+                self.refused(self.task(line), "blocked")
+
+    def test_payload_like_mentions_refused(self):
+        self.refused(self.task(self.design_line(), tail=f"\n{self.projection_line()}"), "line 4")
+        self.refused(self.task(self.design_line(), tail='\nDATA_INPUT {"design": "x"}'), "DATA_INPUT payload")
+        self.refused(f"{MC_GATE}\nConfigure.\n{self.design_line()}", "line 2")
+        self.accepted(self.task(self.design_line(), tail=" Use the design as defined in the DATA_INPUT line."))
+
+    def test_other_physicell_files_named_in_prose_refused(self):
+        self.write(self.design, DESIGN_B)
+        # the DATA_INPUT artifact itself may be named again
+        self.accepted(self.task(self.design_line(), tail=f" See {DESIGN_REL}."))
+        self.accepted(self.task(self.projection_line(), tail=f" See {MC_PROJ}."))
+        for line, tail, kind in ((self.design_line(), f" Compare {DESIGN_B}.", "physicell_design"),
+                                 (self.design_line(), f" Then apply {MC_PROJ}.", "physicell_projection"),
+                                 (self.design_line(), f" Names: {MC_DICT}.", "physicell_dictionary"),
+                                 (self.projection_line(), f" Design: {DESIGN_REL}.", "physicell_design"),
+                                 (self.projection_line(), f" Names: {MC_DICT}.", "physicell_dictionary"),
+                                 (self.projection_line(), " Folder: runs/orchestrator/p1/", "physicell_")):
+            with self.subTest(tail=tail):
+                self.refused(self.task(line, tail=tail), f"{kind}.*{MENTION}")
+        # without a DATA_INPUT line, no such file may be named either
+        self.refused(f"{MC_GATE}\nBuild the design {DESIGN_REL}.", "physicell_design.*no DATA_INPUT line")
+        # nor a data-analyst path or session
+        self.refused(f"{MC_GATE}\nUse runs/data-analyst/x.", "data-analyst")
+        self.refused(self.task(self.design_line(), tail=" data-20990101T000000Z-deadbeef"), "data-analyst")
+
+
+def executor_run(root, specialist, prompt):
+    """(exit status, handoff_error, whether the Codex launch was reached, stage_gate events) of one Codex executor
+    dispatch in project `root`; the launch is stopped at its first preflight step."""
+    from types import SimpleNamespace
+    from scripts.codex.specialist_runtime import executor
+    from scripts.codex.specialist_runtime.models import SpecialistInvocationRequest
+    request = SpecialistInvocationRequest(specialist, prompt)
+    execution = SimpleNamespace(started_at="2026-11-17T00:00:00+00:00", invocation_id="test", handoff_error=None)
+    events = []
+    with mock.patch.object(executor, "PROJECT_ROOT", root), \
+            mock.patch.object(executor, "resolve_codex_executable",
+                              side_effect=ValueError("stop at preflight")) as launch:
+        status = executor._run(request, execution, transition=lambda x: None, event_callback=events.append,
+                               cancellation_requested=lambda: False)
+    return status, execution.handoff_error, launch.called, [e for e in events if e["type"] == "stage_gate"]
+
+
+def load_hook():
+    """The dispatch hook module, loaded in-process (its main() reads the event from sys.stdin)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("stage_gate_guard_under_test", HOOK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_hook(module, root, subagent_type, prompt):
+    """(exit status, stderr) of the in-process hook on one Agent dispatch event."""
+    import contextlib
+    import io
+    event = {"tool_name": "Agent", "tool_input": {"subagent_type": subagent_type, "prompt": prompt}}
+    err = io.StringIO()
+    with mock.patch.object(module, "ROOT", root), mock.patch.object(sys, "stdin", io.StringIO(json.dumps(event))), \
+            contextlib.redirect_stderr(err):
+        status = module.main()
+    return status, err.getvalue()
+
+
+def gate_calls(root, subagent_type, prompt):
+    """(hook exit status, stderr, check_task calls, gate.check calls) of one in-process dispatch."""
+    hook = load_hook()
+    with mock.patch.object(gate, "check_task", wraps=gate.check_task) as task, \
+            mock.patch.object(gate, "check", wraps=gate.check) as check:
+        status, err = run_hook(hook, root, subagent_type, prompt)
+    return status, err, task.call_count, check.call_count
+
+
+class NewerExportMessageTests(unittest.TestCase):
+    def test_malformed_artifact_refuses_with_a_value_error(self):
+        own = {"id": "own"}
+        for artifact in ("x", ["x"], None):
+            later = [{"kind": "stage_approval", "session_id": "s", "stage": "boolean_dynamics",
+                      "downstream_stage": "multicellular", "artifact": artifact}]
+            with self.assertRaisesRegex(ValueError, "a newer export"):
+                gate._newer_export(later, "stage_approval", "s", "boolean_dynamics", [], "approved", own, "multicellular")
+
+
+class HookRoleTests(unittest.TestCase):
+    """PR #17 review 4586112665: every gated role takes DATA_INPUT; the hook has no check_job_mentions branch and
+    fails closed (exit 2) on a gated role without a DATA_INPUT form."""
+
+    def test_every_gated_role_has_a_data_input_line(self):
+        self.assertLessEqual(load_hook().GATED, set(gate.DATA_INPUT_LINE))
+
+    def test_gated_role_without_data_input_form_is_blocked(self):
+        hook = load_hook()
+        lines = {k: v for k, v in gate.DATA_INPUT_LINE.items() if k != "network_curator"}
+        with mock.patch.object(gate, "DATA_INPUT_LINE", lines):
+            status, err = run_hook(hook, state.ROOT, "network-curator", "Build a network.")
+        self.assertEqual(status, 2)
+        self.assertIn("network_curator has no DATA_INPUT form", err)
+
+    def test_hook_does_not_import_check_job_mentions(self):
+        self.assertNotIn("check_job_mentions", HOOK.read_text())
+
+    def test_check_job_mentions_is_gone(self):
+        # PR #17 review 4587429015: no caller remained; check_data_input runs the job-file rule for every gated role
+        self.assertFalse(hasattr(gate, "check_job_mentions"))
 
 
 if __name__ == "__main__":

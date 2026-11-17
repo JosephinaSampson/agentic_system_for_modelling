@@ -10,7 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from scripts.data.common import RUNS_ROOT
+from scripts.data.common import RUNS_ROOT, bound_bytes, json_object
 
 
 def _state():
@@ -124,8 +124,9 @@ def require_proposal_approved(root: Path, record: dict, session_id: str, proposa
     return entry
 
 
-def _require_artifact_approval(root: Path, record_id: str, stage: str, rel: str, sha256: str) -> dict:
-    """The `stage` stage_approval of exactly this artifact path and sha256, unchanged on disk."""
+def _artifact_approval(root: Path, record_id: str, stage: str, rel: str, sha256: str) -> tuple[dict, bytes]:
+    """(the `stage` stage_approval of exactly this artifact path and sha256, the artifact's bytes): read once, and
+    those bytes hash to sha256 (unchanged on disk), so a caller can use them without reading the file again."""
     state = _state()
     root = Path(root)
     record = load_record(root, record_id)
@@ -135,9 +136,12 @@ def _require_artifact_approval(root: Path, record_id: str, stage: str, rel: str,
         raise ValueError(f"decision {record_id} artifact must be {rel}")
     if approved.get("sha256") != sha256:
         raise ValueError(f"decision {record_id} approves a different sha256 than {sha256}")
-    if state.digest(state.artifact(root, rel)) != sha256:
-        raise ValueError(f"{rel} changed since approval {record_id} (sha256 mismatch)")
-    return record
+    return record, bound_bytes(state.artifact(root, rel), sha256, rel, f"approval {record_id}")
+
+
+def _require_artifact_approval(root: Path, record_id: str, stage: str, rel: str, sha256: str) -> dict:
+    """The `stage` stage_approval of exactly this artifact path and sha256, unchanged on disk."""
+    return _artifact_approval(root, record_id, stage, rel, sha256)[0]
 
 
 def require_mapping_approval(root: Path, record_id: str, mapping_rel: str, sha256: str) -> dict:
@@ -149,15 +153,9 @@ def require_seeds_approval(root: Path, record_id: str, seeds_rel: str, sha256: s
     return _require_artifact_approval(root, record_id, "data_seeds", seeds_rel, sha256)
 
 
-def _ode_mapping_outputs(root: Path, rel: str, sha256: str) -> tuple[str | None, set]:
-    """(ODE session, measurement ids used by rules + fitted names) of an ode_mapping.json, tolerant of shape.
-
-    The bytes are read once; their digest must equal `sha256` and the outputs come from those same bytes.
-    """
-    state = _state()
-    raw = state.artifact(Path(root), rel).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != sha256:
-        raise ValueError(f"{rel} changed during approval check (sha256 mismatch)")
+def _ode_mapping_outputs(rel: str, raw: bytes) -> tuple[str | None, set]:
+    """(ODE session, measurement ids used by rules + fitted names) of an ode_mapping.json, tolerant of shape, from
+    the bytes _artifact_approval read and hashed (the file is not read again)."""
     try:
         data = json.loads(raw.decode("utf-8"))
     except ValueError as exc:
@@ -189,9 +187,9 @@ def require_ode_mapping_approval(root: Path, record_id: str, rel: str, sha256: s
     ode-modeler gate does not re-run the check: it requires the job.json beside the calibration proposal to
     name this same mapping path, sha256 and approval, and calls this function.
     """
-    record = _require_artifact_approval(root, record_id, "ode_mapping", rel, sha256)
+    record, raw = _artifact_approval(root, record_id, "ode_mapping", rel, sha256)
     _state().validate_record(Path(root), record)
-    session, expected = _ode_mapping_outputs(root, rel, sha256)
+    session, expected = _ode_mapping_outputs(rel, raw)
     if record.get("session_id") != session:
         raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
                          f"but the mapping binds ODE session {session!r}")
@@ -215,7 +213,6 @@ def require_calibration_approval(root: Path, record_id: str, rel: str, sha256: s
       * session_id is the proposal's ODE session;
       * the proposal belongs to its job (require_proposal_job).
     """
-    from scripts.data.common import strict_json
     state = _state()
     root = Path(root)
     record = load_record(root, record_id)
@@ -226,14 +223,9 @@ def require_calibration_approval(root: Path, record_id: str, rel: str, sha256: s
     if approved.get("sha256") != sha256:
         raise ValueError(f"decision {record_id} approves a different sha256 than {sha256}")
     state.validate_record(root, record)
-    raw = state.artifact(root, rel).read_bytes()  # one read: the hash and the parsed proposal agree
-    if hashlib.sha256(raw).hexdigest() != sha256:
-        raise ValueError(f"{rel} changed since approval {record_id} (sha256 mismatch)")
-    try:
-        proposal = strict_json(raw)
-    except (ValueError, RecursionError) as exc:
-        raise ValueError(f"cannot read {rel}: {exc}") from None
-    if not isinstance(proposal, dict) or proposal.get("kind") != "calibration_proposal":
+    # one read: the hash and the parsed proposal agree
+    proposal = json_object(bound_bytes(state.artifact(root, rel), sha256, rel, f"approval {record_id}"), rel)
+    if proposal.get("kind") != "calibration_proposal":
         raise ValueError(f"{rel} is not a calibration_proposal")
     model = proposal.get("model")
     session = model.get("ode_session") if isinstance(model, dict) else None
@@ -295,3 +287,77 @@ def require_proposal_job(root: Path, rel: str, proposal: dict) -> dict:
         raise ValueError(f"{rel}: its mapping {ref} is not the mapping of the job.json beside it "
                          f"({job.get('mapping')!r})")
     return job
+
+
+def _physicell_design_facts(rel: str, data: dict) -> tuple[str | None, list]:
+    """(session anchor, cell definition and substrate names) of a physicell_design.json, tolerant of shape: the
+    basis capture's session, else the purpose <p> of runs/orchestrator/<p>/... (a lineage anchor)."""
+    basis = data.get("basis")
+    capture = basis.get("capture") if isinstance(basis, dict) else None
+    parts = capture.split("/") if isinstance(capture, str) else []
+    anchor = rel.split("/") if isinstance(rel, str) else []
+    purpose = anchor[2] if len(anchor) == 4 and anchor[:2] == ["runs", "orchestrator"] else None
+    session = parts[2] if len(parts) == 5 else (purpose if basis is None else None)
+    names = []
+    for key in ("cell_definitions", "substrates"):
+        for item in data.get(key) if isinstance(data.get(key), list) else ():
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                names.append(item["name"])
+    return session, names
+
+
+def _physicell_projection_facts(rel: str, data: dict) -> tuple[str | None, list]:
+    """(PhysiCell session of the projection's capture, entry ids) of a physicell_projection.json, tolerant of
+    shape."""
+    capture = data.get("capture")
+    path = capture.get("path") if isinstance(capture, dict) else None
+    parts = path.split("/") if isinstance(path, str) else []
+    session = parts[2] if len(parts) == 5 else None
+    entries = data.get("entries") if isinstance(data.get("entries"), list) else []
+    ids = [e["entry_id"] for e in entries if isinstance(e, dict) and isinstance(e.get("entry_id"), str)]
+    return session, ids
+
+
+def _require_physicell_approval(root: Path, record_id: str, rel: str, sha256: str, stage: str, facts_fn,
+                                what: tuple[str, str]) -> dict:
+    """The `stage` stage_approval of exactly this path and sha256, validated (state.validate_record), whose
+    session_id is the file's session and whose outputs are exactly its names. The file is read and hashed once
+    (_artifact_approval): those bytes bind the approval and `facts_fn(rel, data)` takes (session, names) from them.
+    `what` words the refusals: (how the file's session is named, what the outputs must equal)."""
+    session_words, outputs_words = what
+    record, raw = _artifact_approval(root, record_id, stage, rel, sha256)
+    _state().validate_record(Path(root), record)
+    session, names = facts_fn(rel, json_object(raw, rel))
+    if record.get("session_id") != session:
+        raise ValueError(f"decision {record_id} approves session {record.get('session_id')!r}, "
+                         f"but {session_words} {session!r}")
+    outputs = record.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) != len(set(outputs)) or set(outputs) != set(names) \
+            or len(names) != len(set(names)):
+        raise ValueError(f"decision {record_id} outputs must equal {outputs_words}: {sorted(set(names))}")
+    return record
+
+
+def require_physicell_design_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
+    """The physicell_design stage_approval of exactly this physicell_design.json path and sha256.
+
+    The record must pass `state.validate_record`; session_id is the PhysiCell session of the design's basis
+    capture (for a new configuration, the design's purpose <p>: a lineage anchor) and outputs are exactly the cell
+    definition and substrate names. This binds the approval to the bytes; run
+    `scripts/physicell/physicell_design.py check` and have it pass before the researcher approves.
+    """
+    return _require_physicell_approval(
+        root, record_id, rel, sha256, "physicell_design", _physicell_design_facts,
+        ("the design's session anchor is", "the cell definition and substrate names of the design"))
+
+
+def require_physicell_projection_approval(root: Path, record_id: str, rel: str, sha256: str) -> dict:
+    """The physicell_projection stage_approval of exactly this physicell_projection.json path and sha256.
+
+    The record must pass `state.validate_record`; session_id is the PhysiCell session of the projection's capture
+    and outputs are exactly the entry ids. This binds the approval to the bytes; run
+    `scripts/physicell/physicell_projection.py check` and have it pass before the researcher approves.
+    """
+    return _require_physicell_approval(
+        root, record_id, rel, sha256, "physicell_projection", _physicell_projection_facts,
+        ("the projection's capture is of PhysiCell session", "the entry ids of the projection"))

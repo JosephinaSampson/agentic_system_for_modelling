@@ -362,6 +362,109 @@ For every gated specialist it refuses any path under a calibration job folder (`
 Hold-out scoring uses the bundled model with the accepted values, so it does not depend on when the
 ode-modeler applies them: run it once, after the calibration approval.
 
+## Data to PhysiCell
+
+Approved data reach the PhysiCell settings in two stages, each researcher-approved and applied by the
+multicellular-configurator from a `DATA_INPUT` line (line 2, after `STAGE_GATE`). Briefs never carry the values.
+
+| Step | Command or dispatch | Output |
+|---|---|---|
+| discovery | configurator, `STAGE_GATE` without `DATA_INPUT`: create a session and call `get_available_cycle_models` (a new configuration only) | the recorded `{key, name}` list the design's `cycle_models` copies verbatim |
+| design | `python3 scripts/physicell/physicell_design.py draft --purpose P [--basis CAPTURE] [--source ID:inputs/FILE ...] [--data ID:SESSION:PROPOSAL:APPROVAL ...]`, then `check runs/orchestrator/P/physicell_design.json` | the stage-A design: the domain, cell definitions (cycle model keys) and variants, substrates with every `add_single_substrate` value, the MaBoSS handoff of each cell type, coupling plan |
+| design approval | `state.py record`: `stage_approval`, stage `physicell_design`, `artifact` the design path and sha256, `session_id` the design's anchor (the basis capture's session, else `P`), `outputs` the cell definition and substrate names | |
+| build | configurator, line 2 `DATA_INPUT {"design": "runs/orchestrator/P/physicell_design.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<the design's anchor>"}` | a new PhysiCell session builds the design, lists signals and behaviors, exports |
+| capture | `scripts/capture/recover.py`, `scripts/capture/record_physicell_config.py` | `runs/multicellular-configurator/<session>/configs/<capture>` |
+| dictionary | `python3 scripts/physicell/capture_dictionary.py runs/multicellular-configurator/<session>/invocation/<id>/tool_calls.json CAPTURE runs/orchestrator/P/physicell_design.json` | `runs/orchestrator/P/physicell_dictionary.json` (write-new), only for a capture that conforms to the design |
+| review A | validate-stage on the stage-A capture: independent scientific review and reproducibility audit | before the projection is drafted against it |
+| projection | `python3 scripts/physicell/physicell_projection.py draft --purpose P --capture CAPTURE --design DESIGN --design-approval RECORD_ID [--dictionary FILE] [--source ...] [--data ...]`, then `check runs/orchestrator/P/physicell_projection.json` | entries: `physiboss_input`, `physiboss_output`, `rule`, `setting` |
+| projection approval | `stage_approval`, stage `physicell_projection`, `artifact` the projection path and sha256, `session_id` the capture's session, `outputs` the entry ids | |
+| apply | configurator, line 2 `DATA_INPUT {"projection": "runs/orchestrator/P/physicell_projection.json", "sha256": "...", "approval": "<record id>", "record_session_id": "<the capture's session>"}` | a new session replays the projection's design exactly, applies only the entries, exports the rules CSV before the XML |
+| capture | `recover.py`, `record_physicell_config.py` | the stage-B capture |
+| verify | `python3 scripts/physicell/verify_export.py runs/orchestrator/P/physicell_projection.json CAPTURE` | `runs/orchestrator/P/physicell_verification.<session>.<capture>.json`; exit 0 passed, 1 failed, 2 refused |
+| review B | validate-stage on the verified stage-B capture | before build or closure |
+| build (optional) | `physicell-build` skill: `python3 scripts/physicell/build.py --template template\|template_BM [--version 1.14.2] [--dest DIR] [--verification runs/orchestrator/P/physicell_verification.<session>.<capture>.json] [--jobs N]` | report `runs/orchestrator/physicell-build/<UTC>-<template>/report.{json,md}`; the run command is printed, never executed |
+
+**Session anchor and dispatch lineage.** The design's `session` is a lineage anchor, never a live session: the
+basis capture's session when the design has a basis, otherwise the purpose `P`. Every configurator run is a new
+session, so the stage-A capture is bound to the design, and the stage-B capture to the projection, by dispatch
+lineage (`scripts/physicell/lineage.py`; the rule is stated once, in
+[the architecture doc](data-to-physicell-architecture.md), under "Dispatch lineage"). `capture_dictionary.py`, the
+projection check and `verify_export.py` refuse a capture without it.
+
+**Design values.** The design carries every argument the configurator's build tools take, each cited (`from`), so
+the configurator never relies on a tool default or a typical value: the domain (`domain_x`, `domain_y`, `use_2d`,
+`domain_z` (null with `use_2d`), `dx`, `max_time`), each substrate's `units` label, `diffusion_coefficient`,
+`decay_rate`, `initial_condition` and `dirichlet` `{enabled, value}`, and each cell definition's `cycle_model` (a key
+of the `cycle_models` list `[{key, name}]` copied from the discovery run's `get_available_cycle_models`). Units must be
+the ones the exported XML writes: `micron` and `min` for the domain and `max_time`, `micron^2/min` and `1/min` for
+diffusion and decay, and `mmHg` for an added substrate's initial and Dirichlet values (server 2.5.2 writes `mmHg` there
+whatever the label, so an added substrate must be in `mmHg`); a basis substrate keeps its captured values and units,
+`from: "basis"`, and every basis cell definition and substrate is declared. `capture_dictionary.py` (and again the
+projection check) compares the stage-A capture with the design and names every mismatch: the cell definitions and
+their cycles, the substrates and their values, units and Dirichlet settings, the domain and `max_time` (a basis: the
+basis's), the MaBoSS models on exactly the declared cells, each holding exactly its design handoff's `.bnd` and `.cfg`
+bytes (the captured dependency sha256 equals the handoff manifest's `bnd_file`/`cfg_file` sha256; a stale or other
+export is refused), no PhysiBoSS link and no enabled rules ruleset. The library
+default substrate `substrate` that `create_simulation_domain` inserts is accepted only untouched.
+
+**Values.** A quantity is `{value, value_unit, transform, factor, target_unit?, target_unit_justification?, model_value}` (a `setting` entry
+carries these keys itself). The model value is `value*factor`
+(`identity`, `unit_factor`), `factor/value` (`reciprocal`) or `factor*ln(2)/value` (`ln2_over`). `model_value` is that
+number, pasted by the orchestrator from the check's message (the check refuses a missing, `TODO` or different
+`model_value`, relative 1e-12, and prints the value); the configurator applies it verbatim and does no arithmetic. Units are never
+inferred: `target_unit` is required for a conversion (factor not 1, or `unit_factor`), as the researcher's approved
+conversion explained in the entry's justification; `unit_factor` with factor 1 is refused ("a unit_factor of 1
+converts nothing; use identity with matching units"). With `identity`, `reciprocal` or `ln2_over` and factor 1 the unit
+is derived (the value unit, or its reciprocal) and a `target_unit`, if given, must equal it: a factor-1 "conversion"
+from `1/hour` to `1/min` is refused. The reciprocal (or `ln2_over`) of a compound unit at factor 1 is not derivable:
+it needs `target_unit` with a non-empty `target_unit_justification` (e.g. `um/min` to `min/um`), and is refused without them. These rules hold for setting entries and rule and link quantities alike, and a setting's converted
+unit must equal the XML `units` attribute exactly. Names must match the captured dictionary
+and, for PhysiBoSS links, the cell definition's MaBoSS handoff. One writer per (cell definition, behavior): one rule,
+or one output link, never both, counting what the capture already has.
+
+**Modelling Python.** The design check and the hook validate each MaBoSS 2.x handoff with the backend contract
+package, through the configured modelling Python (`.setup/local.json` `env_prefix`, or `.setup/dispatcher.local.json`
+`python_executable`); without one, an otherwise valid handoff is refused ("v2 contract validation failed").
+
+**Gate.** The hook re-checks the file on exactly the approved bytes and the approval. Design form: every MaBoSS
+handoff of the design comes from the `STAGE_GATE` upstream MaBoSS session; with a `standalone_decision_id` the
+design has none. Projection form: `record_session_id` = the approval's session = the projection's capture session,
+and the projection's design and its approval are re-checked; stage B replays that design, so its MaBoSS handoffs
+must come from the `STAGE_GATE` upstream as in the design form. With either form the `STAGE_GATE` is resolved against
+the design, handoff by handoff, as the design check does: its `outputs` must be those of the current approval of
+one of the design's handoffs (a design may import several handoffs of one MaBoSS session, one per cell type). To run
+and quote that resolution before dispatch, add the design: `python3 scripts/gate.py check multicellular <MaBoSS
+session> --outputs ... --design runs/orchestrator/P/physicell_design.json` (for a projection, its design; it runs the design check first,
+but neither pins the design's sha256 nor requires its approval: the dispatch hook does that). The
+design, projection and dictionary may be named only on the `DATA_INPUT` line.
+
+**Verification.** `verify_export.py` re-checks the projection, requires the stage-B capture to come from a new
+session whose invocation record (`runs/multicellular-configurator/<session>/invocation/*/task.txt`) has this
+projection's `DATA_INPUT` line as its line 2, and compares the stage-A and stage-B captures: only the entries'
+changes are allowed (setting values, the added links, the rules CSV rows and its enabled ruleset). Any other
+difference fails. A failed or retried attempt keeps its own file. `build.py --verification` never trusts the file:
+it recomputes the verification (`verify_export.compute`) on the file's own projection and after capture and
+refuses unless it passes with the same entries, unexpected changes, bindings and projection. Settings with an
+intracellular MaBoSS model need `--template template_BM` (`template` is refused).
+
+**Limitations.** Server 2.5.2 cannot reload a captured configuration's input files into a new session, so a
+design basis may have no input files (rules CSV, MaBoSS models, initial cells) and a projection's capture no
+enabled rules; a revised projection is re-applied from the stage-A capture. A design takes its MaBoSS models from
+one MaBoSS session (the `STAGE_GATE` upstream).
+
+**Registry and tags.** Each configurator run is a new session. The stage-A row has `Derived from` = the
+`STAGE_GATE` upstream MaBoSS session or the standalone decision id (plus the basis capture's session with a basis);
+its Artifacts cite the design path and short sha256. The stage-B row has `Derived from` = the stage-A session; its
+Artifacts cite the projection path and short sha256 and the verification file. Applied values are tagged `data-derived`, citing the projection path, short sha256 and
+approval id.
+
+**Smoke test.** `python3 tests/integration/physicell_smoke.py` runs the chain in a temporary repo copy under
+`~/.cache`: fixture design, dictionary, projection and approvals, the real dispatch hook, `verify_export.py`, and,
+when `uv` can run `mcp-biomodelling-servers==2.5.2`, the real MaBoSS and PhysiCell servers in-process (stage A,
+stage B by replay, verification, tampered captures failing). It also downloads and compiles PhysiCell
+(`build.py --template template`) and copies the verified settings into it; that part prints `SKIP` without
+network or an OpenMP compiler, or with `PHYSICELL_SMOKE_SKIP_BUILD=1`.
+
 ## Provenance checks
 
 - `sources.jsonl` paths are project-root-relative (`data-cache/sha256/<hex>`,

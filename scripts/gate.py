@@ -7,7 +7,7 @@ import json
 import os
 import posixpath
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sys
 import unicodedata
 
@@ -166,7 +166,33 @@ def verify_manifest(root, data, expected_type, session, outputs=None):
     return data
 
 
-def check(root, stage, session, outputs):
+def _artifact_path(artifact):
+    """The path of an artifact reference for a message; a malformed reference is shown as is."""
+    return artifact.get("path") if isinstance(artifact, dict) else artifact
+
+
+def _newer_export(later, kind, session, upstream_stage, current, done, own, downstream):
+    """ValueError naming the newest export of `session` that a `kind` record in `later` (the records after `own`)
+    covers but `current` does not: a newer export supersedes the caller's handoff. Approvals count with any outputs
+    (only those for the `downstream` stage)."""
+    newer = [r for r in later if r.get("kind") == kind and r.get("session_id") == session
+             and r.get("stage") == upstream_stage and (downstream is None or r.get("downstream_stage") == downstream)
+             and r.get("artifact") not in current]
+    if newer:
+        path = _artifact_path(newer[-1].get("artifact"))
+        raise ValueError(f"a newer export {path} of MaBoSS session {session} was {done} after this handoff's own "
+                         f"{kind.split('_')[1]} {own.get('id')}; import it in the design or re-review")
+
+
+def check(root, stage, session, outputs, artifact=None, current=None):
+    """The durable and live checks of an upstream session for `stage` with exactly `outputs`.
+
+    Without `artifact`: the session's latest approval of exactly these outputs and its latest review decide.
+    With `artifact` (one export of the session) and `current` (every export of the session the caller imports):
+    the artifact's own latest approval of these outputs and its own latest review are used. A later review of the
+    session, or a later approval for this stage, of an export not in `current` refuses: a newer export supersedes
+    it."""
+    current = [artifact, *(current or [])] if artifact is not None else None
     if stage not in UPSTREAM:
         raise ValueError("unknown downstream stage")
     identifier(session)
@@ -185,6 +211,12 @@ def check(root, stage, session, outputs):
     if not approvals:
         raise ValueError("no researcher approval names this session, downstream stage and exact outputs")
     approval = approvals[-1]
+    if artifact is not None:
+        own = [r for r in approvals if r.get("artifact") == artifact]
+        if not own:
+            raise ValueError(f"the approval of these outputs is of a different artifact "
+                             f"{_artifact_path(approval.get('artifact'))} (superseded re-export?)")
+        approval = own[-1]
     validate_record(root, approval)
     manifest = checked_artifact(root, approval["artifact"])
     prefix = f"runs/{role}/{session}/"
@@ -212,6 +244,15 @@ def check(root, stage, session, outputs):
     if not reviews:
         raise ValueError("independent scientific review and reproducibility audit have not been recorded")
     review = reviews[-1]
+    if artifact is not None:
+        own = [r for r in reviews if r.get("artifact") == artifact]
+        if not own:
+            raise ValueError(f"no independent review of {_artifact_path(artifact)} has been recorded")
+        review = own[-1]
+        _newer_export(recs[recs.index(review) + 1:], "stage_review", session, upstream_stage, current, "reviewed",
+                      review, None)
+        _newer_export(recs[recs.index(approval) + 1:], "stage_approval", session, upstream_stage, current,
+                      "approved", approval, stage)
     validate_record(root, review)
     if review["outcome"] not in {"approved", "approved_with_limitations"} or review["artifact"] != approval["artifact"]:
         raise ValueError("latest independent review blocks or covers a different artifact revision")
@@ -231,26 +272,57 @@ def standalone(root, stage, decision_id, outputs):
     return {"passed": True, "downstream_stage": stage, "standalone_decision_id": decision_id, "artifact": record["artifact"], "outputs": outputs}
 
 
-def check_task(root, specialist, task):
+STAGE_GATE_FORMS = ({"upstream_session_id", "outputs"}, {"standalone_decision_id", "outputs"})
+
+
+def stage_gate_form(line):
+    """The value of a well-formed line-1 `STAGE_GATE` (strict JSON object, duplicate keys refused: exactly
+    upstream_session_id or standalone_decision_id, an identifier, and outputs, a nonempty unique list of node names);
+    ValueError otherwise. Shape only, and the one definition of a well-formed STAGE_GATE: check_task (which then
+    resolves it against the durable records), _gate_anchor, check_mapping_outputs and lineage all parse with it."""
+    if not isinstance(line, str) or not line.startswith("STAGE_GATE "):
+        raise ValueError("line 1 is not a STAGE_GATE line")
+    value = _strict_object(line[len("STAGE_GATE "):], "STAGE_GATE")
+    if set(value) not in STAGE_GATE_FORMS:
+        raise ValueError("STAGE_GATE must have exactly upstream_session_id or standalone_decision_id, and outputs")
+    identifier(value.get("upstream_session_id", value.get("standalone_decision_id")))
+    _names(value["outputs"], "STAGE_GATE outputs")
+    return value
+
+
+def check_task(root, specialist, task, design=None):
     """A literal first-line envelope makes dispatch context machine-checkable.
 
     The task still contains the full bounded scientific instructions. A prompt
     assertion alone cannot pass: matching durable records and hashes are required.
+
+    With `design` (a checked physicell_design, for a configurator brief that applies a design or a projection's
+    design): design_upstream binds the gate to the design first; an upstream gate is then resolved per design
+    handoff, as the design check does (check with artifact= that handoff and current= every design handoff), and
+    the first handoff whose current approval names exactly the gate outputs passes it.
     """
     if specialist not in SPECIALIST_STAGE:
         return None
     first = task.splitlines()[0] if task else ""
     if not first.startswith("STAGE_GATE "):
         raise ValueError("downstream dispatch requires first-line STAGE_GATE JSON; run scripts/gate.py first")
-    value = json.loads(first[len("STAGE_GATE "):])
-    if not isinstance(value, dict):
-        raise ValueError("STAGE_GATE must be a JSON object")
+    value = stage_gate_form(first)  # the shape: one parser for the hook, the executor and lineage
     stage = SPECIALIST_STAGE[specialist]
-    if set(value) == {"standalone_decision_id", "outputs"}:
+    if design is not None:
+        design_upstream(design, value)  # the design alone decides; no record is read
+    if "standalone_decision_id" in value:
         return standalone(root, stage, value["standalone_decision_id"], value["outputs"])
-    if set(value) != {"upstream_session_id", "outputs"}:
-        raise ValueError("STAGE_GATE requires upstream_session_id and outputs")
-    return check(root, stage, value["upstream_session_id"], value["outputs"])
+    if design is None:
+        return check(root, stage, value["upstream_session_id"], value["outputs"])
+    # several handoffs of one session (one export per cell type): the design check's per-handoff rule
+    current = [{"path": i["maboss"]["handoff"], "sha256": i["maboss"]["sha256"]} for i in design["intracellular"]]
+    refusals = []
+    for ref in current:
+        try:
+            return check(root, stage, value["upstream_session_id"], value["outputs"], artifact=ref, current=current)
+        except ValueError as exc:
+            refusals.append(f"{ref['path']}: {exc}")
+    raise ValueError("no design handoff has a current approval of the STAGE_GATE outputs: " + "; ".join(refusals))
 
 
 # Detection runs on a normalised copy of the prompt (see _detection_text); any spelling
@@ -275,6 +347,7 @@ DATA_REFUSAL = "brief references data-analyst artifacts without a DATA_INPUT lin
 # Specialist -> (0-based line index of its DATA_INPUT line, human label).
 DATA_INPUT_LINE = {"network_curator": (0, "network-curator DATA_INPUT must be line 1 of the prompt"),
                    "boolean_dynamics_modeler": (1, "boolean-dynamics-modeler DATA_INPUT must be line 2, after STAGE_GATE"),
+                   "multicellular_configurator": (1, "multicellular-configurator DATA_INPUT must be line 2, after STAGE_GATE"),
                    "ode_modeler": (0, "ode-modeler DATA_INPUT must be line 1 of the prompt")}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -381,11 +454,12 @@ REDRAFT_HINT = "redraft with mapping.py draft --from"
 
 def _gate_anchor(first_line):
     """(STAGE_GATE key, value) of a MaBoSS brief's line 1: its upstream_session_id or standalone_decision_id."""
-    gate_value = _strict_object(first_line[len("STAGE_GATE "):], "STAGE_GATE") if first_line.startswith("STAGE_GATE ") else {}
-    for key in NETWORK_ANCHORS:
-        if isinstance(gate_value.get(key), str):
-            return key, gate_value[key]
-    raise ValueError("a MaBoSS DATA_INPUT needs a line-1 STAGE_GATE naming upstream_session_id or standalone_decision_id")
+    if not first_line.startswith("STAGE_GATE "):
+        raise ValueError("a MaBoSS DATA_INPUT needs a line-1 STAGE_GATE naming upstream_session_id or "
+                         "standalone_decision_id")
+    gate_value = stage_gate_form(first_line)
+    key = next(key for key in NETWORK_ANCHORS if key in gate_value)
+    return key, gate_value[key]
 
 
 def check_mapping_network(root, network, first_line):
@@ -394,8 +468,13 @@ def check_mapping_network(root, network, first_line):
     NeKo upstream: network.neko_session equals upstream_session_id and network.sha256 is the
     BNET of the NeKo handoff that STAGE_GATE approves. Standalone: network.standalone_decision_id
     equals the STAGE_GATE's and network.sha256 is that standalone_approval's artifact sha256.
-    check_task re-resolves the STAGE_GATE (not weakened by this). Returns (key, anchor).
+    The STAGE_GATE is resolved here with check_task (not weakened by this). Returns (key, anchor).
     """
+    return _check_mapping_network(root, network, first_line)[:2]
+
+
+def _check_mapping_network(root, network, first_line):
+    """check_mapping_network, plus the check_task result of the STAGE_GATE: (key, anchor, gate result)."""
     key, anchor = _gate_anchor(first_line)
     if not isinstance(network, dict):
         raise ValueError("mapping inputs.network is missing")
@@ -422,7 +501,7 @@ def check_mapping_network(root, network, first_line):
     if network.get("sha256") != approved:
         raise ValueError(f"mapping network {network.get('bnet')} (sha256 {str(network.get('sha256'))[:12]}) is not "
                          f"{what} (sha256 {str(approved)[:12]}); {REDRAFT_HINT}")
-    return key, anchor
+    return key, anchor, gate_result
 
 
 def check_mapping_outputs(data, first_line):
@@ -434,9 +513,7 @@ def check_mapping_outputs(data, first_line):
     from scripts.data import mapping
     if not first_line.startswith("STAGE_GATE "):
         raise ValueError("a MaBoSS DATA_INPUT needs a line-1 STAGE_GATE naming its approved outputs")
-    outputs = _strict_object(first_line[len("STAGE_GATE "):], "STAGE_GATE").get("outputs")
-    if not isinstance(outputs, list) or any(not isinstance(x, str) for x in outputs):
-        raise ValueError("STAGE_GATE outputs must be a list of node names")
+    outputs = stage_gate_form(first_line)["outputs"]
     missing = [node for node in mapping.readout_nodes(data) if node not in outputs]
     if missing:
         raise ValueError(f"mapping readout node(s) {', '.join(missing)} are not among the STAGE_GATE outputs "
@@ -489,7 +566,7 @@ def _check_maboss_data_input(root, value, first_line):
         raise ValueError(f"mapping check failed for {rel}: " + "; ".join(errors))
     # The mapping's network must be the BNET the STAGE_GATE approved: the NeKo handoff's, or the
     # standalone approval's artifact.
-    check_mapping_network(root, data["inputs"]["network"], first_line)
+    gate_result = _check_mapping_network(root, data["inputs"]["network"], first_line)[2]
     check_mapping_outputs(data, first_line)
     if record.get("session_id") != anchor:
         raise ValueError(f"mapping approval {approval_id} has session_id {record.get('session_id')!r}; a data_mapping "
@@ -502,7 +579,7 @@ def _check_maboss_data_input(root, value, first_line):
                          f"mapping's perturbation and criterion ids {sorted(ids, key=str)}")
     sessions = {item["session"] for item in data["inputs"]["data"]}
     anchor_key = "neko_session" if key == "upstream_session_id" else "standalone_decision_id"
-    return {"mapping": rel, "sha256": digest, "approval_id": approval_id, anchor_key: anchor}, sessions
+    return {"mapping": rel, "sha256": digest, "approval_id": approval_id, anchor_key: anchor}, sessions, gate_result
 
 
 CALIBRATION_REL = re.compile(r"runs/orchestrator/[\w.-]+/jobs/[\w.-]+/calibration_proposal\.json")
@@ -549,6 +626,113 @@ def _check_ode_calibration_input(root, value):
             "outputs": list(accept)}, set()
 
 
+PHYSICELL_FORMS = {"design": {"design", "sha256", "approval", "record_session_id"},
+                   "projection": {"projection", "sha256", "approval", "record_session_id"}}
+
+
+def maboss_sessions(design):
+    """The MaBoSS sessions (runs/boolean-dynamics-modeler/<session>/...) of a checked design's handoffs."""
+    return sorted({PurePosixPath(item["maboss"]["handoff"]).parts[2] for item in design["intracellular"]})
+
+
+def design_upstream(design, stage_gate):
+    """Bind a checked design's MaBoSS handoffs to a STAGE_GATE (a stage_gate_form value or its check_task result).
+
+    upstream_session_id: the design imports at least one handoff and every handoff lives under
+    runs/boolean-dynamics-modeler/<that session>/ (the design check already proved each one an exported,
+    reviewed and approved maboss-to-physicell handoff of its session, with gate.check). A design mixing several
+    MaBoSS sessions is refused, naming them. standalone_decision_id: the design imports no MaBoSS handoff.
+    The design alone decides (no record is read); ValueError otherwise.
+    """
+    sessions = maboss_sessions(design)
+    if "standalone_decision_id" in stage_gate:
+        if sessions:
+            raise ValueError(f"STAGE_GATE names standalone_decision_id {stage_gate['standalone_decision_id']}, so the "
+                             f"design may import no MaBoSS handoff, but it imports handoffs of MaBoSS session(s) "
+                             f"{', '.join(sessions)}; dispatch it with that MaBoSS session's upstream_session_id STAGE_GATE")
+        return
+    anchor = stage_gate["upstream_session_id"]
+    if not sessions:
+        raise ValueError(f"STAGE_GATE names MaBoSS upstream_session_id {anchor}, but the design imports no MaBoSS "
+                         "handoff; a design without MaBoSS models is dispatched with a standalone_decision_id STAGE_GATE")
+    if sessions != [anchor]:
+        raise ValueError(f"design MaBoSS handoffs come from session(s) {', '.join(sessions)}, but STAGE_GATE names "
+                         f"upstream_session_id {anchor}; every design handoff must be under "
+                         f"runs/boolean-dynamics-modeler/{anchor}/")
+
+
+def _check_design_upstream(root, design, first_line):
+    """check_task resolves the line-1 STAGE_GATE of the configurator brief against the checked design
+    (design_upstream, then the per-handoff rule); its result is returned (the dispatch hook reuses it)."""
+    if design is None:  # check_task(design=None) is the session-level rule: never fall back to it here
+        raise ValueError("no checked design to bind the STAGE_GATE to")
+    return check_task(root, "multicellular_configurator", first_line, design=design)
+
+
+def _check_physicell_input(root, value, first_line):
+    """The multicellular-configurator forms: an approved stage-A design or an approved stage-B projection.
+
+    {"design", "sha256", "approval", "record_session_id"}: the physicell_design.json is re-checked
+    (physicell_design.load_and_check, no problem allowed) on exactly the approved bytes, its physicell_design
+    approval binds path and sha256, record_session_id is the approval's session_id (the design's anchor: the basis
+    capture's session, else its purpose <p>), and its MaBoSS handoffs are the STAGE_GATE upstream's
+    (_check_design_upstream). The stage-A run is bound to the design later by this very line (lineage.py).
+    {"projection", "sha256", "approval", "record_session_id"}: the physicell_projection.json is re-checked
+    (physicell_projection.load_and_check: capture, dictionary, the design and its approval), its
+    physicell_projection approval binds path and sha256, and record_session_id is the approval's session_id and
+    the projection's capture session; stage B replays the projection's design, so its MaBoSS handoffs are bound to the
+    STAGE_GATE upstream exactly as for the design form (_check_design_upstream on the design the projection check
+    re-checked, physicell_projection.load_checked(...).design; it is not read again).
+    record_session_id is a lineage anchor, never a live session: the configurator starts a new PhysiCell session,
+    builds the design (loading a design's basis XML, if any; for a projection, replaying the projection's design)
+    and never passes record_session_id to a tool.
+    The check runs before the approval is trusted: the approval's session derivation assumes a checked file.
+    """
+    form = next((name for name, keys in PHYSICELL_FORMS.items() if set(value) == keys), None)
+    if form is None:
+        raise ValueError("multicellular-configurator DATA_INPUT requires exactly design, sha256, approval and "
+                         "record_session_id, or exactly projection, sha256, approval and record_session_id; "
+                         f"got {sorted(value)}")
+    rel, digest, approval_id, session = value[form], value["sha256"], value["approval"], value["record_session_id"]
+    if not all(isinstance(v, str) and v for v in (rel, digest, approval_id)):
+        raise ValueError(f"DATA_INPUT {form}, sha256 and approval must be nonempty strings")
+    if not isinstance(session, str) or not session:
+        raise ValueError("DATA_INPUT record_session_id must be a nonempty string (the approved file's PhysiCell "
+                         "session anchor; the configurator always starts a new session)")
+    if not SHA256.fullmatch(digest):
+        raise ValueError(f"DATA_INPUT {form} needs a lowercase hex sha256")
+    # Check exactly the approved bytes: one read gives both the parsed file and its hash. The projection check also
+    # yields the design it re-checked (its pinned path and sha256), which stage B replays.
+    if form == "design":
+        from scripts.physicell import physicell_design
+        require = approvals.require_physicell_design_approval
+        data, actual, errors = physicell_design.load_and_check(root, rel)
+        design = data
+    else:
+        from scripts.physicell import physicell_projection
+        require = approvals.require_physicell_projection_approval
+        checked = physicell_projection.load_checked(root, rel)
+        data, actual, errors, design = checked.data, checked.digest, checked.errors, checked.design
+    if actual != digest:
+        raise ValueError(f"{rel} has sha256 {actual[:12]}, not the DATA_INPUT sha256 {digest[:12]} "
+                         f"(changed since approval {approval_id}?)")
+    if errors:
+        raise ValueError(f"{form} check failed for {rel}: " + "; ".join(errors))
+    record = require(root, approval_id, rel, digest)  # runs validate_record
+    if session != record.get("session_id"):
+        raise ValueError(f"DATA_INPUT record_session_id {session!r} must be the session_id "
+                         f"{record.get('session_id')} of approval {approval_id}")
+    if form == "projection":
+        capture = PurePosixPath(data["capture"]["path"]).parts[2]
+        if session != capture:
+            raise ValueError(f"DATA_INPUT record_session_id {session!r} must be the session {capture} of the "
+                             f"projection's capture {data['capture']['path']}")
+    # Stage B replays the projection's design, importing its MaBoSS handoffs: they must be the STAGE_GATE upstream's,
+    # exactly as for the design form. For a projection the design is the one its check just re-checked (no new read).
+    gate_result = _check_design_upstream(root, design, first_line)
+    return {form: rel, "sha256": digest, "approval_id": approval_id, "physicell_session": session}, set(), gate_result
+
+
 def _check_ode_session_mentions(root, text, session):
     """An ode-modeler brief with a verified calibration DATA_INPUT may not name any other existing BioMASS
     session (a directory name under runs/ode-modeler/) anywhere, in any case: the modeler applies the approved
@@ -570,12 +754,12 @@ def _check_ode_session_mentions(root, text, session):
                              "name no other ODE session")
 
 
-# Seeds and mapping files reach NeKo and MaBoSS only as the DATA_INPUT artifact. Every
-# runs/orchestrator path the brief mentions (any separator or case, after the detection
-# normalisation) is resolved in the repository: a regular file, or each regular file directly
-# inside a mentioned directory under runs/orchestrator (a glob names its directory; never
-# recursive), whose content is a seeds or mapping file, whatever its name, must be exactly
-# the artifact the DATA_INPUT line names.
+# Model input files (seeds, mapping, ode_mapping, calibration proposal, PhysiCell design, projection
+# and dictionary) reach a specialist only as the DATA_INPUT artifact. Every runs/orchestrator path
+# the brief mentions (any separator or case, after the detection normalisation) is resolved in the
+# repository: a regular file, or each regular file directly inside a mentioned directory under
+# runs/orchestrator (a glob names its directory; never recursive), whose content is a model input
+# file (_model_input_kind), whatever its name, must be exactly the artifact the DATA_INPUT line names.
 ORCHESTRATOR_START = re.compile(r"runs[\\/]+orchestrator(?![\w-])", re.I)
 PATH_TOKEN = re.compile(r"[^\s`'\"<>|]+")
 GLOB = re.compile(r"[*?\[]")
@@ -583,7 +767,8 @@ JSON_END = re.compile(r"\.json", re.I)
 LINE_BREAK = re.compile(r"[\n\r\x0b\x0c\x1c-\x1e\x85  ]")
 TRAILING = ".,;:!?)]}>'\"`"
 SPACED_CANDIDATES = 5  # line prefixes ending in .json tried per mention (names with spaces)
-MENTION_RULE = "seeds and mapping files may be named only on the DATA_INPUT line; see CLAUDE.md"
+MENTION_RULE = ("model input files (seeds, mapping, ode_mapping, calibration proposal, PhysiCell design, projection "
+                "and dictionary) may be named only on the DATA_INPUT line; see CLAUDE.md")
 
 
 def _resolve_mention(root, mention):
@@ -691,8 +876,12 @@ def _is_seeds(data):
         isinstance(x, str) or (isinstance(x, dict) and "hgnc_symbol" in x) for x in seeds)
 
 
+MODEL_INPUT_KINDS = ("ode_mapping", "calibration_proposal", "physicell_design", "physicell_projection",
+                     "physicell_dictionary")
+
+
 def _model_input_kind(path):
-    """"seeds", "mapping", "ode_mapping" or "calibration_proposal" when the file's content has that schema's shape, else None.
+    """"seeds", "mapping" or one of MODEL_INPUT_KINDS when the file's content has that schema's shape, else None.
 
     Unreadable or non-JSON files are neither; any other failure propagates (fail closed).
     """
@@ -703,7 +892,7 @@ def _model_input_kind(path):
         return None
     if not isinstance(data, dict):
         return None
-    if data.get("kind") in ("ode_mapping", "calibration_proposal"):
+    if data.get("kind") in MODEL_INPUT_KINDS:
         return data["kind"]
     if _is_seeds(data):
         return "seeds"
@@ -755,13 +944,14 @@ def _job_area(root, path):
         or parts[:2] == ["inputs", "calibration-results"]
 
 
-def _check_mentions(root, text, artifact_rel, model_inputs=True):
+def _check_mentions(root, text, artifact_rel):
     """One scan of the (normalised) brief: every runs/orchestrator mention is resolved once (shared cache).
 
     Job rule (every gated specialist): no calibration job file or returned result, except the ode-modeler's
     verified DATA_INPUT proposal (`artifact_rel` when it is a calibration_proposal.json) and its own job folder.
-    Model-input rule (`model_inputs`, the DATA_INPUT roles): no seeds, mapping, ode_mapping or calibration
-    proposal file other than `artifact_rel` (see _check_orchestrator_mentions).
+    Model-input rule (every gated specialist: all take DATA_INPUT): no seeds, mapping, ode_mapping, calibration
+    proposal or PhysiCell design, projection or dictionary file other than `artifact_rel`
+    (see _check_orchestrator_mentions).
     """
     root = Path(root).resolve()
     allowed = set()
@@ -785,20 +975,7 @@ def _check_mentions(root, text, artifact_rel, model_inputs=True):
             if path not in allowed and _job_area(root, path):
                 raise ValueError(f"brief mentions {mention!r}, which is inside a calibration job folder or the "
                                  f"returned results ({path.relative_to(root).as_posix()}); {JOB_RULE}")
-    if model_inputs:
-        _check_orchestrator_mentions(root, mentions, artifact_rel)
-
-
-def check_job_mentions(root, specialist, task):
-    """The job-file rule for a gated specialist without a DATA_INPUT line (the dispatch hook runs it for those;
-    check_data_input runs the same rule, once, for the DATA_INPUT roles after verifying their line)."""
-    if specialist in DATA_INPUT_LINE:
-        raise ValueError(f"{specialist} takes DATA_INPUT: its job-file rule runs inside check_data_input")
-    if task is None:
-        task = ""
-    if not isinstance(task, str):
-        raise ValueError("dispatch prompt must be a string")
-    _check_mentions(root, _detection_text(task), None, model_inputs=False)
+    _check_orchestrator_mentions(root, mentions, artifact_rel)
 
 
 def _quote(line, match):
@@ -836,17 +1013,29 @@ def _payload_mentions(lines, canonical):
 
 
 def check_data_input(root, specialist, task):
-    """Check the DATA_INPUT line by which network-curator and boolean-dynamics-modeler take data.
+    """The verified DATA_INPUT of a brief, or None (see check_data_input_and_stage_gate)."""
+    return check_data_input_and_stage_gate(root, specialist, task)[0]
+
+
+def check_data_input_and_stage_gate(root, specialist, task):
+    """(check_data_input result, the check_task result of the line-1 STAGE_GATE when this check resolved it, else
+    None). The MaBoSS mapping form and both multicellular-configurator forms resolve the STAGE_GATE (check_task on
+    the brief's line 1) while binding their artifact to it; the dispatch hook reuses that result instead of running
+    check_task again on the same line, and runs check_task itself whenever None is returned.
+
+    Check the DATA_INPUT line by which the network-curator, boolean-dynamics-modeler, ode-modeler and
+    multicellular-configurator take data.
 
     Data reach these specialists only as approved, hash-checked artifacts named on a
-    literal DATA_INPUT line (line 1 for network-curator, line 2 after STAGE_GATE for
-    boolean-dynamics-modeler); data are never pasted or pointed at in prose. Only that
+    literal DATA_INPUT line (line 1 for network-curator and ode-modeler, line 2 after STAGE_GATE for
+    boolean-dynamics-modeler and multicellular-configurator); data are never pasted or pointed at in prose. Only that
     line may carry a DATA_INPUT payload: a payload-like mention elsewhere (one starting
     its line, or with `{` within 16 characters or on the next non-blank line) is refused
     with its line number and a quote, while a
     prose mention ("as defined in the DATA_INPUT mapping") is allowed. Returns None when
-    the prompt has no DATA_INPUT line and no data-analyst path, data session id or
-    seeds/mapping file (a prose-only mention carries no data).
+    the prompt has no DATA_INPUT line and no data-analyst path, data session id or model
+    input file (seeds, mapping, ode_mapping, calibration proposal, PhysiCell design, projection
+    or dictionary, recognised by content: _model_input_kind); a prose-only mention carries no data.
 
     network-curator: {"data_session", "proposals"} (approved seed_genes proposals) or
     {"seeds", "sha256", "approval"} (an approved data_seeds seeds.json from user sources).
@@ -856,12 +1045,15 @@ def check_data_input(root, specialist, task):
     _check_ode_calibration_input); the brief may name no existing BioMASS session other than record_session_id
     (_check_ode_session_mentions). Other prose is not parsed for values: the modeler takes the session and the
     accepted names only from the verified line and ignores prose (ode-modeler.md).
+    multicellular-configurator: {"design", "sha256", "approval", "record_session_id"} (an approved stage-A
+    physicell_design.json) or {"projection", "sha256", "approval", "record_session_id"} (an approved stage-B
+    physicell_projection.json); see _check_physicell_input.
 
     The brief's runs/orchestrator mentions are then scanned once (_check_mentions): the job-file rule and the
     model-input rule, with only the verified artifact exempt.
     """
     if specialist not in DATA_INPUT_LINE:
-        return None
+        return None, None
     if task is None:
         task = ""
     if not isinstance(task, str):
@@ -882,20 +1074,26 @@ def check_data_input(root, specialist, task):
         if DATA_PATH.search(text) or DATA_SESSION_ID.search(text):
             raise ValueError(DATA_REFUSAL)
         _check_mentions(root, text, None)
-        return None
+        return None, None
     value = _strict_object(lines[expected][len("DATA_INPUT "):], "DATA_INPUT")
+    gate_result = None
     if specialist == "network_curator":
         result, sessions = _check_neko_data_input(root, value)
     elif specialist == "ode_modeler":
         result, sessions = _check_ode_calibration_input(root, value)
         _check_ode_session_mentions(root, text, result["ode_session"])
+    elif specialist == "multicellular_configurator":
+        result, sessions, gate_result = _check_physicell_input(root, value, lines[0])
     else:
-        result, sessions = _check_maboss_data_input(root, value, lines[0])
+        result, sessions, gate_result = _check_maboss_data_input(root, value, lines[0])
     other = sorted(_data_sessions_named(text) - sessions)
     if other:
         raise ValueError(f"brief names data-analyst session(s) {', '.join(other)} outside its DATA_INPUT")
-    _check_mentions(root, text, result.get("seeds") or result.get("mapping") or result.get("calibration"))
-    return result
+    # The verified artifact (none for the NeKo proposals form, whose files live under runs/data-analyst).
+    artifact = next((result[key] for key in ("seeds", "mapping", "calibration", "design", "projection")
+                     if key in result), None)
+    _check_mentions(root, text, artifact)
+    return result, gate_result
 
 
 def resolve_condition(root, decision_id):
@@ -914,6 +1112,18 @@ def resolve_condition(root, decision_id):
     return {"decision_id": decision_id, "satisfied": result, "evidence": record["evidence"], "supporting_pmids": footer["supporting_pmids"], "mutation_performed": False}
 
 
+def _check_with_design(root, stage, session, outputs, design_rel):
+    """`gate.py check --design`: the design check, then the dispatch's resolution of this STAGE_GATE against it."""
+    if stage != "multicellular":
+        raise ValueError("--design applies to the multicellular stage only")
+    from scripts.physicell import physicell_design
+    design, _, errors = physicell_design.load_and_check(Path(root), design_rel)
+    if errors:
+        raise ValueError(f"design check failed for {design_rel}: " + "; ".join(errors))
+    line = "STAGE_GATE " + json.dumps({"upstream_session_id": session, "outputs": outputs})
+    return check_task(Path(root), "multicellular_configurator", line, design=design)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
@@ -922,11 +1132,19 @@ def main():
     checker.add_argument("downstream_stage", choices=list(UPSTREAM))
     checker.add_argument("upstream_session")
     checker.add_argument("--outputs", nargs="+", required=True)
+    checker.add_argument("--design", help="multicellular only: runs/orchestrator/<p>/physicell_design.json; resolve "
+                                          "the gate against the checked design, as the dispatch does")
     condition = sub.add_parser("resolve")
     condition.add_argument("decision_id")
     args = parser.parse_args()
     try:
-        result = check(args.root, args.downstream_stage, args.upstream_session, args.outputs) if args.command == "check" else resolve_condition(args.root, args.decision_id)
+        if args.command == "check" and args.design is not None:
+            result = _check_with_design(args.root, args.downstream_stage, args.upstream_session, args.outputs,
+                                        args.design)
+        elif args.command == "check":
+            result = check(args.root, args.downstream_stage, args.upstream_session, args.outputs)
+        else:
+            result = resolve_condition(args.root, args.decision_id)
         print(json.dumps(result, indent=2))
         return 0 if result.get("passed", result.get("satisfied")) else 1
     except (ValueError, OSError, KeyError, TypeError) as exc:

@@ -51,7 +51,12 @@ flowchart TD
 Downstream Boolean dispatches (`boolean_dynamics_modeler`,
 `multicellular_configurator`) must start with the checked `STAGE_GATE` envelope.
 The runtime calls `scripts/gate.py` against the durable review and approval records
-before launching a child. See [agentic operations](agentic-operations.md).
+before launching a child. Every brief of a role with a `DATA_INPUT` form (network-curator,
+boolean-dynamics-modeler, multicellular-configurator, ode-modeler) first gets the same
+`check_data_input_and_stage_gate` as the Claude dispatch hook (its `DATA_INPUT` line and the
+job-file and model-input mention rules); a gated dispatch whose `STAGE_GATE` that check did not
+resolve then runs `check_task`. Any error refuses the dispatch. A valid PhysiCell design or projection
+`DATA_INPUT`, or an ode-modeler calibration `DATA_INPUT`, is then refused as Claude-only for now. See [agentic operations](agentic-operations.md).
 
 ## Task lifecycle
 

@@ -25,23 +25,26 @@ def main():
         role = inputs.get("subagent_type", "").split(":")[-1].replace("-", "_")
         if role not in GATED:
             return 0
-        from scripts.gate import DATA_INPUT_LINE, check_data_input, check_job_mentions, check_task
+        from scripts import gate
         prompt = inputs.get("prompt")
         prompt = "" if prompt is None else prompt
         if not isinstance(prompt, str):
             raise ValueError("dispatch prompt must be a string")
-        # Data enter NeKo, MaBoSS and the ODE (approved calibration values) only through an approved, hash-checked
-        # DATA_INPUT line. check_data_input also runs, once and after verifying that line, the rule that no
-        # specialist is pointed at a calibration job folder or returned results (only the ode-modeler's approved
-        # proposal is exempt); the other gated roles get that rule from check_job_mentions.
-        if role in DATA_INPUT_LINE:
-            check_data_input(ROOT, role, prompt)
-        else:
-            check_job_mentions(ROOT, role, prompt)
+        # Data enter NeKo, MaBoSS, the ODE (approved calibration values) and PhysiCell (an approved stage-A
+        # design or stage-B projection) only through an approved, hash-checked DATA_INPUT line. check_data_input
+        # also runs, once and after verifying that line, the rule that no specialist is pointed at a calibration
+        # job folder or returned results (only the ode-modeler's approved proposal is exempt). Every gated role
+        # has a DATA_INPUT form; a gated role without one is blocked (it would skip those rules).
+        if role not in gate.DATA_INPUT_LINE:
+            raise ValueError(f"gated role {role} has no DATA_INPUT form in scripts/gate.py DATA_INPUT_LINE")
+        _, stage_gate = gate.check_data_input_and_stage_gate(ROOT, role, prompt)
         # ODE authoring has its own source/readiness/whole-model approval contract;
-        # this hook enforces the two sequential Boolean downstream boundaries.
-        if role in {"boolean_dynamics_modeler", "multicellular_configurator"}:
-            check_task(ROOT, role, prompt)
+        # this hook enforces the two sequential Boolean downstream boundaries. The line-1 STAGE_GATE of a
+        # boolean-dynamics-modeler or multicellular-configurator brief is resolved once per dispatch: a
+        # line-2 DATA_INPUT check that binds its artifact to it has already run check_task on this very line
+        # (stage_gate is its result); otherwise it runs here.
+        if role in {"boolean_dynamics_modeler", "multicellular_configurator"} and stage_gate is None:
+            gate.check_task(ROOT, role, prompt)
         return 0
     except Exception as exc:  # noqa: BLE001 - see fail-closed note above
         print(f"Downstream stage dispatch blocked: {type(exc).__name__}: {exc}"[:2000], file=sys.stderr)

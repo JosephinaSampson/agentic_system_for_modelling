@@ -85,6 +85,7 @@ Run and quote:
 ```bash
 python3 scripts/gate.py check boolean-dynamics FULL_NEKO_SESSION --outputs NODE_A NODE_B
 python3 scripts/gate.py check multicellular FULL_MABOSS_SESSION --outputs READOUT_A READOUT_B
+python3 scripts/gate.py check multicellular FULL_MABOSS_SESSION --outputs READOUT_A READOUT_B --design runs/orchestrator/P/physicell_design.json  # design or projection dispatch
 python3 scripts/gate.py check biomass_ode FULL_NEKO_SESSION --outputs NODE_ID_1 NODE_ID_2 ...
 ```
 
@@ -155,7 +156,9 @@ STAGE_GATE {"upstream_session_id":"FULL_SESSION","outputs":["NODE_A","NODE_B"]}
 
 Claude's Agent/Task PreToolUse hook and the Codex runtime check durable state rather
 than trusting this prompt assertion. Codex checks new Boolean downstream sessions
-before starting the child. Existing-session inspection without a valid gate is
+before starting the child, with the hook's `check_data_input_and_stage_gate` (every
+brief of a role with a `DATA_INPUT` form), then `check_task`; PhysiCell design/projection and ODE calibration
+`DATA_INPUT` briefs are then refused before launch as Claude-only for now. Existing-session inspection without a valid gate is
 restricted to audited non-creating tools: some backend methods named as reads
 actually call `ensure_session` and can create sessions. Broader access needs the
 gate. ODE authoring continues to use its own approved-source/readiness contract.
@@ -176,8 +179,9 @@ handoff, or authorizes an operation outside the recorded scope.
 
 ## Data inputs (`DATA_INPUT`)
 
-The dispatch hook accepts data for network-curator and boolean-dynamics-modeler only
-through a `DATA_INPUT` line, checked by `scripts/gate.py check_data_input`:
+The dispatch hook accepts data for network-curator, boolean-dynamics-modeler and
+multicellular-configurator only through a `DATA_INPUT` line, checked by
+`scripts/gate.py check_data_input` (the ode-modeler form is below):
 - network-curator, line 1: `DATA_INPUT {"data_session": "...", "proposals": {"P1": "<sha256>"}}`
   (approved `seed_genes` proposals, hashes equal to manifest and file);
 - boolean-dynamics-modeler, line 2 after `STAGE_GATE`:
@@ -195,6 +199,17 @@ through a `DATA_INPUT` line, checked by `scripts/gate.py check_data_input`:
 - boolean-dynamics-modeler with a researcher BNET: `STAGE_GATE {"standalone_decision_id": "...", "outputs": [...]}`
   then the same mapping `DATA_INPUT`; the mapping network must carry that
   `standalone_decision_id`, and the approval's `session_id` equals it.
+- multicellular-configurator, line 2 after `STAGE_GATE`, exactly one of:
+  `DATA_INPUT {"design": "runs/orchestrator/<p>/physicell_design.json", "sha256": "...", "approval": "<record id>", "record_session_id": "..."}`
+  or
+  `DATA_INPUT {"projection": "runs/orchestrator/<p>/physicell_projection.json", "sha256": "...", "approval": "<record id>", "record_session_id": "..."}`.
+  The file passes its `check` on exactly those bytes, the approval (stage `physicell_design` or
+  `physicell_projection`) binds its path and sha256, and `record_session_id` is the approval's
+  `session_id` (for a design, its anchor: the basis capture's session, else `<p>`). Design: every MaBoSS handoff it lists lives under
+  `runs/boolean-dynamics-modeler/<STAGE_GATE upstream_session_id>/`; with a `standalone_decision_id` it lists
+  none. Projection: `record_session_id` is also its capture's session, and its design and design approval are
+  re-checked, and its `STAGE_GATE` must name the design's MaBoSS upstream (as for a design). `record_session_id` is a lineage anchor: the
+  configurator starts a new session.
 
 NeKo data approvals are cumulative: a proposal is approved if any valid `data` approval of the
 session, binding the current handoff sha256, lists it. There is no revocation record; to
@@ -262,6 +277,36 @@ values are ignored. `score_holdout.py` writes `holdout_score.json` once, complet
 `os.link`), with `n_rows` (only the accepted
 parameters are passed, at best; the others keep the model defaults); it writes nothing when no hold-out row
 was predicted, any hold-out prediction failed or the score is the penalty.
+
+### PhysiCell design, projection and verification
+
+Discovery (a new configuration only): dispatch the multicellular-configurator with `STAGE_GATE` and no `DATA_INPUT`
+to call `get_available_cycle_models`; the design's `cycle_models` copies the recorded `{key, name}` output. The
+stage-A capture passes validate-stage before the projection is drafted against it, the verified stage-B capture
+before build or closure. Registry: stage A `Derived from` = the `STAGE_GATE` upstream MaBoSS session or standalone
+decision id (plus the basis capture's session), Artifacts the design path and short sha256; stage B `Derived from` =
+the stage-A session, Artifacts the projection path and short sha256 and the verification file.
+
+```
+python3 scripts/physicell/physicell_design.py draft --purpose P [--basis runs/multicellular-configurator/S/configs/C] [--source ID:inputs/FILE ...] [--data ID:SESSION:PROPOSAL:APPROVAL ...]
+python3 scripts/physicell/physicell_design.py check runs/orchestrator/P/physicell_design.json
+python3 scripts/physicell/capture_dictionary.py runs/multicellular-configurator/S/invocation/ID/tool_calls.json runs/multicellular-configurator/S/configs/C runs/orchestrator/P/physicell_design.json
+python3 scripts/physicell/physicell_projection.py draft --purpose P --capture runs/multicellular-configurator/S/configs/C --design runs/orchestrator/P/physicell_design.json --design-approval RECORD_ID [--dictionary FILE] [--source ...] [--data ...]
+python3 scripts/physicell/physicell_projection.py check runs/orchestrator/P/physicell_projection.json
+python3 scripts/physicell/verify_export.py runs/orchestrator/P/physicell_projection.json runs/multicellular-configurator/S2/configs/C2   # exit 0 passed, 1 failed, 2 refused
+python3 scripts/physicell/build.py --template template|template_BM [--version 1.14.2] [--dest DIR] [--verification runs/orchestrator/P/physicell_verification.S2.C2.json] [--jobs N]
+```
+
+`physicell_design` and `physicell_projection` are governance stages of `state.py record`
+(`approvals.require_physicell_design_approval`, `require_physicell_projection_approval`): design approval
+`session_id` = the design's anchor (the basis capture's session, else `P`), `outputs` = the cell definition and
+substrate names; projection approval `session_id` = the capture's session, `outputs` = the entry ids. The
+dictionary is written once beside the design, from list calls made after the last structure-changing call, and
+only for a capture bound to the design by dispatch lineage (`scripts/physicell/lineage.py`; the rule is stated once,
+in docs/data-to-physicell-architecture.md, "Dispatch lineage"); the projection check and `verify_export.py` require
+the same. `verify_export.py` writes `runs/orchestrator/P/physicell_verification.<session>.<capture>.json` (one file
+per attempt). `build.py` copies settings only from a passed verification whose capture is unchanged and
+whose recomputation (`verify_export.compute`) passes with the same result, and never runs the project. Details: docs/data-workflow.md.
 
 ## Evidence and provenance
 

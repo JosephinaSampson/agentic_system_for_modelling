@@ -54,6 +54,47 @@ configurations active.
 4. Apply targeted changes using the same configuration tools.
 5. Recheck `get_simulation_summary()`, export to a new session artifact.
 
+**Discovery run (`STAGE_GATE`, no `DATA_INPUT`):** before a new configuration's design, call
+`get_available_cycle_models()` and report every key and name verbatim; build nothing (the orchestrator copies
+them into the design's `cycle_models`).
+
+**Approved design or projection (`DATA_INPUT` on line 2):** the brief's line 2,
+after `STAGE_GATE`, names an approved `physicell_design.json` (stage A) or
+`physicell_projection.json` (stage B), its sha256, approval and
+`record_session_id`, all verified by the dispatch hook.
+- `record_session_id` is a lineage anchor, never a live session (MCP sessions end with each run).
+  Create a new PhysiCell session for either form. Never pass `record_session_id` to any tool.
+  Report the new full session ID; the orchestrator registers it (stage A: `Derived from` = the `STAGE_GATE`
+  upstream MaBoSS session or standalone decision id, plus the basis capture's session with a basis; stage B:
+  `Derived from` = the stage-A session).
+- Read only the verified file; for a design, also the MaBoSS handoff manifests it lists;
+  for a projection, also the design its `design.path` names and the MaBoSS handoff manifests that design lists.
+  Return `blocked` if a MaBoSS handoff manifest the design names is missing or fails `import_maboss_handoff`'s verification.
+  Never infer units; take names and values only from the verified files named on the `DATA_INPUT` line.
+- The server (2.5.2) cannot reload a captured rules CSV or other input files into a new session.
+  Never re-add a captured configuration's rules by hand; if the captured configuration has a rules CSV, return blocked.
+- Building the approved design: with a `basis`, load the basis capture's packaged XML with
+  `load_xml_configuration()` (`<basis capture>/package/config/PhysiCell_settings.xml`, as an absolute path under
+  the project root) and keep its `from: "basis"` entries unchanged; without one, create the declared domain
+  (`create_simulation_domain()` with `domain_x`, `domain_y`, `use_2d`, `domain_z`, `dx`, `max_time`).
+  Create the declared substrates (`add_single_substrate()` with the `units` label, `diffusion_coefficient`,
+  `decay_rate`, `initial_condition`, `dirichlet_enabled`, `dirichlet_value`) and cell definitions
+  (`add_single_cell_type()` with the declared `cycle_model` key), and import each handoff onto its cell definition
+  (`import_maboss_handoff()`).
+  Pass every tool argument explicitly from the design: domain, substrate parameters and Dirichlet settings, cycle models. Never use a tool default or a typical value. If the design lacks a value a tool requires, return blocked. Add no rule, link or other value.
+  The orchestrator compares the stage-A capture with the design (`capture_dictionary.py`) before it is used.
+- Design: apply exactly the approved design (build it). Then, after the last structural call (any tool other
+  than the read-only listings, status and help tools and the three exports: `export_xml_configuration`,
+  `export_cell_rules_csv` and `export_configuration_bundle`), call
+  `list_all_available_signals()` and `list_all_available_behaviors(cell_type=...)` for every cell definition,
+  so the invocation record holds them (the orchestrator captures the dictionary from it). Then export.
+- Projection: re-apply the approved design exactly as in stage A (build the design named in the verified
+  projection's `design.path`); do not call the discovery list tools again. Then apply exactly the entries with
+  the matching tools (`add_physiboss_input_link()`, `add_physiboss_output_link()`, `add_single_cell_rule()`, and a
+  setting's `tool_hint`) at each quantity's `model_value`, applied verbatim (no arithmetic). Compare each returned
+  stored value with it (rel 1e-9) and
+  return `blocked` on any difference. Apply only the projection entries. Then export (rules CSV before XML).
+
 ## Repeatable operations and patch semantics
 
 - `add_single_substrate()` — once per substrate

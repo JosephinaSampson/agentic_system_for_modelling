@@ -27,6 +27,19 @@ from .models import SpecialistInvocationRequest, SpecialistExecutionResult, Exec
 from .lifecycle import validate_transition
 
 
+# DATA_INPUT forms the Codex runtime refuses before launch, after the hook's check has passed (so a wrong brief
+# still gets the hook's own refusal).
+CLAUDE_ONLY_DATA_INPUT = {
+    "multicellular_configurator": (
+        "a PhysiCell design or projection DATA_INPUT is Claude-only for now: its lineage and dictionary need the "
+        "Claude invocation record runs/multicellular-configurator/<session>/invocation/<id>/ (task.txt, "
+        "tool_calls.json), which the Codex runtime does not write; dispatch it from Claude"),
+    "ode_modeler": (
+        "applying a calibration DATA_INPUT is Claude-only for now: the Codex ode-modeler has no calibration "
+        "procedure and would return blocked; dispatch it from Claude"),
+}
+
+
 def prepare(request: SpecialistInvocationRequest) -> SpecialistExecutionResult:
     """Persist the bounded input before preflight or any child can start."""
     started_at = utc_now()
@@ -133,15 +146,28 @@ def _run(request: SpecialistInvocationRequest, execution: SpecialistExecutionRes
         or bool(set(request.approved_tools) - set(INSPECTION_TOOLS[request.specialist]))
     )
     inspection_only = downstream and not needs_gate
-    if needs_gate:
-        from scripts.gate import check_task
-        try:
-            gate_result = check_task(PROJECT_ROOT, request.specialist, request.task)
+    # The same check as the Claude dispatch hook (.claude/scripts/stage_gate_guard.py), before any launch: every
+    # brief of a role with a DATA_INPUT form (network-curator, boolean-dynamics-modeler, multicellular-configurator,
+    # ode-modeler) gets check_data_input_and_stage_gate, i.e. its DATA_INPUT line and the job-file and model-input
+    # mention rules; a valid PhysiCell design/projection or ODE calibration DATA_INPUT is then refused as Claude-only
+    # (CLAUDE_ONLY_DATA_INPUT). A gated dispatch whose STAGE_GATE that check did not resolve then runs check_task. Fail
+    # closed, as the hook: any exception, including an import failure of the gate, refuses the dispatch.
+    try:
+        from scripts import gate
+        gate_result = None
+        if request.specialist in gate.DATA_INPUT_LINE:
+            data_input, gate_result = gate.check_data_input_and_stage_gate(
+                PROJECT_ROOT, request.specialist, request.task)
+            if data_input is not None and request.specialist in CLAUDE_ONLY_DATA_INPUT:
+                raise ValueError(CLAUDE_ONLY_DATA_INPUT[request.specialist])
+        if needs_gate:
+            if gate_result is None:
+                gate_result = gate.check_task(PROJECT_ROOT, request.specialist, request.task)
             event_callback({"type": "stage_gate", "result": gate_result})
-        except (ValueError, OSError, KeyError, TypeError) as exc:
-            execution.handoff_error = f"stage gate failed: {exc}"
-            emit_status(execution.handoff_error)
-            return 2
+    except Exception as exc:  # noqa: BLE001 - fail closed, never weaker than the hook
+        execution.handoff_error = f"stage gate failed: {exc}"
+        emit_status(execution.handoff_error)
+        return 2
     try:
         codex = resolve_codex_executable(codex_executable)
         approved_tools = list(request.approved_tools)

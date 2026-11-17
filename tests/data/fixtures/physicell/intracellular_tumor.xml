@@ -1,0 +1,28 @@
+<intracellular type="maboss">
+	<bnd_filename>./config/tumor.bnd</bnd_filename>
+	<cfg_filename>./config/tumor.cfg</cfg_filename>
+	<settings>
+		<intracellular_dt>6.0</intracellular_dt>
+		<time_stochasticity>0.0</time_stochasticity>
+		<scaling>1.0</scaling>
+		<start_time>0.0</start_time>
+		<inheritance global="False" />
+	</settings>
+	<mapping>
+		<input physicell_name="pressure" intracellular_name="B">
+			<settings>
+				<action>activation</action>
+				<threshold>1.0</threshold>
+				<smoothing>0</smoothing>
+			</settings>
+		</input>
+		<output physicell_name="apoptosis" intracellular_name="A">
+			<settings>
+				<action>activation</action>
+				<value>0.0001</value>
+				<base_value>0.0</base_value>
+				<smoothing>0</smoothing>
+			</settings>
+		</output>
+	</mapping>
+</intracellular>

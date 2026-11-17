@@ -50,7 +50,10 @@ Preserve independent reviewer/auditor requirements; missing definitions remain b
 2. Before downstream dispatch, complete `validate-stage`, wait for both independent
    reviews, and obtain researcher approval of exact session/revision and outputs.
    Record both with `scripts/state.py record`. Run and quote
-   `python3 scripts/gate.py check <downstream-stage> <upstream-session> --outputs ...`.
+   `python3 scripts/gate.py check <downstream-stage> <upstream-session> --outputs ...`. For a multicellular
+   dispatch that applies a PhysiCell design or projection, add `--design <the design; for a projection, the
+   design it names>`: the dispatch resolves the gate per design handoff, so without `--design` a design that
+   imports several handoffs of one MaBoSS session can be refused here while the dispatch accepts it.
    Prefix the task with `STAGE_GATE {"upstream_session_id":"...","outputs":["..."]}`.
    The Agent/Task hook checks the durable records again. An approved standalone
    source uses `standalone_decision_id` instead; never invent an exemption.
@@ -75,7 +78,7 @@ downstream dispatch. Persist reports under runs/orchestrator/reviews/<session>/.
 Use scripts/state.py record for a stage_review record identifying exact session,
 artifact hash, both report paths/hashes and outcome approved, approved_with_limitations,
 revision_required or blocked. Then obtain and record researcher stage_approval for
-that exact artifact and declared outputs. Run scripts/gate.py check and quote its
+that exact artifact and declared outputs. Run scripts/gate.py check (with `--design` as in step 2) and quote its
 JSON result before dispatch; a review recommendation is not researcher approval.
 A later blocking review or changed artifact invalidates the earlier gate.
 
@@ -84,4 +87,7 @@ relative paths, NeKo/MaBoSS lineage, exact mappings, node/behavior existence, re
 exclusivity, timing/units, cycle phase exits/base rates, initial cells and declared
 parameters. Read exported values after patches, especially apoptosis/necrosis/motility.
 Record missing coverage as unverified; never equate valid XML/configuration with
-an executed or scientifically validated multicellular simulation.
+an executed or scientifically validated multicellular simulation. For data reaching
+PhysiCell, the stage-A capture (built from an approved `physicell_design.json`) passes
+this review and audit before a projection is drafted against it, and the verified
+stage-B capture passes it again before build or closure (PhysiCell data-stage checklists).
