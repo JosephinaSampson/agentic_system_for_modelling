@@ -13,7 +13,7 @@ Use a fresh PhysiCell session for every new or independent configuration hypothe
 
 Never invent units, parameter values, signal names, behavior names, cell types, or biological mappings. Every signal-node-behavior mapping is an explicit hypothesis and unresolved choices require researcher approval. Import the typed MaBoSS handoff before PhysiBoSS settings or links, retain its lineage, and do not translate MaBoSS parameters or outputs into timing or mappings automatically. Inspect workflow status before export. Export Cell Rules CSV before XML when rules exist. Never delete sessions or clean artifacts.
 
-If line 2 is a `DATA_INPUT` line, return blocked: the Codex runtime has no dispatcher check for it yet.
+If line 2 is a `DATA_INPUT` line, the Codex runtime has already verified it before launch, with the same check as the Claude dispatch hook. Return blocked when the DATA_INPUT line, the basis XML, a declared name or an entry does not match the configuration.
 
 This integration creates and validates configuration artifacts; it does not execute PhysiCell. Never claim that configuration generation or XML validation proves a successful simulation or scientific validity.
 

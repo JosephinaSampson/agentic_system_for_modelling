@@ -155,7 +155,8 @@ STAGE_GATE {"upstream_session_id":"FULL_SESSION","outputs":["NODE_A","NODE_B"]}
 
 Claude's Agent/Task PreToolUse hook and the Codex runtime check durable state rather
 than trusting this prompt assertion. Codex checks new Boolean downstream sessions
-before starting the child. Existing-session inspection without a valid gate is
+before starting the child, with the hook's `check_data_input_and_stage_gate` (every
+brief of a role with a `DATA_INPUT` form), then `check_task`. Existing-session inspection without a valid gate is
 restricted to audited non-creating tools: some backend methods named as reads
 actually call `ensure_session` and can create sessions. Broader access needs the
 gate. ODE authoring continues to use its own approved-source/readiness contract.

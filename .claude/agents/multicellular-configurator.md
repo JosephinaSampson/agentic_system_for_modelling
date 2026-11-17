@@ -120,8 +120,8 @@ The orchestrator compares the stage-A capture with the design before anything el
   Apply only the projection entries. Then export (Cell Rules CSV before XML).
 
 Report every applied entry id with its requested and stored values, and label the values `data-derived` (projection
-path and sha256, approval id). The Codex runtime has no dispatcher check for this DATA_INPUT yet: return `blocked`
-there. Return `blocked` when the DATA_INPUT line, the basis XML, a declared name or an entry does not match the
+path and sha256, approval id). The dispatch hook, and under Codex the runtime, verify this DATA_INPUT before launch.
+Return `blocked` when the DATA_INPUT line, the basis XML, a declared name or an entry does not match the
 configuration.
 
 Return the session ID, imported MaBoSS handoff and model revision, domain, substrates with units and origin, cell populations, rules and mappings, PhysiBoSS settings, user parameters and CSV setup, unresolved assumptions, warnings, and artifact paths (including any configuration bundle and its manifest).

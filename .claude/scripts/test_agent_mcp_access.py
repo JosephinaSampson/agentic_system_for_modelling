@@ -235,7 +235,7 @@ class DataHandoffInstructionTests(unittest.TestCase):
                 "relative tolerance 1e-9", "Return `blocked` on any difference",
                 "Apply each quantity's `model_value` verbatim", "do no arithmetic",
                 "Apply only the projection entries. Then export (Cell Rules CSV before XML).",
-                "no dispatcher check for this DATA_INPUT"),
+                "under Codex the runtime, verify this DATA_INPUT before launch"),
             ".claude/skills/physicell-workflow/SKILL.md": PHYSICELL_DATA_RULES + (
                 "`DATA_INPUT` on line 2", "load the basis capture's packaged XML with\n  `load_xml_configuration()`",
                 "(`<basis capture>/package/config/PhysiCell_settings.xml`, as an absolute path under\n  the project root)",
@@ -272,7 +272,7 @@ class DataHandoffInstructionTests(unittest.TestCase):
                                               REVISION_RULE),
             ".claude/skills/biomass-workflow/SKILL.md": ("Apply an approved calibration", "calibration_proposal.json",
                                                          "re-applied unchanged", "record_session_id", "data-calibrated", "inspect_model",
-                                                         "no dispatcher check", "never infer units", REVISION_RULE),
+                                                         "Claude-only for now: under Codex the specialist returns `blocked`", "never infer units", REVISION_RULE),
             "docs/ode-workflow.md": ("Calibrating parameters to measurements", "ode_calibration", "score_holdout.py",
                                      "popsize", "heuristic", "Only the bundle"),
             "docs/data-workflow.md": ("Data to ODE: calibration", "data-calibrated", "popsize",

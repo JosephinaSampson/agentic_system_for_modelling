@@ -201,8 +201,8 @@ The hook verifies that `record_session_id` is the proposal's ODE session (the ap
 `accept` is exactly the approval's `outputs` (the accepted parameters). Take the session only from that
 `record_session_id` and the parameter names only from that `accept` list; ignore any session or name given in
 prose elsewhere in the brief.
-The Codex runtime has no dispatcher check for the calibration `DATA_INPUT` yet, so under Codex the
-specialist returns `blocked` for such a request.
+The Codex runtime verifies the calibration `DATA_INPUT` before launch, as the hook does, but applying a
+calibration is Claude-only for now: under Codex the specialist returns `blocked` for such a request.
 1. Read the proposal; the accepted parameters are the `accept` names of the DATA_INPUT line. Ignore the others.
 2. Read the session's current revision and configuration with `inspect_model`. The values were fitted to
    one model revision: return `blocked` unless the session's current revision equals `proposal.model.revision`

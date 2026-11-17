@@ -1401,6 +1401,58 @@ class PhysiCellDataInputTests(ProjectionBase):
         self.assertEqual((errors, design), ([], json.loads((self.root / DESIGN_REL).read_text())))
         self.assertEqual(physicell_projection.load_and_check(self.root, MC_PROJ), (data, digest, errors))
 
+    def executor_run(self, specialist, prompt):
+        """(exit status, handoff_error, whether the Codex launch was reached, stage_gate events) of one Codex
+        executor dispatch; the launch is stopped at its first preflight step."""
+        from types import SimpleNamespace
+        from scripts.codex.specialist_runtime import executor
+        from scripts.codex.specialist_runtime.models import SpecialistInvocationRequest
+        request = SpecialistInvocationRequest(specialist, prompt)
+        execution = SimpleNamespace(started_at="2026-11-17T00:00:00+00:00", invocation_id="test", handoff_error=None)
+        events = []
+        with mock.patch.object(executor, "PROJECT_ROOT", self.root), \
+                mock.patch.object(executor, "resolve_codex_executable",
+                                  side_effect=ValueError("stop at preflight")) as launch:
+            status = executor._run(request, execution, transition=lambda x: None, event_callback=events.append,
+                                   cancellation_requested=lambda: False)
+        return status, execution.handoff_error, launch.called, [e for e in events if e["type"] == "stage_gate"]
+
+    def test_codex_executor_runs_the_hook_check(self):
+        # PR #17 review 4588366029: the Codex executor runs check_data_input_and_stage_gate as the hook does, so the
+        # briefs the hook blocks are refused before any Codex launch
+        self.make_handoff("maboss-other")
+        other_gate = "STAGE_GATE " + json.dumps({"upstream_session_id": "maboss-other", "outputs": MC_OUTPUTS})
+        job = "runs/orchestrator/p1/jobs/j1/job.json"
+        for name, prompt, pattern in (
+                ("design", self.task(self.design_line(), gate_line=other_gate), f"{MC_MABOSS}.*maboss-other"),
+                ("projection", self.task(self.projection_line(), gate_line=other_gate), f"{MC_MABOSS}.*maboss-other"),
+                ("job file", self.task(self.design_line(), tail=f" See {job}."), "calibration job path")):
+            with self.subTest(brief=name):
+                self.refused(prompt, pattern)  # the hook
+                status, error, launched, _ = self.executor_run("multicellular_configurator", prompt)
+                self.assertEqual((status, launched), (2, False), error)
+                self.assertRegex(error, "^stage gate failed: .*" + pattern)
+        # the DATA_INPUT rules now apply to the other gated roles' Codex dispatches too
+        status, error, launched, _ = self.executor_run("network_curator", "Build from runs/data-analyst/x/seeds.")
+        self.assertEqual((status, launched), (2, False), error)
+        self.assertIn(gate.DATA_REFUSAL, error)
+        # a valid STAGE_GATE-only brief and both valid DATA_INPUT forms still launch, with the STAGE_GATE resolved once
+        for prompt in (f"{MC_GATE}\nImport the approved handoff.", self.task(self.design_line()),
+                       self.task(self.projection_line())):
+            with self.subTest(prompt=prompt.splitlines()[1]):
+                with mock.patch.object(gate, "check_task", wraps=gate.check_task) as tasks:
+                    status, error, launched, events = self.executor_run("multicellular_configurator", prompt)
+                self.assertEqual((status, launched, tasks.call_count), (2, True, 1), error)
+                self.assertEqual(len(events), 1)
+                self.assertTrue(events[0]["result"]["passed"])
+
+    def test_codex_executor_fails_closed_on_any_exception(self):
+        from scripts.codex.specialist_runtime import executor  # noqa: F401 - the module under test
+        with mock.patch.object(gate, "check_data_input_and_stage_gate", side_effect=RuntimeError("boom")):
+            status, error, launched, _ = self.executor_run("multicellular_configurator", self.task(self.design_line()))
+        self.assertEqual((status, launched), (2, False))
+        self.assertEqual(error, "stage gate failed: boom")
+
     def errors_at(self, rel):
         from scripts.physicell import physicell_design
         return physicell_design.check(self.root, rel)

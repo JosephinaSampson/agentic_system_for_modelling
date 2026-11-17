@@ -25,7 +25,7 @@ forms; dictionary capture with stage-A conformance; export verification; the `ph
 skill; `ROADMAP.md`.
 
 **Not covered here:** running or calibrating PhysiCell; spatial initial conditions; ODE-derived
-proposals and direct ODE coupling; Codex parity (Codex returns `blocked`); MCP server changes.
+proposals and direct ODE coupling; MCP server changes.
 
 ## 2. Key decisions and rationale
 
@@ -202,7 +202,8 @@ Also:
   (`.setup/local.json` or `.setup/dispatcher.local.json`); without it a valid handoff is refused.
 - **Build:** PhysiCell archive hashes are trust on first use; 1.14.2 is a default pin; no
   Windows-native build. `setting` paths depend on the pinned server's XML layout.
-- **Codex has no dispatcher check** for these forms, so it returns `blocked`.
+- **The Codex executor runs the hook's check** (`check_data_input_and_stage_gate`, then `check_task` when
+  that resolved no `STAGE_GATE`) before any launch, failing closed on any error.
 
 ## 9. Roadmap
 
