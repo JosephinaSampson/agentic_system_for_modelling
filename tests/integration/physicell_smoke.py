@@ -657,7 +657,8 @@ class Smoke:
     def settings(self) -> None:
         if self.project is None:
             return skip("settings copy (step 5)", "step 1 (build) was skipped")
-        rel, data, _, tree = physicell_build._verification(self.root, self.fixture_verification)  # recomputes (T9-d)
+        verified = physicell_build._verification(self.root, self.fixture_verification)  # recomputes (T9-d)
+        rel, data, tree = verified.rel, verified.data, verified.tree
         # build.py refuses these MaBoSS-bearing settings with --template template (review M5); the copy mechanism is
         # exercised directly on the built template project here
         assert physicell_build._physiboss(tree), "the fixture capture carries a MaBoSS model"

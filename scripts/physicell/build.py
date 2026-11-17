@@ -42,6 +42,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -146,9 +147,16 @@ def toolchain(env: dict, template: str = "template") -> dict:
 
 # ---------------------------------------------------------------- verified settings
 
-def _verification(root: Path, given: str) -> tuple[str, dict, bytes, ET.Element]:
-    """(repo-relative path, the verification, its bytes, the after capture's package XML parsed from the bytes this
-    re-binding verified) for a passed physicell_verification; ValueError else."""
+class Verified(NamedTuple):
+    """A passed physicell_verification, as _verification checked it."""
+    rel: str           # its repo-relative path
+    data: dict         # the verification
+    raw: bytes         # its bytes
+    tree: ET.Element   # the after capture's package XML, parsed from the bytes _verification's binding verified
+
+
+def _verification(root: Path, given: str) -> Verified:
+    """The Verified of a passed physicell_verification; ValueError else."""
     path = Path(given)
     path = path if path.is_absolute() else root / path
     try:
@@ -195,7 +203,7 @@ def _verification(root: Path, given: str) -> tuple[str, dict, bytes, ET.Element]
     for key in RECOMPUTED:
         if recomputed[key] != data.get(key):
             raise ValueError(f"{rel_text}: its {key} differ from a re-verification (the file is stale or forged)")
-    return rel_text, data, raw, tree
+    return Verified(rel_text, data, raw, tree)
 
 
 def _physiboss(tree: ET.Element) -> bool:
@@ -407,7 +415,7 @@ def build(root: Path, template: str, version: str = DEFAULT_VERSION, dest: str |
     started, began = datetime.now(timezone.utc), time.monotonic()
     tool = toolchain(env, template)
     verified = _verification(root, verification) if verification else None
-    if verified and template == "template" and _physiboss(verified[3]):
+    if verified and template == "template" and _physiboss(verified.tree):
         raise ValueError('the verified settings carry intracellular type="maboss" (PhysiBoSS), which the plain '
                          "template project cannot run: build them with --template template_BM")
     dest = Path(dest).expanduser().resolve()
@@ -424,11 +432,11 @@ def build(root: Path, template: str, version: str = DEFAULT_VERSION, dest: str |
         _make("make " + template, ["make", template], project, make_env, report["steps"])
         if verified:
             try:
-                files = copy_settings(root, project, verified[0], verified[1])
+                files = copy_settings(root, project, verified.rel, verified.data)
             except (ValueError, OSError) as exc:
                 raise StepFailed("settings", str(exc)) from exc
-            report["settings"] = {"verification": verified[0],
-                                  "verification_sha256": hashlib.sha256(verified[2]).hexdigest(), "files": files}
+            report["settings"] = {"verification": verified.rel,
+                                  "verification_sha256": hashlib.sha256(verified.raw).hexdigest(), "files": files}
         _make("make", ["make", "-j", str(jobs)], project, make_env, report["steps"])
         binary = project / "project"
         if not binary.is_file():

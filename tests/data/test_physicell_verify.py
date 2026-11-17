@@ -625,8 +625,12 @@ class BuildHandoffTests(VerifyBase):
     def test_passed_verification_is_accepted_by_build(self):
         from scripts.physicell import build
         path, result = self.verify(self.export())
-        rel, data, raw, _ = build._verification(self.root, OUTPUT)
-        self.assertEqual((rel, data), (OUTPUT, result))
+        verified = build._verification(self.root, OUTPUT)
+        # PR #17 review 4588364842: a named result, read by field
+        self.assertIsInstance(verified, build.Verified)
+        self.assertEqual((verified.rel, verified.data, verified.raw), (OUTPUT, result, path.read_bytes()))
+        self.assertTrue(build._physiboss(verified.tree))
+        self.assertFalse(hasattr(ve, "_bind"))  # no alias of sx.capture_tree
 
     def test_no_capture_file_is_read_outside_a_binding(self):
         # PR #17 reviews 4587427664 and 4588363965: each capture (the after capture, the stage-A capture and the

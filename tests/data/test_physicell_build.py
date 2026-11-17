@@ -482,7 +482,8 @@ class SettingsCopyTests(Base):
         after = self.bound_manifest(lambda m: m.pop("dependencies"))
         with self.assertRaisesRegex(ValueError, "no dependencies"):
             build._package_files(self.root, after)
-        with mock.patch.object(build, "_verification", return_value=(VERIFICATION, {"after": after}, b"{}", sx.capture_tree(self.root, CAPTURE_REL)[1])):
+        with mock.patch.object(build, "_verification", return_value=build.Verified(
+                VERIFICATION, {"after": after}, b"{}", sx.capture_tree(self.root, CAPTURE_REL)[1])):
             _, report = self.build(verification=VERIFICATION)
         self.assertEqual((report["status"], report["failed_step"]), ("failed", "settings"))
         self.assertIn("no dependencies", report["error"])
@@ -523,7 +524,8 @@ class SettingsCopyTests(Base):
     def test_dependency_basename_collision_is_refused_naming_both_paths(self):
         after = self.bound_manifest(lambda m: m["dependencies"].append(
             {"path": "package/config/sub/rules.csv", "sha256": sha(RULES)}))
-        with mock.patch.object(build, "_verification", return_value=(VERIFICATION, {"after": after}, b"{}", sx.capture_tree(self.root, CAPTURE_REL)[1])):
+        with mock.patch.object(build, "_verification", return_value=build.Verified(
+                VERIFICATION, {"after": after}, b"{}", sx.capture_tree(self.root, CAPTURE_REL)[1])):
             _, report = self.build(verification=VERIFICATION)
         self.assertEqual(report["failed_step"], "settings")
         self.assertIn("package/config/rules.csv", report["error"])

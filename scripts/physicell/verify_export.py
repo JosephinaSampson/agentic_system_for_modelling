@@ -79,14 +79,6 @@ def _exact_int(found, expected: int) -> bool:
     return bool(INTEGER.fullmatch(text)) and int(text) == expected
 
 
-# ---------------------------------------------------------------- bindings
-
-def _bind(root: Path, rel: str):
-    """(the settings_xml.capture binding, verbatim, with its verified manifest; the package XML parsed from exactly
-    the verified bytes): settings_xml.capture_tree, read once."""
-    return sx.capture_tree(root, rel)
-
-
 # ---------------------------------------------------------------- entries
 
 def _links(xml, entry: dict) -> list:
