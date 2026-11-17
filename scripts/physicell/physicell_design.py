@@ -589,10 +589,8 @@ class _Checker(Citations):
             # session, one per cell type) lets several exports of one session stand side by side.
             ref = {"path": rel, "sha256": digest}
             siblings = [c for c in current if PurePosixPath(c["path"]).parts[:3] == (*MABOSS_RUNS, session)]
-            result = gate.check(self.root, "multicellular", session, approval["outputs"], artifact=ref,
-                                current=siblings or [ref])
-            if result["artifact"] != {"path": rel, "sha256": digest}:
-                raise ValueError("the gate's approved handoff is a different artifact (superseded re-export?)")
+            # gate.check refuses an approval of another artifact (superseded re-export)
+            gate.check(self.root, "multicellular", session, approval["outputs"], artifact=ref, current=siblings)
             # The gate verified these exact bytes; import attaches the model to the manifest's target cell type.
             manifest = handoff_manifest(self.root, maboss)
             target = (manifest.get("target") or {}).get("cell_type")

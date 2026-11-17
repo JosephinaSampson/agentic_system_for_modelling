@@ -1536,7 +1536,9 @@ class PhysiCellDataInputTests(ProjectionBase):
         state.update(self.root, "record", review)
         problems = physicell_design.check(self.root, DESIGN_B)
         self.assertEqual(len(problems), 2, problems)
-        self.assertTrue(all("latest independent review blocks or covers a different artifact" in p for p in problems))
+        # PR #17 review 4594813740: the newer-export scan alone refuses it, naming the export
+        self.assertTrue(all("a newer export runs/boolean-dynamics-modeler/maboss-session/handoff-later.json of MaBoSS "
+                            "session maboss-session was reviewed after" in p for p in problems), problems)
         # and at dispatch, whatever the outputs
         for prompt in prompts.values():
             self.refused(prompt, "handoff-later.json|latest independent review")
@@ -1640,6 +1642,17 @@ class PhysiCellDataInputTests(ProjectionBase):
         self.re_review_and_approve(hypoxic, "2")
         self.two_handoff_design(hypoxic)
         self.assertEqual(physicell_design.check(self.root, DESIGN_B), [])
+
+    def test_the_artifact_always_counts_as_current(self):
+        # PR #17 review 4594813740: a caller that leaves the artifact out of current never sees the artifact's own
+        # re-approval (here with other outputs) as a newer export
+        a1 = self.design["intracellular"][0]["maboss"]
+        a1 = {"path": a1["handoff"], "sha256": a1["sha256"]}
+        state.update(self.root, "record", {
+            "id": "approval-A-again", "kind": "stage_approval", "session_id": MC_MABOSS, "stage": "boolean-dynamics",
+            "downstream_stage": "multicellular", "outputs": ["A"], "approved_by": "researcher",
+            "authorization": "approved", "artifact": a1})
+        self.assertTrue(gate.check(self.root, "multicellular", MC_MABOSS, ["A", "B"], artifact=a1, current=[])["passed"])
 
     def test_gate_check_with_artifact_refuses_another_artifact_s_approval(self):
         # security review of b2529b5 (minor): gate.check never returns passed for an approval of another artifact

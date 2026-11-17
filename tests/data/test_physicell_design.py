@@ -679,8 +679,10 @@ class HandoffBindingTests(Base):
     def test_named_artifact_of_session_with_two_approvals(self):
         data = self.complete()
         ref2 = self.second_artifact()
-        # the later review covers handoff2 only: the originally named handoff is refused, handoff2 is used
-        self.assertRefused(data, "different artifact")
+        # the later review covers handoff2 only: the originally named handoff is refused (PR #17 review 4594813740:
+        # by the newer-export scan, naming handoff2), handoff2 is used
+        self.assertRefused(data, "a newer export runs/boolean-dynamics-modeler/maboss-session/handoff2.json of MaBoSS "
+                                 "session maboss-session was reviewed after")
         data["intracellular"][0]["maboss"] = {"handoff": ref2["path"], "sha256": ref2["sha256"]}
         self.assertEqual(self.errors(data), [])
 

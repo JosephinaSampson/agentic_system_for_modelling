@@ -188,16 +188,11 @@ def check(root, stage, session, outputs, artifact=None, current=None):
     """The durable and live checks of an upstream session for `stage` with exactly `outputs`.
 
     Without `artifact`: the session's latest approval of exactly these outputs and its latest review decide.
-    With `artifact` (one of several exports of the session, each reviewed and approved on its own, e.g. a MaBoSS
-    handoff per cell type) and `current` (every artifact of this session the caller imports, `artifact` among them):
-    when the session's latest approval of these outputs, or its latest review, is of one of `current`, the approval
-    and the review used are this artifact's own latest ones; otherwise they are those latest ones, as without
-    `artifact` (so a later export the caller does not import still supersedes it). The approval used must be of
-    `artifact`; and any review of the session, or approval (any outputs) for this downstream stage, recorded after
-    the own one and covering an artifact not in `current` refuses: a sibling's newer records never hide a newer
-    export. With current == [artifact], reviews follow exactly the rule without `artifact`; approvals add one
-    refusal it lacks, an approval of another export (other outputs) recorded after this artifact's own approval."""
-    current = [artifact] if artifact is not None and current is None else current
+    With `artifact` (one export of the session) and `current` (every export of the session the caller imports):
+    the artifact's own latest approval of these outputs and its own latest review are used. A later review of the
+    session, or a later approval for this stage, of an export not in `current` refuses: a newer export supersedes
+    it."""
+    current = [artifact, *(current or [])] if artifact is not None else None
     if stage not in UPSTREAM:
         raise ValueError("unknown downstream stage")
     identifier(session)
@@ -217,12 +212,11 @@ def check(root, stage, session, outputs, artifact=None, current=None):
         raise ValueError("no researcher approval names this session, downstream stage and exact outputs")
     approval = approvals[-1]
     if artifact is not None:
-        if approval.get("artifact") in current:
-            own = [r for r in approvals if r.get("artifact") == artifact]
-            approval = own[-1] if own else approval
-        if approval.get("artifact") != artifact:
+        own = [r for r in approvals if r.get("artifact") == artifact]
+        if not own:
             raise ValueError(f"the approval of these outputs is of a different artifact "
                              f"{_artifact_path(approval.get('artifact'))} (superseded re-export?)")
+        approval = own[-1]
     validate_record(root, approval)
     manifest = checked_artifact(root, approval["artifact"])
     prefix = f"runs/{role}/{session}/"
@@ -250,21 +244,18 @@ def check(root, stage, session, outputs, artifact=None, current=None):
     if not reviews:
         raise ValueError("independent scientific review and reproducibility audit have not been recorded")
     review = reviews[-1]
-    if artifact is not None and review.get("artifact") in current:
+    if artifact is not None:
         own = [r for r in reviews if r.get("artifact") == artifact]
         review = own[-1] if own else review
         _newer_export(recs[recs.index(review) + 1:], "stage_review", session, upstream_stage, current, "reviewed",
                       review, None)
+        _newer_export(recs[recs.index(approval) + 1:], "stage_approval", session, upstream_stage, current,
+                      "approved", approval, stage)
     validate_record(root, review)
     if review["outcome"] not in {"approved", "approved_with_limitations"} or review["artifact"] != approval["artifact"]:
         raise ValueError("latest independent review blocks or covers a different artifact revision")
     if recs.index(review) > recs.index(approval):
         raise ValueError("researcher approval must follow the independent review")
-    if artifact is not None:
-        # after the checks of the rule without `artifact` (their refusals come first): a sibling's newer approval
-        # must not hide an approval, with any outputs, of a newer export the caller does not import
-        _newer_export(recs[recs.index(approval) + 1:], "stage_approval", session, upstream_stage, current,
-                      "approved", approval, stage)
     return {"passed": True, "downstream_stage": stage, "upstream_session_id": session, "outputs": outputs, "approval_id": approval["id"], "review_id": review["id"], "artifact": approval["artifact"]}
 
 
