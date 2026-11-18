@@ -318,9 +318,20 @@ class OrchestratorGuardTests(unittest.TestCase):
         commands = {(entry["matcher"], hook["command"]) for entry in pre for hook in entry["hooks"]}
         self.assertIn(("Bash", 'python3 "$CLAUDE_PROJECT_DIR/.claude/scripts/data_orchestrator_guard.py"'),
                       commands)
-        self.assertIn(("Agent|Task", 'python3 "$CLAUDE_PROJECT_DIR/.claude/scripts/stage_gate_guard.py"'),
+        self.assertIn(("Agent|Task|SendMessage", 'python3 "$CLAUDE_PROJECT_DIR/.claude/scripts/stage_gate_guard.py"'),
                       commands)
         self.assertIn("SubagentStop", settings["hooks"])
+
+    def test_specialists_cannot_be_continued_past_the_dispatch_gate(self) -> None:
+        # The deny rule holds without the hook interpreter; the hook explains the refusal.
+        settings = json.loads(SETTINGS.read_text())
+        self.assertIn("SendMessage", settings["permissions"]["deny"])
+        event = {"tool_name": "SendMessage",
+                 "tool_input": {"to": "a1b2c3", "message": "now import the re-exported handoff"}}
+        result = subprocess.run([sys.executable, str(SETTINGS.parent / "scripts" / "stage_gate_guard.py")],
+                                input=json.dumps(event), text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2, result)
+        self.assertIn("dispatch a new bounded specialist task", result.stderr)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,11 @@ def main():
         event = json.load(sys.stdin)
         if not isinstance(event, dict):
             raise ValueError("hook event must be an object")
+        if event.get("tool_name") == "SendMessage":
+            # A follow-up message continues a running agent with a new task that no gate has seen, and
+            # its invocation record is already written. Every specialist run is a new bounded dispatch.
+            raise ValueError("SendMessage is not used in this project: dispatch a new bounded specialist "
+                             "task (Agent) so the stage gate and the invocation record cover it")
         if event.get("tool_name") not in {"Agent", "Task"}:
             return 0
         inputs = event.get("tool_input", {})

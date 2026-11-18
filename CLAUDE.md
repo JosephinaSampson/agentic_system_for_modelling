@@ -181,6 +181,8 @@ PhysiCell design or projection, add `--design <the design it applies; for a proj
 Prefix the bounded task with `STAGE_GATE {"upstream_session_id":"...","outputs":["..."]}`.
 The dispatch hook checks the durable records again. Explicit standalone sources use
 standalone_decision_id. Never run reviews in parallel with downstream work.
+Every specialist run is a new bounded dispatch; never continue one with SendMessage
+(denied: a follow-up would bypass the gate and its invocation record).
 
 After authorized operations, use scripts/capture commands to validate, relocate, hash
 and index exports (docs/agentic-operations.md). Curation-bearing handoffs (NeKo 2.1,

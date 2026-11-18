@@ -20,6 +20,10 @@
   could point at an unreviewed NeKo export. A first-line `STAGE_GATE` on an ODE brief
   is now checked (`biomass_ode`), and a brief naming a NeKo source without one is
   refused. Standalone Text2Model and reaction briefs are unchanged.
+- **A running specialist can no longer be continued with `SendMessage`.** The dispatch
+  hook matched `Agent|Task` only, so a follow-up message could give a specialist a new
+  task that no gate had checked and that its invocation record did not contain.
+  `SendMessage` is now denied in `.claude/settings.json` and refused by the hook.
 
 ## 1.2.0 — 2026-11-18
 

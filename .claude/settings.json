@@ -1,6 +1,7 @@
 {
   "permissions": {
-    "allow": []
+    "allow": [],
+    "deny": ["SendMessage"]
   },
   "hooks": {
     "SubagentStop": [
@@ -15,7 +16,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Agent|Task",
+        "matcher": "Agent|Task|SendMessage",
         "hooks": [
           {
             "type": "command",
