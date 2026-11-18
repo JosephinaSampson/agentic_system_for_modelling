@@ -1,5 +1,70 @@
 # Changelog
 
+## 1.2.0 — 2026-11-18
+
+Tested with `mcp-biomodelling-servers` **2.5.2** (NeKo `nekomata` **1.10.3**); the
+backend pins are unchanged from 1.0.3 and no MCP server was modified. This release
+contains the data layer that the roadmap planned as 1.1.0 and the data-to-PhysiCell
+work planned as 1.2.0. No 1.1.0 was tagged, so both are released together here.
+
+The whole data layer is **Claude Code only**; Codex refuses these briefs until parity.
+
+### Added
+
+- **`data-analyst` specialist.** Retrieves and analyses public and researcher data with
+  twelve vendored, hash-locked skills (`vendor/scientific-agent-skills/`), under guards
+  that allowlist its Bash and confine its writes to the data session. It returns hashed
+  data products and proposals; nothing reaches a model without researcher approval.
+  Downloads go to a content-addressed cache with a source ledger, the handoff is
+  generated mechanically, and `state.py data-product` registers approved products in
+  `DATA_DICTIONARY.md`. Setup: `setup.py --with-data` (pinned `.venv-data`), optional
+  `--with-cellprofiler`. See [data workflow](docs/data-workflow.md).
+- **Typed data-to-model handoffs for NeKo and MaBoSS.** Approved inputs reach a
+  specialist only through one `DATA_INPUT` line that the dispatch hook checks against
+  hashes and approval records: data-analyst proposals or researcher sources
+  (`seeds.json`) to NeKo, and a researcher-approved `mapping.json` to MaBoSS. New
+  governance stages `data_mapping` and `data_seeds`; `scenario_contrast` validation
+  criteria; a researcher-supplied BNET can stand in for the network layer.
+- **Data to ODE calibration.** An approved `ode_mapping.json` binds measurements to a
+  captured BioMASS export. Calibration runs as a deterministic, portable job on this
+  machine, a lab machine over SSH or a SLURM cluster; the result is verified on import
+  and comes back as a proposal. Approved values are applied only by the `ode-modeler`
+  behind the dispatch gate. New stages `ode_mapping` and `ode_calibration`, the
+  `data-calibrated` provenance tag, and a hold-out that is scored once.
+- **Data to PhysiCell.** Two approved stages: the multicellular design (domain, cell
+  definitions, substrates, which cell type carries which MaBoSS model, coupling plan),
+  then the data projection, where every value is checked against the live
+  signal/behavior dictionary with explicit units. The exported configuration is
+  verified so that only approved entries differ. A `physicell-build` skill compiles a
+  PhysiCell or PhysiBoSS project with the verified settings. New stages
+  `physicell_design` and `physicell_projection`; `gate.py check --design`.
+- **Capture recovery.** `scripts/capture/recover.py` records a specialist run from its
+  transcript when the SubagentStop hook did not fire, and saves MaBoSS run manifests,
+  node-marginal trajectories and engine inputs.
+- **`ROADMAP.md`.**
+
+### Changed
+
+- **Specialist reports are written by the recorder.** Specialists return their report
+  as their final message and the recorder writes the immutable `report.md`, because
+  Claude Code rejects subagent writes to report-like filenames.
+- **MaBoSS temporary files stay off `/tmp`.** Setup renders a private, disk-backed
+  `TMPDIR` into every modelling server's environment, and
+  `scripts/capture/server_tmp.py` removes orphaned `maboss-run-*` directories after a
+  run. The underlying leak is in the 2.5.2 server.
+- The validator clamps MaBoSS floating-point overshoot within 1e-4 of [0, 1] and
+  reports the clamped values; anything further outside still fails.
+- State table cells refuse control and line-break characters.
+
+### Known limitations
+
+- The guards protect against accidental or undisciplined writes, not against an agent
+  that deliberately forges records; there is no OS-level sandbox.
+- No example model or benchmark ships with the repository yet.
+- PhysiCell limits of server 2.5.2 are listed in
+  [data to PhysiCell architecture](docs/data-to-physicell-architecture.md) and in
+  `ROADMAP.md` under "Later".
+
 ## 1.0.3 — 2026-10-28
 
 Tested with `mcp-biomodelling-servers` **2.5.2** (NeKo `nekomata` **1.10.3**).

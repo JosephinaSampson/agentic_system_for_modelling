@@ -245,6 +245,6 @@ Also:
 
 ## 9. Roadmap
 
-1. **Implemented:** data to PhysiCell settings with the `physicell-build` skill (planned release 1.2.0).
+1. **Implemented:** data to PhysiCell settings with the `physicell-build` skill (released in 1.2.0).
 2. **Next:** spatial data as PhysiCell initial conditions (1.3.0).
 3. **Later:** see [ROADMAP.md](../ROADMAP.md).
