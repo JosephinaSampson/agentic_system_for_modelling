@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Credential redaction no longer rewrites scientific text.** The sanitizer applied to
+  every recorded transcript event, report and Codex handoff matched substrings
+  (`secret`, `auth`, `token`, the word "basic"), so `secretion_rate = 10` and "a basic
+  helix-loop-helix factor" were stored as `[REDACTED]` in `report.md`, `task.txt` and
+  `tool_calls.json`. Names are now read as whole words, an authorization scheme needs
+  a header name or a credential's shape, and a researcher's authorization sentence is
+  kept. Records written before this fix may contain such redactions.
+
 ## 1.2.0 — 2026-11-18
 
 Tested with `mcp-biomodelling-servers` **2.5.2** (NeKo `nekomata` **1.10.3**); the

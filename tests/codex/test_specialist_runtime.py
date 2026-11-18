@@ -32,7 +32,8 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(executor.parse_handoff(output), parsed)
                 self.assertNotIn("secret-test-value", output)
                 self.assertNotIn("other-test-value", output)
-                self.assertIn("[REDACTED]", parsed["draft_report"]["content"])
+                # A researcher's authorization sentence is a governance record, not a credential.
+                self.assertEqual(parsed["draft_report"], handoff["draft_report"])
 
     def test_final_output_without_handoff_still_redacts(self):
         output, parsed = executor.sanitize_final_output("failed: password=secret-test-value")
