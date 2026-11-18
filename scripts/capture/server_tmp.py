@@ -16,7 +16,9 @@ process has an open file or working directory inside it or names it on its comma
 line), its newest entry is older than ``--min-age`` (default 600 s), and either it was
 last modified before the earliest start of any running MaBoSS server (a process with
 an argv element ``mcp-maboss-server`` or ``.../mcp-maboss-server``) or it is older than
-24 hours. Nothing else is ever deleted. ``status`` reports each root's free
+24 hours. Nothing else is ever deleted. Where no process table can be read (no
+``/proc``, e.g. macOS) the in-use check is impossible, so nothing is removed and a note
+names the candidates. ``status`` reports each root's free
 space and the total size of the candidates. A root with less than 2 GiB free is warned
 about; that is never a failure.
 """
@@ -98,13 +100,16 @@ def _stat_start(raw: str, *, boot: float, ticks: int) -> float:
     return boot + int(fields[19]) / ticks  # fields[0] is field 3 (state)
 
 
-def _process_table() -> list[Process]:
-    """argv, start time and open paths of every visible process; unreadable parts are skipped."""
+def _process_table() -> list[Process] | None:
+    """argv, start time and open paths of every visible process; unreadable parts are skipped.
+
+    None when there is no readable process table at all (no ``/proc``, e.g. macOS).
+    """
     table = []
     try:
         pids = [name for name in os.listdir("/proc") if name.isdigit()]
     except OSError:
-        return table
+        return None
     boot = _boot_time()
     try:
         ticks = os.sysconf("SC_CLK_TCK")
@@ -149,7 +154,10 @@ def _names(text: str, target: str) -> bool:
 def in_use(path, table=None) -> bool:
     """True if any process has an open fd or cwd inside ``path`` or names it on its argv."""
     targets = {os.path.realpath(path), os.path.abspath(path)}
-    for process in _process_table() if table is None else table:
+    table = _process_table() if table is None else table
+    if table is None:
+        return True  # no process table: usage cannot be ruled out
+    for process in table:
         for item in process.paths:
             if item.endswith(" (deleted)"):
                 item = item[: -len(" (deleted)")]
@@ -172,7 +180,8 @@ def is_maboss_server(argv) -> bool:
 
 def servers_running(table=None) -> bool:
     """True if any process is a MaBoSS MCP server."""
-    return any(is_maboss_server(p.argv) for p in (_process_table() if table is None else table))
+    table = _process_table() if table is None else table
+    return any(is_maboss_server(p.argv) for p in table or [])
 
 
 def earliest_server_start(table) -> float | None:
@@ -215,9 +224,15 @@ def clean(roots, *, min_age_seconds: float = MIN_AGE_SECONDS, dry_run: bool = Fa
     now = time.time() if now is None else now
     found = candidates(roots)
     table = _process_table() if found else []
-    server_start = earliest_server_start(table)
     summary = {"dry_run": dry_run, "removed": 0, "removed_bytes": 0, "skipped": [], "vanished": [],
                "errors": []}
+    if table is None:
+        reason = "no readable process table on this platform (no /proc); in-use check impossible"
+        summary["skipped"] = [{"path": str(path), "reason": reason} for path in found]
+        summary["warnings"] = [f"TMP CLEANUP NOTE: {reason}; {len(found)} maboss-run dirs left in "
+                               "place, remove idle ones manually", *space_warnings(roots)]
+        return summary
+    server_start = earliest_server_start(table)
     for path in found:
         try:
             newest, size = _scan(path)

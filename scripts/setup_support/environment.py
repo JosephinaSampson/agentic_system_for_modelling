@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import stat
 import tempfile
@@ -68,13 +69,20 @@ def install(prefix: Path, manager: str, manager_path: str, manifest: dict,
 SYSTEM_PATH = ("/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin")
 
 
+def system_path(system: str | None = None) -> tuple[str, ...]:
+    """Stable system paths, including Homebrew on Apple Silicon."""
+    system = system or platform.system()
+    homebrew = ("/opt/homebrew/sbin", "/opt/homebrew/bin") if system == "Darwin" else ()
+    return (*homebrew, *SYSTEM_PATH)
+
+
 def transport_path(prefix: Path | None, *, graphviz_path: str | None = None,
                    uvx: str | None = None) -> str:
     """Keep explicit dependency directories without inheriting transient helpers."""
     external = [str(Path(graphviz_path).expanduser().absolute().parent)] if graphviz_path else []
     # uvx delegates to the uv binary installed beside it.
     first = [str(Path(uvx).parent)] if uvx else [str(prefix / "bin")]
-    return os.pathsep.join(dict.fromkeys([*first, *external, *SYSTEM_PATH]))
+    return os.pathsep.join(dict.fromkeys([*first, *external, *system_path()]))
 
 
 def plugin_requirement(manifest: dict) -> str:

@@ -206,6 +206,109 @@ class SetupTests(unittest.TestCase):
         self.assertGreaterEqual(len(report['errors']), 3)
         self.assertFalse((self.root/'.setup').exists())
 
+    def test_macos_is_a_supported_setup_platform(self):
+        args = setup.parser().parse_args(['--client', 'claude', '--manager', 'venv', '--dry-run'])
+        with mock.patch.object(detect, 'system_info',
+                               return_value={'system': 'Darwin', 'architecture': 'arm64', 'wsl': False,
+                                             'python': '3.12.0'}), \
+             mock.patch.object(detect, 'discover', return_value='/tools/executable'), \
+             mock.patch.object(detect, 'client_version', return_value='2.0.0'):
+            report = setup.execute(args, self.root)
+        self.assertTrue(report['passed'], report['errors'])
+
+    def test_auto_manager_avoids_x86_conda_on_apple_silicon(self):
+        args = setup.parser().parse_args(['--client', 'claude', '--dry-run'])
+        def discover(name, override=None):
+            return {'git': '/tools/git', 'claude': '/tools/claude', 'conda': '/tools/conda',
+                    'python': '/tools/python'}.get(name)
+        with mock.patch.object(detect, 'system_info',
+                               return_value={'system': 'Darwin', 'architecture': 'arm64', 'wsl': False,
+                                             'python': '3.12.0'}), \
+             mock.patch.object(detect, 'discover', side_effect=discover), \
+             mock.patch.object(detect, 'client_version', return_value='2.0.0'), \
+             mock.patch.object(detect, 'conda_platform', return_value='osx-64'):
+            resolved, errors = setup.plan(args, self.root, self.manifest)
+        self.assertFalse(errors)
+        self.assertEqual(resolved['manager'], 'venv')
+        self.assertEqual(resolved['manager_path'], '/tools/python')
+        self.assertIn('using the native Python environment', resolved['manager_warning'])
+
+    def test_explicit_non_native_conda_is_rejected_on_macos(self):
+        args = setup.parser().parse_args(['--client', 'claude', '--manager', 'conda', '--dry-run'])
+        with mock.patch.object(detect, 'system_info',
+                               return_value={'system': 'Darwin', 'architecture': 'arm64', 'wsl': False,
+                                             'python': '3.12.0'}), \
+             mock.patch.object(detect, 'discover', side_effect=lambda name, override=None:
+                               {'git': '/tools/git', 'claude': '/tools/claude', 'conda': '/tools/conda'}.get(name)), \
+             mock.patch.object(detect, 'client_version', return_value='2.0.0'), \
+             mock.patch.object(detect, 'conda_platform', return_value='osx-64'):
+            _, errors = setup.plan(args, self.root, self.manifest)
+        self.assertTrue(any('requires osx-arm64' in error and '--manager venv' in error for error in errors))
+
+    def test_auto_mode_with_a_python_manager_path_builds_a_venv(self):
+        # discover() returns any override path for any name: a Python --manager-path
+        # must not be taken for Conda when no --manager is given (on Linux too).
+        args = setup.parser().parse_args(['--client', 'claude', '--manager-path', '/tools/python3.12',
+                                        '--dry-run'])
+        def discover(name, override=None):
+            if override:
+                return override
+            return {'git': '/tools/git', 'claude': '/tools/claude', 'conda': '/tools/conda'}.get(name)
+        with mock.patch.object(detect, 'system_info',
+                               return_value={'system': 'Linux', 'architecture': 'x86_64', 'wsl': False,
+                                             'python': '3.12.0'}), \
+             mock.patch.object(detect, 'discover', side_effect=discover), \
+             mock.patch.object(detect, 'client_version', return_value='3.12.0'), \
+             mock.patch.object(detect, 'conda_platform') as probe:
+            resolved, errors = setup.plan(args, self.root, self.manifest)
+        self.assertFalse(errors)
+        self.assertEqual((resolved['manager'], resolved['manager_path']), ('venv', '/tools/python3.12'))
+        probe.assert_not_called()
+
+    def test_auto_mode_falls_back_to_venv_when_conda_cannot_report_its_platform(self):
+        args = setup.parser().parse_args(['--client', 'claude', '--dry-run'])
+        def discover(name, override=None):
+            return {'git': '/tools/git', 'claude': '/tools/claude', 'conda': '/tools/conda',
+                    'python': '/tools/python'}.get(name)
+        with mock.patch.object(detect, 'system_info',
+                               return_value={'system': 'Darwin', 'architecture': 'arm64', 'wsl': False,
+                                             'python': '3.12.0'}), \
+             mock.patch.object(detect, 'discover', side_effect=discover), \
+             mock.patch.object(detect, 'client_version', return_value='2.0.0'), \
+             mock.patch.object(detect, 'conda_platform',
+                               side_effect=SetupError('conda exited 1: broken install')):
+            resolved, errors = setup.plan(args, self.root, self.manifest)
+        self.assertFalse(errors)
+        self.assertEqual((resolved['manager'], resolved['manager_path']), ('venv', '/tools/python'))
+        self.assertIn('broken install', resolved['manager_warning'])
+        self.assertIn('using the native Python environment', resolved['manager_warning'])
+
+    def test_explicit_conda_that_cannot_report_its_platform_is_an_error(self):
+        args = setup.parser().parse_args(['--client', 'claude', '--manager', 'conda', '--dry-run'])
+        with mock.patch.object(detect, 'system_info',
+                               return_value={'system': 'Darwin', 'architecture': 'arm64', 'wsl': False,
+                                             'python': '3.12.0'}), \
+             mock.patch.object(detect, 'discover', side_effect=lambda name, override=None:
+                               {'git': '/tools/git', 'claude': '/tools/claude', 'conda': '/tools/conda'}.get(name)), \
+             mock.patch.object(detect, 'client_version', return_value='2.0.0'), \
+             mock.patch.object(detect, 'conda_platform',
+                               side_effect=SetupError('conda exited 1: broken install')):
+            _, errors = setup.plan(args, self.root, self.manifest)
+        self.assertTrue(any('broken install' in error for error in errors), errors)
+
+    def test_missing_conda_on_macos_is_reported_not_probed(self):
+        args = setup.parser().parse_args(['--client', 'claude', '--manager', 'conda', '--dry-run'])
+        with mock.patch.object(detect, 'system_info',
+                               return_value={'system': 'Darwin', 'architecture': 'arm64', 'wsl': False,
+                                             'python': '3.12.0'}), \
+             mock.patch.object(detect, 'discover', side_effect=lambda name, override=None:
+                               {'git': '/tools/git', 'claude': '/tools/claude'}.get(name)), \
+             mock.patch.object(detect, 'client_version', return_value='2.0.0'), \
+             mock.patch.object(detect, 'conda_platform') as probe:
+            _, errors = setup.plan(args, self.root, self.manifest)
+        probe.assert_not_called()
+        self.assertIn('Missing environment manager conda; supply --manager-path', errors)
+
     def test_successful_plan_never_installs_or_writes(self):
         args = setup.parser().parse_args(['--client', 'codex', '--manager', 'venv', '--dry-run',
                                         '--codex-home', str(self.home)])

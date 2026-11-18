@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import platform
 import re
 import subprocess
 from pathlib import Path
@@ -15,13 +16,15 @@ CP_REQUIREMENTS = Path("setup/data-requirements-cellprofiler.txt")
 IMPORT_PROBE = "import pydeseq2, gseapy, anndata, decoupler, sklearn, statsmodels, pint, uncertainties, gget, seaborn, matplotlib, pypdf, openpyxl"
 # Run with the data env's own interpreter: its Python major.minor and installed distributions.
 METADATA_PROBE = (
-    "import json, sys, importlib.metadata as m\n"
+    "import json, platform, sys, importlib.metadata as m\n"
     "d = {}\n"
     "for x in m.distributions():\n"
     "    n = x.metadata['Name']\n"
     "    if n: d.setdefault(n, []).append(x.version)\n"
-    "print(json.dumps({'python': '%d.%d' % sys.version_info[:2], 'distributions': d}))"
+    "print(json.dumps({'python': '%d.%d' % sys.version_info[:2], "
+    "'architecture': platform.machine(), 'distributions': d}))"
 )
+ARCHITECTURE_PROBE = "import platform; print(platform.machine())"
 PIN = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)")
 
 
@@ -44,6 +47,24 @@ def _cellprofiler_python(root: Path) -> str:
 def normalize(name: str) -> str:
     """PEP 503 project-name normalisation."""
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def normalize_architecture(name: str) -> str:
+    aliases = {"aarch64": "arm64", "amd64": "x86_64"}
+    lowered = name.strip().lower()
+    return aliases.get(lowered, lowered)
+
+
+def interpreter_architecture(python: Path) -> str:
+    result = subprocess.run([str(python), "-c", ARCHITECTURE_PROBE], check=True,
+                            capture_output=True, text=True)
+    return normalize_architecture(result.stdout)
+
+
+def venv_options() -> list[str]:
+    """On macOS, uv's managed interpreter is always native; a discovered system Python may
+    run under Rosetta. Elsewhere a suitable system Python is used without a download."""
+    return ["--managed-python"] if platform.system() == "Darwin" else []
 
 
 def lock_pins(root: Path) -> dict[str, str]:
@@ -71,6 +92,11 @@ def lock_errors(root: Path, python: Path) -> list[str]:
     errors = []
     if data["python"] != DATA_PYTHON_VERSION:
         errors.append(f"Data environment Python is {data['python']}, expected {DATA_PYTHON_VERSION}")
+    actual_architecture = normalize_architecture(data.get("architecture", ""))
+    expected_architecture = normalize_architecture(platform.machine())
+    if not actual_architecture or actual_architecture != expected_architecture:
+        errors.append(f"Data environment architecture is {actual_architecture or 'unknown'}, "
+                      f"expected {expected_architecture}")
     for name, version in sorted(pins.items()):
         found = installed.get(name)
         if not found:
@@ -87,7 +113,14 @@ def ensure(root: Path, uv: str, *, check: bool, with_cellprofiler: bool) -> dict
     try:
         if not check:
             if not python.exists():  # uv venv refuses an existing environment
-                subprocess.run([uv, "venv", str(root/DATA_ENV), "--python", DATA_PYTHON_VERSION], check=True)
+                subprocess.run([uv, "venv", str(root/DATA_ENV), "--python", DATA_PYTHON_VERSION,
+                                *venv_options()], check=True)
+        expected_architecture = normalize_architecture(platform.machine())
+        actual_architecture = interpreter_architecture(python)
+        if actual_architecture != expected_architecture:
+            raise ValueError(f"Data environment architecture is {actual_architecture or 'unknown'}, "
+                             f"expected {expected_architecture}; use a native Python environment")
+        if not check:
             subprocess.run([uv, "pip", "sync", "--python", str(python), str(root/LOCK)], check=True)
         subprocess.run([str(python), "-E", "-s", "-c", IMPORT_PROBE], check=True)
         result["errors"].extend(lock_errors(root, python))
@@ -96,8 +129,15 @@ def ensure(root: Path, uv: str, *, check: bool, with_cellprofiler: bool) -> dict
             cp = root/CP_ENV
             if not check:
                 if not (cp/"bin/python").exists():
-                    subprocess.run([uv, "venv", str(cp), "--python", _cellprofiler_python(root)], check=True)
+                    subprocess.run([uv, "venv", str(cp), "--python", _cellprofiler_python(root),
+                                    *venv_options()], check=True)
+            architecture = interpreter_architecture(cp/"bin/python")
+            if architecture != expected_architecture:
+                raise ValueError(f"CellProfiler environment architecture is {architecture or 'unknown'}, "
+                                 f"expected {expected_architecture}; use a native Python environment")
+            if not check:
                 subprocess.run([uv, "pip", "install", "--python", str(cp/"bin/python"), "-r",
+                                str(root/CP_REQUIREMENTS), "--build-constraints",
                                 str(root/CP_REQUIREMENTS)], check=True)
             subprocess.run([str(cp/"bin/cellprofiler"), "--version"], check=True)
             result["cellprofiler"] = str(cp/"bin/cellprofiler")

@@ -178,7 +178,7 @@ enforce per-child isolation. Details: [specialist dispatcher](specialist-dispatc
 
 ```mermaid
 flowchart LR
-    subgraph HOST["Workstation (Linux or WSL)"]
+    subgraph HOST["Workstation (Linux, macOS or WSL)"]
         subgraph CC["Claude Code project"]
             MAIN["Main session<br/>orchestrator, no modelling tools"]
             NC[network-curator]

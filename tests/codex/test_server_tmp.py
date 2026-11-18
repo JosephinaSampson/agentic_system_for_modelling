@@ -16,6 +16,8 @@ from unittest import mock
 from scripts.capture import recover, server_tmp
 
 HOUR = 3600
+# Captured before setUp patches it, so one test can exercise the real scan.
+REAL_PROCESS_TABLE = server_tmp._process_table
 
 
 class ServerTmpTests(unittest.TestCase):
@@ -76,6 +78,24 @@ class ServerTmpTests(unittest.TestCase):
         self.assertTrue(old.is_dir())
         self.assertEqual(summary["removed"], 1)
         self.assertIn("dry run", server_tmp.summary_line(summary))
+
+    def test_no_process_table_removes_nothing_and_notes_it(self):
+        # macOS has no /proc: the in-use check is impossible, so every candidate stays.
+        old = self.run_dir("maboss-run-old", 2 * HOUR)
+        with mock.patch.object(server_tmp, "_process_table", return_value=None):
+            summary = self.clean()
+            self.assertTrue(server_tmp.in_use(old))
+            self.assertFalse(server_tmp.servers_running())
+        self.assertTrue(old.is_dir())
+        self.assertEqual(summary["removed"], 0)
+        self.assertEqual([row["path"] for row in summary["skipped"]], [str(old)])
+        self.assertIn("no readable process table", summary["skipped"][0]["reason"])
+        self.assertTrue(any(line.startswith("TMP CLEANUP NOTE:") for line in summary["warnings"]))
+        self.assertIn("skipped 1", server_tmp.summary_line(summary))
+
+    def test_unreadable_proc_yields_no_table(self):
+        with mock.patch.object(server_tmp.os, "listdir", side_effect=OSError("no /proc")):
+            self.assertIsNone(REAL_PROCESS_TABLE())
 
     def test_in_use_directory_is_kept(self):
         busy = self.run_dir("maboss-run-busy", 2 * HOUR)

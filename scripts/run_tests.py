@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -15,12 +16,22 @@ SUITES = ("tests/codex", ".claude/scripts", "tests/setup", "tests/data")
 SUITE_TIMEOUT_SECONDS = 120
 
 
+def suite_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    if sys.platform == "darwin":
+        temp_root = Path(env.get("TMPDIR") or tempfile.gettempdir()).resolve()
+        if temp_root.is_dir():
+            env["TMPDIR"] = str(temp_root)
+    return env
+
+
 def run_suite(suite: str) -> int:
     # Stop fixtures that inherit the suite process group on timeout, without
     # signalling the caller or another suite. Detached groups are not covered.
     with subprocess.Popen(
         [sys.executable, "-m", "unittest", "discover", "-s", suite, "-v"],
         cwd=ROOT,
+        env=suite_environment(),
         start_new_session=os.name == "posix",
     ) as process:
         try:
