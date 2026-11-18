@@ -83,6 +83,26 @@ before producing a conclusive export. A `stage_review` contains:
 - `artifact`: exact reviewed handoff path/hash;
 - `scientific-reviewer` and `reproducibility-auditor`: the `review:` references printed by `recover.py`.
 
+An edge-only edit of a reviewed NeKo-to-MaBoSS export does not repeat the review. `scripts/network_delta.py
+<reviewed handoff> <new handoff>` computes the difference from the two BNET files: `changes` (edges added,
+removed or sign-changed) and `rules` (before/after of each changed target). The researcher approves that
+list, and a `stage_delta` record holds it:
+
+- `parent` and `artifact`: the reviewed and the new handoff path/hash, same NeKo session;
+- `changes` and `rules`: exactly the script's output; `state.py` and the gate recompute and compare;
+- per change, `evidence` (its own edge report; an added or sign-changed edge needs verdict supported or
+  context-dependent and a compatible interaction type) or `decision_id` (a data `stage_approval`; this is
+  checked to exist, not to concern that edge);
+- `approved_by: "researcher"` and `authorization`.
+
+The gate then accepts the new export on the parent's review and reports `review_id`, `delta_id` and
+`edges_changed_since_review`, so the record shows what the reviewers did not read. The script refuses a
+changed node set, a rule changed without an edge change, a rule that is not plain signed regulators, and
+exports of different sessions; the gate refuses a parent without a passing review and more than
+`DELTA_REVIEW_LIMIT` (5) changed edges since the last full `stage_review`. Each of these needs the full
+review. The delta shows which rules changed, not what they do to the dynamics: that is the Boolean stage's
+review. Boolean, readout and rate edits have no delta path.
+
 Then record the researcher's `stage_approval` with `approved_by: "researcher"`,
 `authorization` (exact quotation or durable request reference), `artifact`,
 `downstream_stage`, and the exact ordered `outputs` list. A review recommendation

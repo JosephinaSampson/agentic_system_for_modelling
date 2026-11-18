@@ -381,7 +381,8 @@ inlined rationale, evidence summary, supporting PMIDs/citations and the exact
 explicit enablement) and `export_configuration_bundle` (packaging, not a run or
 approval). Never let a specialist invent PMIDs, readout rules, rates or units.
 Approval binds to the exact NeKo state or MaBoSS `model_revision` reviewed; any
-later edit supersedes it. MaBoSS ordinary and mutant runs are durable run IDs;
+later edit supersedes it (an edge-only topology edit may carry the review over with a
+`stage_delta`; see `validate-stage`). MaBoSS ordinary and mutant runs are durable run IDs;
 record them. NeKo-to-MaBoSS 2.1 and NeKo-to-BioMASS 2.0 handoffs carry a
 `curation_file` history companion; MaBoSS-to-PhysiCell 2.1 carries the model
 revision and readout definitions. Retain all referenced files with the manifest.

@@ -179,7 +179,14 @@ artifact's path and sha256 in its brief. After each reviewer completion notifica
 and cite the `review:` reference it prints in the stage_review record: a review is valid only as the
 recorder's `runs/<reviewer>/<agentId>/report.md`. Never write, copy or summarise a review into those
 folders or cite any other file as a review; a new or re-exported artifact needs new reviewer runs. Any later interaction,
-rule, readout or rate edit supersedes it: re-review and re-approve. Record review and approval
+rule, readout or rate edit supersedes it: re-review and re-approve. One exception, topology only: an
+edge-only edit of a reviewed NeKo-to-MaBoSS export (same session, same nodes) needs no new reviewer runs.
+Run `python3 scripts/network_delta.py <reviewed handoff> <new handoff>`, show the researcher its exact
+`changes` and `rules`, and on their approval record a `stage_delta` (that output plus, per change, its own
+edge report as `evidence` or a data `stage_approval` as `decision_id`; `approved_by`, `authorization`), then
+the `stage_approval` of the new export. If the script refuses (nodes changed, a rule changed without an edge,
+more than 5 edges since the last full review), run the full review; never describe a difference yourself.
+Record review and approval
 with state.py; run and quote `python3 scripts/gate.py check <stage> <session> --outputs ...`
 (for biomass_ode the outputs are every node_id of the exported graph; for a multicellular dispatch applying a
 PhysiCell design or projection, add `--design <the design it applies; for a projection, the projection's design>`).

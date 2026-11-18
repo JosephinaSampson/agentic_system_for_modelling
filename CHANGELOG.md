@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- **Incremental approval of small topology edits.** Every edit of a reviewed network required both
+  reviewers to run again on the whole network, even for one edge the researcher had just decided on. A
+  new `scripts/network_delta.py` computes the exact difference between the reviewed and the new
+  NeKo-to-MaBoSS export (edges added, removed or sign-changed, and the before/after rule of each changed
+  target), and a new `stage_delta` governance record holds the researcher's approval of that list, with
+  each change citing its own edge report or data approval. The gate then accepts the new export on the
+  earlier review and reports which review it rests on and how many edges changed since. A changed node
+  set, a rule changed without an edge change, an unreviewed parent, or more than 5 changed edges since the
+  last full review still require the full review, as do Boolean rule, readout and rate edits.
+
 ### Fixed
 
 - **Credential redaction no longer rewrites scientific text.** The sanitizer applied to

@@ -12,7 +12,8 @@ import sys
 import unicodedata
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.state import ROOT, REGISTRY, checked_artifact, identifier, records, table, validate_record
+from scripts.state import (PASSING, ROOT, REGISTRY, checked_artifact, identifier, records, review_basis, table,
+                           validate_record)
 from scripts.curation_contract import check_binding, check_parent_scope, check_readout_isolation
 from scripts.data import approvals
 from scripts.data.manifest import KIND_SCHEMAS
@@ -240,7 +241,8 @@ def check(root, stage, session, outputs, artifact=None, current=None):
             )
         if row["Derived from"] not in parents:
             raise ValueError("registry upstream lineage and exported parent disagree")
-    reviews = [r for r in recs if r.get("kind") == "stage_review" and r.get("session_id") == session and r.get("stage") == upstream_stage]
+    # A stage_delta (topology only) covers an edge-only edit of a reviewed export: see state.checked_delta.
+    reviews = [r for r in recs if r.get("kind") in {"stage_review", "stage_delta"} and r.get("session_id") == session and r.get("stage") == upstream_stage]
     if not reviews:
         raise ValueError("independent scientific review and reproducibility audit have not been recorded")
     review = reviews[-1]
@@ -254,11 +256,16 @@ def check(root, stage, session, outputs, artifact=None, current=None):
         _newer_export(recs[recs.index(approval) + 1:], "stage_approval", session, upstream_stage, current,
                       "approved", approval, stage)
     validate_record(root, review)
-    if review["outcome"] not in {"approved", "approved_with_limitations"} or review["artifact"] != approval["artifact"]:
+    if (review["kind"] == "stage_review" and review["outcome"] not in PASSING) or review["artifact"] != approval["artifact"]:
         raise ValueError("latest independent review blocks or covers a different artifact revision")
     if recs.index(review) > recs.index(approval):
         raise ValueError("researcher approval must follow the independent review")
-    return {"passed": True, "downstream_stage": stage, "upstream_session_id": session, "outputs": outputs, "approval_id": approval["id"], "review_id": review["id"], "artifact": approval["artifact"]}
+    result = {"passed": True, "downstream_stage": stage, "upstream_session_id": session, "outputs": outputs, "approval_id": approval["id"], "review_id": review["id"], "artifact": approval["artifact"]}
+    if review["kind"] == "stage_delta":
+        # say plainly what the reviewers did and did not read
+        basis, changed = review_basis(root, recs, review)
+        result.update(review_id=basis["id"], delta_id=review["id"], edges_changed_since_review=changed)
+    return result
 
 
 def standalone(root, stage, decision_id, outputs):
