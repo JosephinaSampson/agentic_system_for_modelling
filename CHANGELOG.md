@@ -13,9 +13,34 @@
   earlier review and reports which review it rests on and how many edges changed since. A changed node
   set, a rule changed without an edge change, an unreviewed parent, or more than 5 changed edges since the
   last full review still require the full review, as do Boolean rule, readout and rate edits.
+- **macOS as a supported setup host.** `scripts/setup.py` accepts Darwin alongside Linux
+  and WSL. On macOS, auto mode reads Conda's package platform (`conda info --json`) and
+  falls back to a native Python venv, with a `manager_warning` in the report, when Conda
+  targets another architecture (an x86_64 Rosetta Conda on Apple Silicon) or cannot report
+  one; an explicitly requested non-native Conda is an error. The server PATH includes
+  Homebrew's `/opt/homebrew` directories; the test runner resolves `TMPDIR`; CI runs the
+  suites on `macos-latest`. The data-analyst and CellProfiler environments are probed for
+  the host architecture before any install, and on macOS `uv venv` requests uv's managed
+  (always native) interpreter. CellProfiler on Apple Silicon runs from a documented
+  x86_64/Rosetta Conda environment through `scripts/data/cellprofiler_rosetta.sh`, which
+  the data-analyst passes as `--executable` to the vendored helper.
+
+### Changed
+
+- **`--manager-path` without `--manager` selects a venv with that interpreter.** Conda is
+  used only when discovered without an override in auto mode or requested with
+  `--manager conda`.
+- **The data environment lock gains `tifffile==2026.9.20`**, which the vendored CellProfiler
+  helper imports; existing environments resync with `setup.py --with-data`.
+- The CellProfiler requirements pin `numpy<2` as a build constraint (python-javabridge).
 
 ### Fixed
 
+- **MaBoSS temp cleanup no longer deletes blindly where there is no `/proc`.**
+  `scripts/capture/server_tmp.py` (run by `recover.py` after every boolean-dynamics-modeler
+  run) could not see running processes on macOS, so any `maboss-run-*` directory idle for
+  10 minutes was removed even while a server used it. Without a readable process table it
+  now removes nothing and prints a `TMP CLEANUP NOTE` naming the candidates.
 - **Credential redaction no longer rewrites scientific text.** The sanitizer applied to
   every recorded transcript event, report and Codex handoff matched substrings
   (`secret`, `auth`, `token`, the word "basic"), so `secretion_rate = 10` and "a basic

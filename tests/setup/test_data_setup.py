@@ -18,6 +18,10 @@ ROOT = Path(__file__).resolve().parents[2]
 IMPORT_PROBE = "import pydeseq2, gseapy, anndata, decoupler, sklearn, statsmodels, pint, uncertainties, gget, seaborn, matplotlib, pypdf, openpyxl"
 
 
+# uv's managed interpreter is requested only on macOS (see data_env.venv_options).
+MANAGED = ['--managed-python'] if platform.system() == 'Darwin' else []
+
+
 class DataSetupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
@@ -67,8 +71,7 @@ class DataSetupTests(unittest.TestCase):
             result = data_env.ensure(self.root, '/bin/uv', check=False, with_cellprofiler=False)
         py = str(self.root/'.venv-data/bin/python')
         self.assertEqual([c.args[0] for c in run.call_args_list], [
-            ['/bin/uv', 'venv', str(self.root/'.venv-data'), '--python', '3.12',
-             '--managed-python'],
+            ['/bin/uv', 'venv', str(self.root/'.venv-data'), '--python', '3.12', *MANAGED],
             [py, '-c', data_env.ARCHITECTURE_PROBE],
             ['/bin/uv', 'pip', 'sync', '--python', py, str(self.root/'setup/data-requirements.lock')],
             [py, '-E', '-s', '-c', IMPORT_PROBE],
@@ -77,13 +80,19 @@ class DataSetupTests(unittest.TestCase):
         self.assertTrue(result['passed']); self.assertEqual(result['lock_sha256'], data_env.lock_sha256(self.root))
         self.assertEqual(data_env.data_python(self.root), self.root/'.venv-data/bin/python')
 
+    def test_managed_python_is_requested_only_on_macos(self):
+        with mock.patch.object(data_env.platform, 'system', return_value='Darwin'):
+            self.assertEqual(data_env.venv_options(), ['--managed-python'])
+        with mock.patch.object(data_env.platform, 'system', return_value='Linux'):
+            self.assertEqual(data_env.venv_options(), [])
+
     def test_cellprofiler_uses_python_from_requirements_comment(self):
         with self.patched_run() as run:
             result = data_env.ensure(self.root, '/bin/uv', check=False, with_cellprofiler=True)
         cp = self.root/'.venv-cellprofiler'
         argv = [c.args[0] for c in run.call_args_list][5:]
         self.assertEqual(argv, [
-            ['/bin/uv', 'venv', str(cp), '--python', '3.9', '--managed-python'],
+            ['/bin/uv', 'venv', str(cp), '--python', '3.9', *MANAGED],
             [str(cp/'bin/python'), '-c', data_env.ARCHITECTURE_PROBE],
             ['/bin/uv', 'pip', 'install', '--python', str(cp/'bin/python'), '-r',
              str(self.root/'setup/data-requirements-cellprofiler.txt'), '--build-constraints',

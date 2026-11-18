@@ -61,6 +61,12 @@ def interpreter_architecture(python: Path) -> str:
     return normalize_architecture(result.stdout)
 
 
+def venv_options() -> list[str]:
+    """On macOS, uv's managed interpreter is always native; a discovered system Python may
+    run under Rosetta. Elsewhere a suitable system Python is used without a download."""
+    return ["--managed-python"] if platform.system() == "Darwin" else []
+
+
 def lock_pins(root: Path) -> dict[str, str]:
     pins = {}
     for number, raw in enumerate((Path(root)/LOCK).read_text(encoding="utf-8").splitlines(), 1):
@@ -108,7 +114,7 @@ def ensure(root: Path, uv: str, *, check: bool, with_cellprofiler: bool) -> dict
         if not check:
             if not python.exists():  # uv venv refuses an existing environment
                 subprocess.run([uv, "venv", str(root/DATA_ENV), "--python", DATA_PYTHON_VERSION,
-                                "--managed-python"], check=True)
+                                *venv_options()], check=True)
         expected_architecture = normalize_architecture(platform.machine())
         actual_architecture = interpreter_architecture(python)
         if actual_architecture != expected_architecture:
@@ -124,7 +130,7 @@ def ensure(root: Path, uv: str, *, check: bool, with_cellprofiler: bool) -> dict
             if not check:
                 if not (cp/"bin/python").exists():
                     subprocess.run([uv, "venv", str(cp), "--python", _cellprofiler_python(root),
-                                    "--managed-python"], check=True)
+                                    *venv_options()], check=True)
             architecture = interpreter_architecture(cp/"bin/python")
             if architecture != expected_architecture:
                 raise ValueError(f"CellProfiler environment architecture is {architecture or 'unknown'}, "

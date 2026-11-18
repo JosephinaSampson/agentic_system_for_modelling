@@ -39,10 +39,12 @@ Only selected clients must be installed; discovered clients are checked using
 The default environment lives at `.setup/environment`. Auto mode chooses Conda
 when available, otherwise Python's virtualenv support. On macOS, it checks that
 Conda targets the host architecture and selects a native Python virtual environment
-instead of an incompatible Conda installation. An explicitly selected incompatible
-Conda target fails with a remediation message. Override the manager with
+instead of an incompatible Conda installation, or one whose `conda info --json`
+fails; the report's `plan.manager_warning` says so. An explicitly selected
+incompatible Conda target fails with a remediation message. Override the manager with
 `--manager conda` or `--manager venv`; `--manager-path` identifies Conda or the
-Python interpreter used to create the environment. `--env-prefix` selects another
+Python interpreter used to create the environment. Without `--manager`, a
+`--manager-path` selects venv with that interpreter. `--env-prefix` selects another
 new environment location. Conda installs Python 3.11 and pip from conda-forge; venv
 uses the selected Python interpreter. The released servers bundle the MaBoSS engine
 (cmaboss) and Graphviz (PyGraphviz wheels), so neither a MaBoSS executable nor a

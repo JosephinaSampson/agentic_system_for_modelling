@@ -190,9 +190,12 @@ def plan(args, root: Path, manifest: dict) -> tuple[dict, list[str]]:
     elif not reuse:
         try:
             conda = None
-            if manager in {"auto", "conda"}:
+            if manager == "conda":
                 conda = detect.discover("conda", manager_path)
-            if manager == "auto":
+            elif manager == "auto":
+                # --manager-path names the Python interpreter for a venv unless Conda is
+                # requested explicitly; discover() would return any override path as "conda".
+                conda = None if manager_path else detect.discover("conda")
                 manager = "conda" if conda else "venv"
             if manager == "conda" and conda and system["system"] == "Darwin":
                 expected_platform = {
@@ -201,15 +204,22 @@ def plan(args, root: Path, manifest: dict) -> tuple[dict, list[str]]:
                     "x86_64": "osx-64",
                     "amd64": "osx-64",
                 }.get(system["architecture"].lower())
-                actual_platform = detect.conda_platform(conda)
-                if expected_platform is None or actual_platform != expected_platform:
-                    reason = (f"Conda targets {actual_platform}, but this macOS host requires "
-                              f"{expected_platform or 'a native macOS package platform'}")
-                    if manager_requested == "auto" and not manager_path:
-                        manager = "venv"
-                        manager_warning = reason + "; using the native Python environment instead"
-                    else:
-                        errors.append(reason + "; use --manager venv with a native Python interpreter")
+                try:
+                    actual_platform = detect.conda_platform(conda)
+                except SetupError as error:
+                    if manager_requested != "auto":
+                        raise
+                    reason, actual_platform = str(error), expected_platform
+                else:
+                    reason = None
+                    if expected_platform is None or actual_platform != expected_platform:
+                        reason = (f"Conda targets {actual_platform}, but this macOS host requires "
+                                  f"{expected_platform or 'a native macOS package platform'}")
+                if reason and manager_requested == "auto":
+                    manager = "venv"
+                    manager_warning = reason + "; using the native Python environment instead"
+                elif reason:
+                    errors.append(reason + "; use --manager venv with a native Python interpreter")
             executable = (conda if manager == "conda" else
                           detect.discover("python", manager_path or sys.executable))
         except SetupError as error:

@@ -18,9 +18,9 @@ cite them when you use results. The agent is Claude-only until Codex parity.
 
 `python3 scripts/setup.py --with-data` creates `.venv-data`. `--with-cellprofiler` additionally
 installs CellProfiler 4.2.8.1 into `.venv-cellprofiler` (Python 3.9). It requires system
-packages providing `mysql_config` (for example `libmysqlclient-dev`) and a JDK.
-On macOS, install those prerequisites with Homebrew and expose them to the setup
-process before running it:
+packages providing `mysql_config` (for example `libmysqlclient-dev`) and a JDK. The
+Linux install was not verified on the development machine. On macOS, install those
+prerequisites with Homebrew and expose them to the setup process before running it:
 
 ```bash
 brew install mysql-client openjdk
