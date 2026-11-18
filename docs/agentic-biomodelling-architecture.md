@@ -1,6 +1,6 @@
 # Agentic biological-modelling system: architecture
 
-**Document status:** describes the core pipeline as of release 1.2.0 (see
+**Document status:** describes the core pipeline as of release 1.2.1 (see
 [`CHANGELOG.md`](../CHANGELOG.md)), tested with
 `mcp-biomodelling-servers` 2.5.2. The data layer added in 1.2.0 has its own
 architecture documents, listed in the [documentation map](README.md). For usage, see the [README](../README.md); for
