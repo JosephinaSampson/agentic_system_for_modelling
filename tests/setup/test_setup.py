@@ -245,6 +245,19 @@ class SetupTests(unittest.TestCase):
             _, errors = setup.plan(args, self.root, self.manifest)
         self.assertTrue(any('requires osx-arm64' in error and '--manager venv' in error for error in errors))
 
+    def test_missing_conda_on_macos_is_reported_not_probed(self):
+        args = setup.parser().parse_args(['--client', 'claude', '--manager', 'conda', '--dry-run'])
+        with mock.patch.object(detect, 'system_info',
+                               return_value={'system': 'Darwin', 'architecture': 'arm64', 'wsl': False,
+                                             'python': '3.12.0'}), \
+             mock.patch.object(detect, 'discover', side_effect=lambda name, override=None:
+                               {'git': '/tools/git', 'claude': '/tools/claude'}.get(name)), \
+             mock.patch.object(detect, 'client_version', return_value='2.0.0'), \
+             mock.patch.object(detect, 'conda_platform') as probe:
+            _, errors = setup.plan(args, self.root, self.manifest)
+        probe.assert_not_called()
+        self.assertIn('Missing environment manager conda; supply --manager-path', errors)
+
     def test_successful_plan_never_installs_or_writes(self):
         args = setup.parser().parse_args(['--client', 'codex', '--manager', 'venv', '--dry-run',
                                         '--codex-home', str(self.home)])

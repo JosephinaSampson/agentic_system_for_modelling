@@ -194,9 +194,7 @@ def plan(args, root: Path, manifest: dict) -> tuple[dict, list[str]]:
                 conda = detect.discover("conda", manager_path)
             if manager == "auto":
                 manager = "conda" if conda else "venv"
-            if manager == "conda" and system["system"] == "Darwin":
-                if conda is None:
-                    conda = detect.discover("conda", manager_path)
+            if manager == "conda" and conda and system["system"] == "Darwin":
                 expected_platform = {
                     "arm64": "osx-arm64",
                     "aarch64": "osx-arm64",
