@@ -154,8 +154,10 @@ Use `--record-session-id` when a full upstream or existing session ID is known. 
 **Windows-to-WSL bridge.** Copy `.codex/launcher.example.json` to the ignored
 `.codex/launcher.local.json`, then set the WSL distribution, absolute project path,
 Python and Codex (0.153.0+) executables. Invoke the same entry point with
-`--transport wsl`. The bridge builds a `wsl.exe` argument vector, never a shell
-string, and the inner process records `transport=windows-wsl`. The bridge isolates
+`--transport wsl`. The bridge builds a `wsl.exe --exec` argument vector, never a shell
+string, so the task text reaches the specialist unchanged; because no login shell
+runs, give the Python and Codex executables as absolute paths or names on WSL's
+default `PATH`. The inner process records `transport=windows-wsl`. The bridge isolates
 the child process only. A ChatGPT Windows parent app is unsupported unless an
 external policy proves it has no modelling MCP tools.
 

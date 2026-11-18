@@ -11,6 +11,10 @@
   `tool_calls.json`. Names are now read as whole words, an authorization scheme needs
   a header name or a credential's shape, and a researcher's authorization sentence is
   kept. Records written before this fix may contain such redactions.
+- **The Windows-to-WSL Codex bridge no longer passes the task through a shell.**
+  `wsl.exe` was called without `--exec`, so bash expanded backticks, `$VAR` and
+  `$(...)` in a brief: Markdown code spans were deleted from the task and a quoted
+  `$(...)` was executed. The bridge now uses `wsl.exe --exec`.
 
 ## 1.2.0 — 2026-11-18
 

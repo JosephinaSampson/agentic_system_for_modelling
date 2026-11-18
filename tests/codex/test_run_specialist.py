@@ -568,6 +568,28 @@ for _ in range(12):
         self.assertNotIn("sh", command)
         self.assertNotIn("bash", command)
 
+    def test_windows_wsl_command_bypasses_the_wsl_shell(self) -> None:
+        config = {
+            "wsl_executable": "wsl.exe",
+            "distribution": "local-distribution",
+            "project_path": "/workspace/project",
+            "python_executable": "python3",
+            "codex_executable": "/tools/codex",
+        }
+        task = 'Use `export_network`; cost is $5 and $(echo INJECTED) "quoted"'
+        command = MODULE.build_wsl_command(
+            config,
+            "network_curator",
+            prompt=task,
+            prompt_file=None,
+            allow_web_search=False,
+            record_session_id=None,
+        )
+        # wsl.exe runs the words after --exec directly; anything else goes through a shell.
+        self.assertEqual(command[command.index("--exec") + 1], "python3")
+        self.assertLess(command.index("--cd"), command.index("--exec"))
+        self.assertEqual(command[command.index("--prompt") + 1], task)
+
     def test_windows_prompt_path_traversal_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "project-relative"):
             MODULE.validate_wsl_prompt_file("../outside.txt")
