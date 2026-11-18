@@ -68,6 +68,7 @@ args = json.loads(sys.argv[2])
 sys.path.insert(0, args["root"])  # -I: the repo copy is not importable otherwise
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
+from tests.support.reviews import recorded_reviews
 
 ART = Path(os.environ["MCP_BIOMODELLING_ARTIFACT_ROOT"])
 PROJECT = Path(args["root"])
@@ -486,10 +487,7 @@ class Smoke:
         ref = {"path": rel, "sha256": sha256(self.root / rel)}
         review = {"id": f"review-{session}", "kind": "stage_review", "session_id": session,
                   "stage": "boolean-dynamics", "outcome": "approved", "artifact": ref}
-        for role in ("scientific-reviewer", "reproducibility-auditor"):
-            report = self.root / "runs" / f"{role}-{session}.md"
-            report.write_text("independent bounded review (smoke)")
-            review[role] = {"path": report.relative_to(self.root).as_posix(), "sha256": sha256(report)}
+        review.update(recorded_reviews(self.root, review["artifact"], review["id"]))
         state.update(self.root, "registry-add", dict(zip(state.REGISTRY, [
             "boolean-dynamics-modeler", session, "boolean-dynamics", "active", "—", "pending", rel])))
         self.record(review)

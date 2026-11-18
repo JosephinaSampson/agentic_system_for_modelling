@@ -12,6 +12,7 @@ from scripts import state
 from scripts.capture.record_physicell_config import record_physicell
 from scripts.data import approvals
 from scripts.physicell import physicell_design as pd
+from tests.support.reviews import recorded_reviews
 
 FIXTURES = Path(__file__).parent / "fixtures" / "physicell"
 SESSION = "mc-session-1"
@@ -189,10 +190,7 @@ class Base(unittest.TestCase):
         ref = {"path": str(path.relative_to(self.root)), "sha256": state.digest(path)}
         review = {"id": f"review-{session}", "kind": "stage_review", "session_id": session, "stage": "boolean-dynamics",
                   "outcome": "approved", "artifact": ref}
-        for role in ("scientific-reviewer", "reproducibility-auditor"):
-            report = self.root / "runs" / f"{role}-{session}.md"
-            report.write_text("independent bounded review")
-            review[role] = {"path": str(report.relative_to(self.root)), "sha256": state.digest(report)}
+        review.update(recorded_reviews(self.root, review["artifact"], review["id"]))
         approval = {"id": f"approval-{session}", "kind": "stage_approval", "session_id": session,
                     "stage": "boolean-dynamics", "downstream_stage": "multicellular", "outputs": outputs,
                     "approved_by": "researcher", "authorization": "approved", "artifact": ref}
@@ -669,6 +667,7 @@ class HandoffBindingTests(Base):
         ref = {"path": str(path.relative_to(self.root)), "sha256": state.digest(path)}
         review = json.loads(json.dumps(state.records((self.root / "DECISIONS.md").read_text())[0]))
         review.update(id="review-2", artifact=ref)
+        review.update(recorded_reviews(self.root, ref, "review-2"))
         state.update(self.root, "record", review)
         approval = {"id": "approval-2", "kind": "stage_approval", "session_id": session, "stage": "boolean-dynamics",
                     "downstream_stage": "multicellular", "outputs": ["A"], "approved_by": "researcher",

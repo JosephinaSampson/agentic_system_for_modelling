@@ -66,13 +66,22 @@ blocks marked `<!-- governance-record -->` in DECISIONS.md, avoiding a competing
 approval database. Every record has a unique `id`, `kind`, `stage`, and full
 `session_id` (except standalone authorization).
 
-Before downstream dispatch, independent review must finish; persist both reports in
-`runs/orchestrator/reviews/<session>/`. Separate researcher approval is still required
+Before downstream dispatch, independent review must finish. Each reviewer's brief names the
+reviewed artifact's path and sha256, and after it finishes
+`python3 scripts/capture/recover.py --specialist <reviewer> --agent-id <agentId>` records the run under
+`runs/<reviewer>/<agentId>/` (`report.md` is the reviewer's own final message; `task.txt`,
+`tool_calls.json`, `transcript.jsonl` and `invocation.json` beside it) and prints the `review:`
+reference. `state.py record` and the gate accept a review reference only if it is such a report, its
+`invocation.json` names that reviewer role and the sha256 of the report and of the brief, and the brief
+contains the reviewed artifact's sha256. A PreToolUse hook (`recorder_write_guard.py`) refuses file-tool
+writes to reviewer folders and invocation records. This raises the cost of an unreviewed approval from
+citing any file to fabricating recorder output with a shell command; it is not a sandbox, and the
+researcher's approval remains self-reported. Separate researcher approval is still required
 before producing a conclusive export. A `stage_review` contains:
 
 - `outcome`: approved, approved_with_limitations, revision_required or blocked;
 - `artifact`: exact reviewed handoff path/hash;
-- `scientific-reviewer` and `reproducibility-auditor`: report path/hash references.
+- `scientific-reviewer` and `reproducibility-auditor`: the `review:` references printed by `recover.py`.
 
 Then record the researcher's `stage_approval` with `approved_by: "researcher"`,
 `authorization` (exact quotation or durable request reference), `artifact`,

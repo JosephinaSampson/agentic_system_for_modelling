@@ -40,6 +40,17 @@
   fit rows. Results are unchanged without replicates and **change with them**; the
   bundle `RUNTIME_VERSION` is 3, so jobs built earlier must be rebuilt before import
   or hold-out scoring.
+- **A stage review must cite recorded reviewer runs.** A `stage_review` accepted any existing file as
+  the scientific-reviewer and reproducibility-auditor reports, so a review could be recorded, and the
+  gate passed, without either reviewer having run, or by reusing reports of another artifact. The
+  invocation recorder now captures reviewer runs under `runs/<reviewer>/<agentId>/`
+  (`recover.py --specialist scientific-reviewer|reproducibility-auditor`), and a review reference must be
+  such a `report.md`, bound by its `invocation.json` to that role, report and brief, with the brief naming
+  the reviewed artifact's sha256. A new `recorder_write_guard.py` hook refuses file-tool writes to
+  reviewer folders and invocation records. **Existing models:** reviews recorded before this change cite
+  files under `runs/orchestrator/reviews/` and no longer pass the gate; re-run `/validate-stage` before
+  the next downstream dispatch. **Codex:** it has no reviewer specialists, so stage reviews must be run
+  from Claude Code. A shell command can still fabricate records; this is not a sandbox.
 
 ## 1.2.0 — 2026-11-18
 

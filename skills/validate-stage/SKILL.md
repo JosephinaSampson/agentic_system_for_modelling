@@ -36,7 +36,11 @@ already include ODE artifacts. Successful solves are not biological validation.
 ## Sequential review gate
 
 Complete both independent scientific review and reproducibility audit before any
-downstream dispatch. Persist reports under runs/orchestrator/reviews/<session>/.
+downstream dispatch. A stage_review is valid only when both reports are recorded reviewer runs
+(`runs/scientific-reviewer/<id>/report.md` and `runs/reproducibility-auditor/<id>/report.md`, written by
+the invocation recorder with a brief that names the reviewed artifact sha256). Codex has no reviewer
+specialists yet, so it cannot produce these: run the stage review from Claude Code and record it there,
+then continue. Never write a report into those folders or cite another file as a review.
 Use scripts/state.py record for a stage_review record identifying exact session,
 artifact hash, both report paths/hashes and outcome approved, approved_with_limitations,
 revision_required or blocked. Then obtain and record researcher stage_approval for

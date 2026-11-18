@@ -137,6 +137,7 @@ def data_analyst_errors(root: Path, user_skills: Path | None = None) -> list[str
     # Each guard must be wired to every tool it covers, and must block when it cannot run:
     # Claude Code blocks only on exit 2, so a missing interpreter (exit 127) would allow the call.
     for tools, script in ((('Bash',), 'data_orchestrator_guard.py'),
+                          (('Write', 'Edit', 'MultiEdit', 'NotebookEdit'), 'recorder_write_guard.py'),
                           (('Agent', 'Task', 'SendMessage'), 'stage_gate_guard.py')):
         commands = [str(h.get('command', '')) for group in hooks if isinstance(group, dict)
                     and set(tools) <= set(str(group.get('matcher', '')).split('|'))

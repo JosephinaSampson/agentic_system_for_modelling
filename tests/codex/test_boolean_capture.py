@@ -13,6 +13,7 @@ from scripts.capture.artifact_capture import boolean_artifact_root
 from scripts.capture.record_neko_boolean_handoff import record_neko
 from scripts.capture.record_maboss_physicell_handoff import record_maboss
 from scripts import gate, state
+from tests.support.reviews import recorded_reviews
 
 try:
     from mcp_biomodelling_servers.handoff import (
@@ -190,10 +191,7 @@ class BooleanCaptureTests(unittest.TestCase):
             gate.check(self.project, 'multicellular', session, ['A'])
         review = {'id': 'review-v2', 'kind': 'stage_review', 'session_id': session,
                   'stage': 'boolean-dynamics', 'outcome': 'approved', 'artifact': artifact}
-        for role in ('scientific-reviewer', 'reproducibility-auditor'):
-            report = self.project / 'runs' / (role + '.md')
-            report.write_text('Independent synthetic fixture review.')
-            review[role] = {'path': report.relative_to(self.project).as_posix(), 'sha256': state.digest(report)}
+        review.update(recorded_reviews(self.project, review["artifact"], review["id"]))
         state.update(self.project, 'record', review)
         approval = {'id': 'approval-v2', 'kind': 'stage_approval', 'session_id': session,
                     'stage': 'boolean-dynamics', 'downstream_stage': 'multicellular',

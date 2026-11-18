@@ -18,6 +18,7 @@ from tests.data.test_physicell_projection import DICT as MC_DICT, PROJ as MC_PRO
 from tests.data.test_ode_mapping import SESSION as ODE_SESSION
 from tests.data.test_mapping import (BNET, BNET_TEXT, NEKO, SOURCE, STANDALONE_BNET, STANDALONE_OUTPUTS,
                                      MappingFixture, run_cli, sha)
+from tests.support.reviews import recorded_reviews
 
 REFUSAL = "brief references data-analyst artifacts without a DATA_INPUT line; see CLAUDE.md"
 HOOK = state.ROOT / ".claude" / "scripts" / "stage_gate_guard.py"
@@ -94,10 +95,7 @@ class DataInputFixture(MappingFixture):
             "network-curator", NEKO, "topology", "active", "—", "pending", ref["path"]])))
         review = {"id": "review-neko", "kind": "stage_review", "session_id": NEKO, "stage": "topology",
                   "outcome": "approved", "artifact": ref}
-        for role in ("scientific-reviewer", "reproducibility-auditor"):
-            report = self.root / "runs" / f"{role}.md"
-            report.write_text("independent bounded review", encoding="utf-8")
-            review[role] = {"path": f"runs/{role}.md", "sha256": sha(report)}
+        review.update(recorded_reviews(self.root, review["artifact"], review["id"]))
         state.update(self.root, "record", review)
         state.update(self.root, "record", {
             "id": "approval-neko", "kind": "stage_approval", "session_id": NEKO, "stage": "topology",
@@ -702,8 +700,7 @@ class StaleMappingTests(DataInputFixture):
         ref = {"path": f"runs/network-curator/{NEKO}/handoff-2.json", "sha256": sha(second)}
         review = {"id": "review-neko-2", "kind": "stage_review", "session_id": NEKO, "stage": "topology",
                   "outcome": "approved", "artifact": ref}
-        for role in ("scientific-reviewer", "reproducibility-auditor"):
-            review[role] = {"path": f"runs/{role}.md", "sha256": sha(self.root / "runs" / f"{role}.md")}
+        review.update(recorded_reviews(self.root, review["artifact"], review["id"]))
         state.update(self.root, "record", review)
         state.update(self.root, "record", {
             "id": "approval-neko-2", "kind": "stage_approval", "session_id": NEKO, "stage": "topology",
@@ -1488,10 +1485,7 @@ class PhysiCellDataInputTests(ProjectionBase):
         ref = {"path": str(path.relative_to(self.root)), "sha256": sha(path)}
         review = {"id": "review-hypoxic", "kind": "stage_review", "session_id": MC_MABOSS,
                   "stage": "boolean-dynamics", "outcome": "approved", "artifact": ref}
-        for role in ("scientific-reviewer", "reproducibility-auditor"):
-            report = self.root / "runs" / f"{role}-hypoxic.md"
-            report.write_text("independent bounded review")
-            review[role] = {"path": str(report.relative_to(self.root)), "sha256": sha(report)}
+        review.update(recorded_reviews(self.root, review["artifact"], review["id"]))
         state.update(self.root, "record", review)
         state.update(self.root, "record", {
             "id": "approval-hypoxic", "kind": "stage_approval", "session_id": MC_MABOSS, "stage": "boolean-dynamics",
@@ -1540,6 +1534,7 @@ class PhysiCellDataInputTests(ProjectionBase):
         review = json.loads(json.dumps([r for r in state.records((self.root / "DECISIONS.md").read_text())
                                         if r.get("id") == "review-hypoxic"][0]))
         review.update(id="review-later", artifact={"path": str(later.relative_to(self.root)), "sha256": sha(later)})
+        review.update(recorded_reviews(self.root, review["artifact"], review["id"]))
         state.update(self.root, "record", review)
         problems = physicell_design.check(self.root, DESIGN_B)
         self.assertEqual(len(problems), 2, problems)
@@ -1594,6 +1589,7 @@ class PhysiCellDataInputTests(ProjectionBase):
         review = json.loads(json.dumps([r for r in state.records((self.root / "DECISIONS.md").read_text())
                                         if r.get("id") == "review-hypoxic"][0]))
         review.update(id=f"review-hypoxic-{suffix}", artifact=ref)
+        review.update(recorded_reviews(self.root, review["artifact"], review["id"]))
         state.update(self.root, "record", review)
         state.update(self.root, "record", {
             "id": f"approval-hypoxic-{suffix}", "kind": "stage_approval", "session_id": MC_MABOSS,
@@ -1613,6 +1609,7 @@ class PhysiCellDataInputTests(ProjectionBase):
         review = json.loads(json.dumps([r for r in state.records((self.root / "DECISIONS.md").read_text())
                                         if r.get("id") == "review-hypoxic"][0]))
         review.update(id="review-X", artifact=xref)
+        review.update(recorded_reviews(self.root, review["artifact"], review["id"]))
         state.update(self.root, "record", review)
         self.re_review_and_approve(hypoxic, "2")
         self.two_handoff_design(hypoxic)

@@ -391,5 +391,9 @@ that gates and approvals bind to.
 Marketplace modelling plugins must not be enabled in this project: they would
 expose modelling tools to the orchestrator.
 
+Stage reviews are Claude-only until Codex has reviewer specialists: a `stage_review` must cite recorded
+`scientific-reviewer` and `reproducibility-auditor` runs, which the Codex dispatcher cannot produce. Run
+`validate-stage` from Claude Code; never author a review report yourself.
+
 The `data-analyst` specialist is Claude-only until Codex parity. Codex orchestrators must
 not run vendored scripts under `vendor/scientific-agent-skills` or use `.venv-data`.

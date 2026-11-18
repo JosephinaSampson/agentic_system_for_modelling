@@ -173,7 +173,12 @@ warnings and failures.
 ## Required stage workflow
 
 Before each downstream dispatch, complete validate-stage, wait for both independent
-reviews, and obtain exact session/revision/output approval. Any later interaction,
+reviews, and obtain exact session/revision/output approval. Give each reviewer the reviewed
+artifact's path and sha256 in its brief. After each reviewer completion notification run
+`python3 scripts/capture/recover.py --specialist scientific-reviewer|reproducibility-auditor --agent-id <agentId>`
+and cite the `review:` reference it prints in the stage_review record: a review is valid only as the
+recorder's `runs/<reviewer>/<agentId>/report.md`. Never write, copy or summarise a review into those
+folders or cite any other file as a review; a new or re-exported artifact needs new reviewer runs. Any later interaction,
 rule, readout or rate edit supersedes it: re-review and re-approve. Record review and approval
 with state.py; run and quote `python3 scripts/gate.py check <stage> <session> --outputs ...`
 (for biomass_ode the outputs are every node_id of the exported graph; for a multicellular dispatch applying a

@@ -121,6 +121,42 @@ class RecoverTests(unittest.TestCase):
         self.assertTrue((self.root / result["capture_path"]).is_dir())
         self.assertIsNone(result["report_md"])
 
+    def test_reviewer_run_is_recorded_from_its_own_final_message(self):
+        # a reviewer has no session: session=None events are a brief and a handback report
+        self.place(session=None)
+        for role in ("scientific-reviewer", "reproducibility-auditor"):
+            result = self.run_recover(specialist=role)
+            self.assertEqual((result["status"], result["session_id"]), ("recorded", None))
+            self.assertEqual(result["capture_path"], f"runs/{role}/{AID}")
+            folder = self.root / result["capture_path"]
+            self.assertEqual((folder / "report.md").read_text(), REPORT + "\n")
+            self.assertEqual((folder / "task.txt").read_text(), "Curate\n")
+            meta = json.loads((folder / "invocation.json").read_text())
+            self.assertEqual((meta["record_type"], meta["specialist"], meta["invocation_id"]), ("review", role, AID))
+            self.assertEqual(result["review"], {"path": f"runs/{role}/{AID}/report.md",
+                                                "sha256": meta["report_sha256"]})
+            self.assertEqual(self.run_recover(specialist=role)["review"], result["review"])  # identical retry
+            with self.assertRaisesRegex(ValueError, "no session"):
+                self.run_recover(specialist=role, session="sess-1")
+        self.assertFalse((self.root / "runs/orchestrator").exists())  # never filed as an unbound specialist run
+        # a transcript that changed after recording is refused, never silently re-recorded
+        self.place(session=None).write_text("".join(
+            json.dumps(e) + "\n" for e in events(None, report="# Different verdict")), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "refusing overwrite"):
+            self.run_recover(specialist="scientific-reviewer")
+
+    def test_reviewer_cli_prints_the_reference_for_the_review_record(self):
+        self.place(session=None)
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": str(self.root)}
+        done = subprocess.run([sys.executable, str(ROOT / "scripts/capture/recover.py"), "--specialist",
+                               "scientific-reviewer", "--agent-id", AID, "--transcript-root", str(self.troot)],
+                              env=env, text=True, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        lines = done.stdout.splitlines()
+        self.assertEqual(lines[-1], "RECOVERED scientific-reviewer review recorded")
+        reference = json.loads(lines[-2].removeprefix("review: "))
+        self.assertEqual(reference["path"], f"runs/scientific-reviewer/{AID}/report.md")
+
     def test_cli_last_line_and_exit_codes(self):
         self.place()
         env = {**os.environ, "CLAUDE_PROJECT_DIR": str(self.root)}

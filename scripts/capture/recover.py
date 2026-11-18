@@ -31,7 +31,7 @@ if __package__ in (None, ""):  # run as a script: make the repo importable
 
 from scripts.capture.exports import capture_exports
 from scripts.capture.index import SPECIALISTS
-from scripts.capture.record_invocation import _index_registers, record, session_ids
+from scripts.capture.record_invocation import REVIEWERS, _index_registers, record, session_ids
 from scripts.capture.transcripts import check_agent_id, default_transcript_root, find_transcript
 from scripts.data.common import project_root
 
@@ -66,11 +66,21 @@ def _exports(root: Path, specialist: str, session: str, agent_id: str, transcrip
 
 def recover(root: Path, specialist: str, agent_id: str, session: str | None,
             transcript_root: Path | None) -> dict:
-    if specialist not in SPECIALISTS:
-        raise ValueError(f"unknown specialist: {specialist!r} (expected one of {', '.join(sorted(SPECIALISTS))})")
+    if specialist not in SPECIALISTS and specialist not in REVIEWERS:
+        raise ValueError(f"unknown specialist: {specialist!r} (expected one of "
+                         f"{', '.join(sorted({*SPECIALISTS, *REVIEWERS}))})")
     check_agent_id(agent_id)
     root = Path(root).resolve()
     transcript = find_transcript(root, agent_id, transcript_root or default_transcript_root())
+    if specialist in REVIEWERS:
+        # A reviewer has no session and no exports: record (or re-verify, byte for byte) its run.
+        if session is not None:
+            raise ValueError("a reviewer run has no session; omit --session")
+        result = record(root, {"agent_type": specialist, "agent_id": agent_id,
+                               "agent_transcript_path": str(transcript), "stop_hook_active": False,
+                               "hook_event_name": "SubagentStop"})
+        return {"status": "recorded", "session_id": None, "capture_path": result["invocation_path"],
+                "report_md": None, "review": result["report"], "transcript": str(transcript), "exports": None}
     bound = _bind(root, transcript, specialist, agent_id, session)
     if bound is not None:
         relative = f"runs/{specialist}/{bound}/invocation/{agent_id}"
@@ -149,6 +159,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"export REFUSED: {row['tool']} {row['format']} {row['source_path']}: {row['reason']}")
         if exports["path"]:
             print(f"exports: {exports['path']}/exports.json")
+    if result.get("review"):
+        # the reference a stage_review record cites for this role, ready to paste
+        print(f"review: {json.dumps(result['review'], sort_keys=True)}")
+        print(f"RECOVERED {args.specialist} review {result['status']}")
+        return 0
     print(f"RECOVERED {args.specialist} {result['session_id'] or 'unbound'} {result['status']}")
     if args.specialist == "boolean-dynamics-modeler":
         _clean_server_tmp()

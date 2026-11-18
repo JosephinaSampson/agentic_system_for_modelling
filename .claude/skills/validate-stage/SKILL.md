@@ -74,7 +74,13 @@ Preserve independent reviewer/auditor requirements; missing definitions remain b
 ## Sequential review gate
 
 Complete both independent scientific review and reproducibility audit before any
-downstream dispatch. Persist reports under runs/orchestrator/reviews/<session>/.
+downstream dispatch. Name the reviewed artifact's path and sha256 in each reviewer's brief. After each
+reviewer finishes, run `python3 scripts/capture/recover.py --specialist <scientific-reviewer or
+reproducibility-auditor> --agent-id <agentId>`: the recorder writes the reviewer's own final message to
+`runs/<reviewer>/<agentId>/report.md` with its brief and invocation record, and prints the `review:`
+reference (path and sha256) to cite. No other file is accepted as a review, the brief must name the
+artifact sha256, and a different artifact needs new reviewer runs. Your own comparison of the two reports
+belongs under runs/orchestrator/reviews/<session>/ and is not a review.
 Use scripts/state.py record for a stage_review record identifying exact session,
 artifact hash, both report paths/hashes and outcome approved, approved_with_limitations,
 revision_required or blocked. Then obtain and record researcher stage_approval for

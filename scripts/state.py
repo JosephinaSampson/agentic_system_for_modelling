@@ -70,6 +70,38 @@ def checked_artifact(root, item):
     return path
 
 
+REVIEWERS = ("scientific-reviewer", "reproducibility-auditor")
+
+
+def checked_review(root, role, ref, reviewed):
+    """A stage_review's report reference for `role`: the report.md of a recorded run of that reviewer.
+
+    Any existing file used to satisfy a review reference, so a review could be recorded without a reviewer
+    having run. The report must now be `runs/<role>/<agent id>/report.md`, written by the invocation recorder
+    (scripts/capture/record_invocation.py) from the reviewer's own final message, with the invocation.json
+    beside it naming that role and the sha256 of this report and of the recorded brief; and the brief must
+    name the sha256 of `reviewed`, the artifact the record says was reviewed."""
+    path = checked_artifact(root, ref)
+    parts = Path(ref["path"]).parts
+    if len(parts) != 4 or parts[:2] != ("runs", role) or parts[3] != "report.md" or Path(ref["path"]).as_posix() != ref["path"]:
+        raise ValueError(f"{role} report must be runs/{role}/<agent id>/report.md, as written by the invocation "
+                         "recorder (scripts/capture/recover.py after the reviewer finishes)")
+    identifier(parts[2])
+    task = artifact(root, f"runs/{role}/{parts[2]}/task.txt")
+    try:
+        meta = json.loads(artifact(root, f"runs/{role}/{parts[2]}/invocation.json").read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"{role} report has no readable invocation record: {exc}") from exc
+    if not isinstance(meta, dict) or (meta.get("record_type"), meta.get("specialist"), meta.get("invocation_id")) != ("review", role, parts[2]):
+        raise ValueError(f"{role} report is not a recorded run of that reviewer")
+    if meta.get("report_sha256") != ref["sha256"] or meta.get("task_sha256") != digest(task):
+        raise ValueError(f"{role} report or brief differs from its invocation record")
+    if reviewed["sha256"] not in task.read_text(encoding="utf-8"):
+        raise ValueError(f"the recorded {role} brief does not name the reviewed artifact sha256 "
+                         f"{reviewed['sha256']}; give each reviewer the artifact path and sha256")
+    return path
+
+
 # Characters a Markdown table cell cannot hold: the delimiter, and every control, line- or
 # paragraph-separator character (str.splitlines breaks on \x0b, \x0c, \x1c-\x1e, \x85, U+2028, U+2029).
 UNSAFE_CELL_CATEGORIES = {"Cc", "Zl", "Zp"}
@@ -165,9 +197,9 @@ def validate_record(root, item):
     if kind == "stage_review":
         if item.get("outcome") not in {"approved", "approved_with_limitations", "revision_required", "blocked"}:
             raise ValueError("invalid review outcome")
-        for role in ("scientific-reviewer", "reproducibility-auditor"):
-            checked_artifact(root, item.get(role))
         checked_artifact(root, item.get("artifact"))
+        for role in REVIEWERS:
+            checked_review(root, role, item.get(role), item["artifact"])
     elif kind in {"stage_approval", "standalone_approval"}:
         if item.get("approved_by") != "researcher" or not item.get("authorization"):
             raise ValueError("explicit researcher authorization quotation/reference required")
