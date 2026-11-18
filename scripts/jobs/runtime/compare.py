@@ -45,7 +45,8 @@ kind when there are some, else the fit rows (a t0 value or a reference is only a
                           rows at the same converted time (math.isclose, rel_tol 1e-9; divisor rows as above)
   max_normalized          every row of the group, fit or hold-out, is divided by the FIT rows' scale: prediction
                           v(t) / max of v over the simulated points (condition, time) of the group's fit rows;
-                          target = value / max of the group's fit values (nan unless that max is > 0, or when the
+                          target = value / max over those points of the mean of the point's fit values, so
+                          replicate rows share the simulation's scale (nan unless that max is > 0, or when the
                           group has no fit row). A hold-out row is thus scored on the fit's scale (a single
                           hold-out row is not 1/1 by construction), and needed(spec, "holdout") includes the fit
                           rows' points of such a group.
@@ -151,6 +152,20 @@ def _divisors(rows: list[dict], use: str) -> list[dict]:
     return same if same or use == "fit" else [o for o in rows if o["use"] == "fit"]
 
 
+def fit_scale(points: list[tuple]) -> float:
+    """The data normaliser of a max_normalized group: the largest per-point mean of its fit rows, from
+    (condition, time, value) triples; nan without rows.
+
+    The prediction is divided by the largest simulated value over the same (condition, time) points, and a
+    simulation has one value per point. Replicate rows of one point are therefore averaged before the maximum
+    is taken: the maximum of the single rows would be the largest replicate, above the mean the model is asked
+    to match, and would pull every normalised target of the group down."""
+    by_point: dict = {}
+    for condition, time, value in points:
+        by_point.setdefault((condition, time), []).append(value)
+    return max((sum(v) / len(v) for v in by_point.values()), default=math.nan)
+
+
 def _normalise_time_course(rule: dict, entries: list[dict]) -> None:
     """The data side of a time_course rule, normalised exactly like the predictions (decision N)."""
     method = rule["method"]
@@ -167,7 +182,7 @@ def _normalise_time_course(rule: dict, entries: list[dict]) -> None:
             e["trivial"] = e["condition"] == rule["reference"]  # v_ref(t)/v_ref(t)
         elif method == "max_normalized":
             fit = [o for o in group if o["use"] == "fit"]
-            top = max(o["value"] for o in fit) if fit else math.nan
+            top = fit_scale([(o["condition"], o["time"], o["value"]) for o in fit])
             e["target"] = e["value"] / top if top > 0 else math.nan
             # every fit row at the fit rows' only simulated point is v/max(v) = v/v
             e["trivial"] = e["use"] == "fit" and len({(o["condition"], o["time"]) for o in fit}) == 1

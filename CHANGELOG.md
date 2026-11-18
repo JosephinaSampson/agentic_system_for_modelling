@@ -32,6 +32,14 @@
   and `scripts/check_isolation.py` fails when the dispatch gate is not wired to
   `Agent|Task|SendMessage`, a guard lacks `|| exit 2`, or `disableAllHooks` is set.
   Re-run setup to regenerate a managed-environment literature hook.
+- **`max_normalized` calibration no longer biases fits when replicates are separate
+  rows.** The data were divided by the largest single fit row, the predictions by the
+  largest simulated point. With replicates the largest row lies above the mean the
+  model is asked to match, so every normalised target was too low (about 9% for
+  replicates of 0.9/1.0/1.1). The data scale is now the largest per-point mean of the
+  fit rows. Results are unchanged without replicates and **change with them**; the
+  bundle `RUNTIME_VERSION` is 3, so jobs built earlier must be rebuilt before import
+  or hold-out scoring.
 
 ## 1.2.0 — 2026-11-18
 

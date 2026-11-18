@@ -52,7 +52,8 @@ Schema (schema_version 1; every key below is required unless marked optional):
                      relative_to_condition  each row / the mean of the reference-condition rows of the same
                                             readout at the same converted time (divisor rows as above; required,
                                             non-zero; the reference rows belong to the rule)
-                     max_normalized         every row / the max of the rule's FIT rows of the same readout
+                     max_normalized         every row / the max of the rule's FIT rows of the same readout,
+                                            replicate rows of one (condition, time) averaged first
                                             (positive; hold-out rows too, so they are scored on the fit's scale;
                                             hold-out rows without fit rows of their readout are refused); the
                                             prediction uses the same fit rows' simulated max
@@ -108,6 +109,7 @@ from scripts.data import approvals  # noqa: E402
 from scripts.data import sources as user_sources  # noqa: E402
 from scripts.data.common import finite_number as _is_number  # noqa: E402
 from scripts.data.common import RUNS_ROOT, project_root, reject_symlinks, sha256_file, strict_json  # noqa: E402
+from scripts.jobs.runtime import compare  # noqa: E402 - the one definition of the max_normalized scale
 from scripts.ode import measurements as table, model_zip  # noqa: E402
 
 KEYS = ("kind", "schema_version", "inputs", "time", "dose", "values", "readouts", "conditions", "rules", "fit",
@@ -827,10 +829,11 @@ class _Checker:
                     for row in fit:  # every fit row at the only fit point is v/max(v) = v/v
                         self.trivial[row["measurement_id"]] = (f"{label}: {row['measurement_id']} (the only fit "
                                                                f"point of readout {readout})")
-                top = max(row["value"] for row in fit)
-                if top <= 0:
-                    self.error(f"{label}: the max of the fit rows of readout {readout} is {top!r}; max_normalized "
-                               "needs a positive maximum")
+                # the scale compare.py divides by: replicates of one point are averaged first
+                top = compare.fit_scale([(row["condition"], self.converted(row), row["value"]) for row in fit])
+                if not top > 0:
+                    self.error(f"{label}: the max of the fit rows of readout {readout} (per-point means) is "
+                               f"{top!r}; max_normalized needs a positive maximum")
 
     def same_time(self, label: str, rows: list[dict], time, what: str) -> None:
         """Each row's time, converted to the model unit, must equal `time` (relative tolerance 1e-9)."""

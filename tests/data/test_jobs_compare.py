@@ -109,6 +109,23 @@ class CompareTests(unittest.TestCase):
         sims["ctrl"]["obs"][10.0] = sims["ctrl"]["obs"][20.0] = sims["drug"]["obs"][10.0] = 0.0
         self.assertTrue(math.isnan(compare.predict(spec, sims)["m1"]))
 
+    def test_max_normalized_replicates_share_the_simulation_scale(self):
+        # Three replicates per point. The model has one value per point, so the data scale is the largest
+        # replicate MEAN (1.0), not the largest single row (1.1): a model that reproduces the means exactly
+        # must have a residual of only the replicate scatter, with no bias on the non-peak point.
+        rows = [row("p1", "ctrl", 10.0, 0.9), row("p2", "ctrl", 10.0, 1.0), row("p3", "ctrl", 10.0, 1.1),
+                row("q1", "ctrl", 20.0, 0.5), row("q2", "ctrl", 20.0, 0.5), row("q3", "ctrl", 20.0, 0.5)]
+        ids = ["p1", "p2", "p3", "q1", "q2", "q3"]
+        spec = compare.resolve(mapping([tc("max_normalized", ids)]), rows)
+        targets = [spec["measurements"][m]["target"] for m in ids]
+        for got, want in zip(targets, [0.9, 1.0, 1.1, 0.5, 0.5, 0.5]):
+            self.assertAlmostEqual(got, want)
+        pred = compare.predict(spec, {"ctrl": {"obs": {0.0: 7.0, 10.0: 2.0, 20.0: 1.0}}})
+        for m in ("q1", "q2", "q3"):
+            self.assertAlmostEqual(pred[m], spec["measurements"][m]["target"])  # means matched: no bias
+        self.assertAlmostEqual(sum((pred[m] - spec["measurements"][m]["target"]) ** 2 for m in ids), 0.02)
+        self.assertTrue(math.isnan(compare.fit_scale([])))
+
     def test_max_normalized_hold_out_never_changes_fit_targets_or_predictions(self):
         # review compare.py:197: the normaliser is computed per `use`, on both sides
         fit = [row("m1", "ctrl", 10.0, 1.0), row("m2", "ctrl", 20.0, 4.0)]
