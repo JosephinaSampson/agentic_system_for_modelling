@@ -165,5 +165,6 @@ The procedure is in [ODE workflow](ode-workflow.md). In outline:
 ## 8. Roadmap
 
 1. **Implemented:** the data-to-ODE mapping and portable calibration jobs above.
-2. **Next:** sub-project 4, data to PhysiCell settings with a `physicell-build` skill.
+2. **Implemented:** sub-project 4, data to PhysiCell settings with a `physicell-build` skill; see
+   [data to PhysiCell architecture](data-to-physicell-architecture.md).
 3. **Later:** Codex parity; identifiability analysis; an offline wheelhouse.

@@ -22,6 +22,7 @@ framework helps you build a model in stages.
 | **Literature evidence** | One report per interaction, checked against PubMed for existence, direction (activation or inhibition) and context | PubMed |
 | **Boolean dynamics** | A model in which each molecule is ON or OFF. You can simulate wild type, knockouts, constitutive activation and drug-like perturbations, and compare their outcomes | MaBoSS |
 | **Mechanistic ODEs** (optional) | A model with continuous concentrations and reaction rates, for questions that need quantities rather than ON/OFF states | BioMASS |
+| **Your data** (optional) | Analysis of public datasets or your own measurements. Results come back as proposals you approve; approved data can suggest the starting genes of the network, define perturbations and expected results for the Boolean model, fit ODE parameters, and set values in the tissue simulation | data analyst |
 | **Multicellular configuration** | A tissue-level simulation set-up in which cells use the Boolean model to decide behaviours such as proliferation or death | PhysiCell / PhysiBoSS |
 
 What it will **not** do:
@@ -32,15 +33,19 @@ What it will **not** do:
   reproduces a result, is a hypothesis consistent with that result. It is not
   validated biology.
 - **It does not run tissue simulations.** It prepares PhysiCell configuration files
-  for an existing PhysiCell installation.
-- **ODEs have limits.** It does not calibrate ODE parameters to data, run
-  sensitivity analyses, or couple ODE models to PhysiCell.
+  and can compile a PhysiCell project with them; you run the simulation.
+- **ODEs have limits.** It can fit ODE parameters to your measurements, but it does
+  not tell you whether those parameters are identifiable, run sensitivity analyses,
+  or couple ODE models to PhysiCell.
+- **Data never enter a model on their own.** Every dataset, mapping and fitted value
+  is shown to you first and used only after you approve it.
 
 ## How a working session goes
 
 You talk to one assistant in Claude Code, the **orchestrator**. It plans the work
 with you and sends each technical task to a **specialist**: the network curator,
-literature reviewer, Boolean modeller, multicellular configurator or ODE modeller.
+literature reviewer, Boolean modeller, multicellular configurator, ODE modeller or
+data analyst.
 Each specialist can only touch its own tool. The orchestrator itself cannot change
 any model directly; it delegates, reads the results back, and explains them to you.
 
@@ -86,6 +91,11 @@ content.
 - **Data dictionary.** The orchestrator records identifiers, units and provenance in
   `DATA_DICTIONARY.md`. Tell it the units of your measurements: it never guesses
   units.
+- **Data analysis.** If the data analyst is installed (`--with-data`, Claude Code
+  only), you can ask for an analysis of public data (for example DepMap, GEO or
+  TCGA) or of files in `inputs/`. It returns tables, figures and proposals, each
+  with its source and units. You decide which proposals are used, and the model
+  receives exactly those. See the [data workflow](data-workflow.md).
 - **Validation targets.** The results the model should reproduce become the
   validation plan, for example *"knocking out B prevents activation of C"* or
   *"under drug Y, proliferation turns OFF"*.

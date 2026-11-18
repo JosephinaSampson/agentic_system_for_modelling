@@ -163,5 +163,7 @@ the dispatch hook. See the
 
 1. **Sub-project 2 (implemented):** typed data-to-model handoffs for NeKo and MaBoSS; see
    [data-to-model-handoffs-architecture.md](data-to-model-handoffs-architecture.md).
-2. **Later:** BioMASS and PhysiCell data inputs; Codex parity (pending, low priority); a
-   possible data MCP server or OS-level sandbox.
+2. **Implemented:** BioMASS data inputs
+   ([data to ODE calibration](data-to-ode-calibration-architecture.md)) and PhysiCell data inputs
+   ([data to PhysiCell](data-to-physicell-architecture.md)).
+3. **Later:** Codex parity (pending, low priority); a possible data MCP server or OS-level sandbox.

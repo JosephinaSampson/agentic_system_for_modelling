@@ -185,5 +185,7 @@ The step-by-step procedure is in [data workflow](data-workflow.md). In outline:
 1. **Implemented:** the typed handoffs above.
 2. **Implemented (sub-project 3):** BioMASS data inputs and portable calibration jobs; see
    [data to ODE calibration architecture](data-to-ode-calibration-architecture.md).
-3. **Later:** PhysiCell data inputs; Codex parity (pending, low priority);
+3. **Implemented (sub-project 4):** PhysiCell data inputs; see
+   [data to PhysiCell architecture](data-to-physicell-architecture.md).
+4. **Later:** Codex parity (pending, low priority);
    path-level scoping of data mentions; an explicit revocation record.

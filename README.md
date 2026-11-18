@@ -14,7 +14,7 @@ state lives in version-controlled files, not in chat history.
 > [user guide](docs/user-guide.md). It explains what the framework can do for your
 > question, how a session goes, which decisions you make and how to read the results.
 
-Release **1.0.3**, tested with `mcp-biomodelling-servers` **2.5.2** (NeKo
+Release **1.2.0**, tested with `mcp-biomodelling-servers` **2.5.2** (NeKo
 `nekomata` 1.10.3, PhysiCell Settings 0.6.3, bundled cmaboss, BioMASS 0.14). See
 [`CHANGELOG.md`](CHANGELOG.md) for changes and known limitations, and
 [`ROADMAP.md`](ROADMAP.md) for planned releases.
@@ -28,11 +28,12 @@ Release **1.0.3**, tested with `mcp-biomodelling-servers` **2.5.2** (NeKo
 | Literature evidence | Edge-by-edge PubMed review of existence, direction, sign, directness and context, written as immutable reports per NeKo session | PubMed MCP |
 | Boolean dynamics | Stochastic Boolean simulation, wild type versus mutations under matched settings, durable run IDs, researcher-named readout nodes and rates, and explicitly gated rule refinement against your validation targets | MaBoSS |
 | Mechanistic ODEs (optional) | ODE models from an approved NeKo graph, a Text2Model file or explicit reactions, with claim-level evidence and provisional/final bundles | BioMASS |
+| Data (Claude Code only) | Retrieval and analysis of public and your own data into hashed products and proposals you approve; approved data seed NeKo networks, define MaBoSS perturbations and validation targets, calibrate ODE parameters (locally, over SSH or on SLURM) and set PhysiCell values with explicit units | `data-analyst`, `scripts/data`, `scripts/jobs` |
 | Multicellular configuration | PhysiCell/PhysiBoSS domain, substrates, cell types, Cell Rules, Boolean-to-phenotype mappings, user parameters, initial-cell CSV and portable configuration bundles | PhysiCell Settings |
 | Provenance and review | Session registry and lineage, hashed artifact capture, stage gates bound to exact reviewed revisions, independent scientific review and reproducibility audit, Git checkpoints and archives | this repository |
 
 What it does **not** do: it does not run PhysiCell simulations (it produces
-configuration for an existing executable), it does not treat successful execution
+configuration, and the `physicell-build` skill compiles a project ready to run), it does not treat successful execution
 as biological validation, and it never invents units, parameter values or citations.
 ODE work additionally requires the ODE readiness check to pass for the pinned
 backend; it passed on 2026-10-28 with 2.5.2 ([ODE workflow](docs/ode-workflow.md#ode-readiness-check)).
@@ -47,6 +48,7 @@ flowchart LR
     O --> BD[boolean-dynamics-modeler<br/>MaBoSS]
     O --> MC[multicellular-configurator<br/>PhysiCell]
     O --> OD[ode-modeler<br/>BioMASS, optional]
+    O --> DA[data-analyst<br/>guarded scripts, optional]
     O --> SR[scientific-reviewer<br/>read-only]
     O --> RA[reproducibility-auditor<br/>read-only]
     O <--> S[(State files, runs/, evidence/)]
