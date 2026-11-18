@@ -78,6 +78,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from tests.support.reviews import recorded_reviews
 import numpy as np
 
 session, style = Path(sys.argv[1]), sys.argv[2]
@@ -515,9 +516,7 @@ def run(tmp: Path) -> None:
         "network-curator", NEKO, "topology", "active", "—", "pending", handoff_rel])))
     review = {"id": "review-neko", "kind": "stage_review", "session_id": NEKO, "stage": "topology",
               "outcome": "approved", "artifact": neko_ref}
-    for role in ("scientific-reviewer", "reproducibility-auditor"):
-        (root / "runs" / f"{role}.md").write_text("independent bounded review", encoding="utf-8")
-        review[role] = {"path": f"runs/{role}.md", "sha256": sha_of(f"runs/{role}.md")}
+    review.update(recorded_reviews(root, review["artifact"], review["id"]))
     record_state(review)
     record_state({"id": "approval-neko", "kind": "stage_approval", "session_id": NEKO, "stage": "topology",
                   "downstream_stage": "boolean-dynamics", "outputs": outputs, "approved_by": "researcher",

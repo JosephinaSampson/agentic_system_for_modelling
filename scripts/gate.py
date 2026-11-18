@@ -12,7 +12,8 @@ import sys
 import unicodedata
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.state import ROOT, REGISTRY, checked_artifact, identifier, records, table, validate_record
+from scripts.state import (PASSING, ROOT, REGISTRY, checked_artifact, identifier, records, review_basis, table,
+                           validate_record)
 from scripts.curation_contract import check_binding, check_parent_scope, check_readout_isolation
 from scripts.data import approvals
 from scripts.data.manifest import KIND_SCHEMAS
@@ -240,7 +241,8 @@ def check(root, stage, session, outputs, artifact=None, current=None):
             )
         if row["Derived from"] not in parents:
             raise ValueError("registry upstream lineage and exported parent disagree")
-    reviews = [r for r in recs if r.get("kind") == "stage_review" and r.get("session_id") == session and r.get("stage") == upstream_stage]
+    # A stage_delta (topology only) covers an edge-only edit of a reviewed export: see state.checked_delta.
+    reviews = [r for r in recs if r.get("kind") in {"stage_review", "stage_delta"} and r.get("session_id") == session and r.get("stage") == upstream_stage]
     if not reviews:
         raise ValueError("independent scientific review and reproducibility audit have not been recorded")
     review = reviews[-1]
@@ -254,11 +256,16 @@ def check(root, stage, session, outputs, artifact=None, current=None):
         _newer_export(recs[recs.index(approval) + 1:], "stage_approval", session, upstream_stage, current,
                       "approved", approval, stage)
     validate_record(root, review)
-    if review["outcome"] not in {"approved", "approved_with_limitations"} or review["artifact"] != approval["artifact"]:
+    if (review["kind"] == "stage_review" and review["outcome"] not in PASSING) or review["artifact"] != approval["artifact"]:
         raise ValueError("latest independent review blocks or covers a different artifact revision")
     if recs.index(review) > recs.index(approval):
         raise ValueError("researcher approval must follow the independent review")
-    return {"passed": True, "downstream_stage": stage, "upstream_session_id": session, "outputs": outputs, "approval_id": approval["id"], "review_id": review["id"], "artifact": approval["artifact"]}
+    result = {"passed": True, "downstream_stage": stage, "upstream_session_id": session, "outputs": outputs, "approval_id": approval["id"], "review_id": review["id"], "artifact": approval["artifact"]}
+    if review["kind"] == "stage_delta":
+        # say plainly what the reviewers did and did not read
+        basis, changed = review_basis(root, recs, review)
+        result.update(review_id=basis["id"], delta_id=review["id"], edges_changed_since_review=changed)
+    return result
 
 
 def standalone(root, stage, decision_id, outputs):
@@ -323,6 +330,27 @@ def check_task(root, specialist, task, design=None):
         except ValueError as exc:
             refusals.append(f"{ref['path']}: {exc}")
     raise ValueError("no design handoff has a current approval of the STAGE_GATE outputs: " + "; ".join(refusals))
+
+
+NEKO_SOURCE = re.compile(r"runs[\\/]+(?:\.[\\/]+)*network-curator|neko-to-biomass|import_neko_handoff", re.I)
+ODE_SOURCE_REFUSAL = ("ode-modeler brief names a NeKo source (a runs/network-curator path, a neko-to-biomass handoff "
+                      "or import_neko_handoff) without a first-line STAGE_GATE; run scripts/gate.py check "
+                      "biomass_ode first")
+
+
+def check_ode_source(root, task):
+    """The stage gate of an ode-modeler brief that has no calibration DATA_INPUT.
+
+    A first-line STAGE_GATE is resolved like any other (check_task: the biomass_ode upstream approval or a
+    standalone_approval). A brief without one may not name a NeKo source: an ODE model built from a NeKo graph
+    needs the reviewed, approved and current neko-to-biomass export. Standalone Text2Model and reaction briefs
+    and work on existing BioMASS sessions carry no envelope and stay under docs/ode-contract.md; returns None."""
+    first = task.splitlines()[0] if task else ""
+    if first.startswith("STAGE_GATE "):
+        return check_task(root, "ode_modeler", task)
+    if NEKO_SOURCE.search(_detection_text(task)):
+        raise ValueError(ODE_SOURCE_REFUSAL)
+    return None
 
 
 # Detection runs on a normalised copy of the prompt (see _detection_text); any spelling

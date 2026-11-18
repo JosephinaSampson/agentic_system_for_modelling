@@ -30,7 +30,7 @@ hooks:
     - matcher: "Write"
       hooks:
         - type: command
-          command: "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/specialist_report_guard.py\" network-curator"
+          command: "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/specialist_report_guard.py\" network-curator || exit 2"
 ---
 
 You are the NeKo signalling-network specialist.

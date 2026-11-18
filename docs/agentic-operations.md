@@ -66,13 +66,42 @@ blocks marked `<!-- governance-record -->` in DECISIONS.md, avoiding a competing
 approval database. Every record has a unique `id`, `kind`, `stage`, and full
 `session_id` (except standalone authorization).
 
-Before downstream dispatch, independent review must finish; persist both reports in
-`runs/orchestrator/reviews/<session>/`. Separate researcher approval is still required
+Before downstream dispatch, independent review must finish. Each reviewer's brief names the
+reviewed artifact's path and sha256, and after it finishes
+`python3 scripts/capture/recover.py --specialist <reviewer> --agent-id <agentId>` records the run under
+`runs/<reviewer>/<agentId>/` (`report.md` is the reviewer's own final message; `task.txt`,
+`tool_calls.json`, `transcript.jsonl` and `invocation.json` beside it) and prints the `review:`
+reference. `state.py record` and the gate accept a review reference only if it is such a report, its
+`invocation.json` names that reviewer role and the sha256 of the report and of the brief, and the brief
+contains the reviewed artifact's sha256. A PreToolUse hook (`recorder_write_guard.py`) refuses file-tool
+writes to reviewer folders and invocation records. This raises the cost of an unreviewed approval from
+citing any file to fabricating recorder output with a shell command; it is not a sandbox, and the
+researcher's approval remains self-reported. Separate researcher approval is still required
 before producing a conclusive export. A `stage_review` contains:
 
 - `outcome`: approved, approved_with_limitations, revision_required or blocked;
 - `artifact`: exact reviewed handoff path/hash;
-- `scientific-reviewer` and `reproducibility-auditor`: report path/hash references.
+- `scientific-reviewer` and `reproducibility-auditor`: the `review:` references printed by `recover.py`.
+
+An edge-only edit of a reviewed NeKo-to-MaBoSS export does not repeat the review. `scripts/network_delta.py
+<reviewed handoff> <new handoff>` computes the difference from the two BNET files: `changes` (edges added,
+removed or sign-changed) and `rules` (before/after of each changed target). The researcher approves that
+list, and a `stage_delta` record holds it:
+
+- `parent` and `artifact`: the reviewed and the new handoff path/hash, same NeKo session;
+- `changes` and `rules`: exactly the script's output; `state.py` and the gate recompute and compare;
+- per change, `evidence` (its own edge report; an added or sign-changed edge needs verdict supported or
+  context-dependent and a compatible interaction type) or `decision_id` (a data `stage_approval`; this is
+  checked to exist, not to concern that edge);
+- `approved_by: "researcher"` and `authorization`.
+
+The gate then accepts the new export on the parent's review and reports `review_id`, `delta_id` and
+`edges_changed_since_review`, so the record shows what the reviewers did not read. The script refuses a
+changed node set, a rule changed without an edge change, a rule that is not plain signed regulators, and
+exports of different sessions; the gate refuses a parent without a passing review and more than
+`DELTA_REVIEW_LIMIT` (5) changed edges since the last full `stage_review`. Each of these needs the full
+review. The delta shows which rules changed, not what they do to the dynamics: that is the Boolean stage's
+review. Boolean, readout and rate edits have no delta path.
 
 Then record the researcher's `stage_approval` with `approved_by: "researcher"`,
 `authorization` (exact quotation or durable request reference), `artifact`,
@@ -92,8 +121,12 @@ python3 scripts/gate.py check biomass_ode FULL_NEKO_SESSION --outputs NODE_ID_1 
 NeKo-to-BioMASS graphs carry no output selection, so for `biomass_ode` the
 approval's `outputs` are every `node_id` in the exported `network_file`: the
 researcher approves the whole graph's species scope. The ODE dispatch itself is
-governed by the [ODE contract](ode-contract.md); the Claude dispatch hook enforces
-`STAGE_GATE` only for the MaBoSS and PhysiCell specialists.
+governed by the [ODE contract](ode-contract.md). The Claude dispatch hook requires
+`STAGE_GATE` on every MaBoSS and PhysiCell dispatch. For the ode-modeler it resolves
+a first-line `STAGE_GATE` when the brief has one, and refuses a brief that names a
+NeKo source (a `runs/network-curator` path, a `neko-to-biomass` handoff or
+`import_neko_handoff`) without one; standalone Text2Model and reaction briefs carry
+no envelope.
 
 The checker requires the expected active upstream row with Handoff exactly
 `exported`, a valid typed handoff and captured dependencies, matching outputs,

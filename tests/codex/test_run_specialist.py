@@ -202,6 +202,42 @@ for event in events: print(json.dumps(event), flush=True)
         self.assertNotIn("dXNlcjpwYXNz", redacted)
         self.assertIn("[REDACTED]", redacted)
 
+    def test_scientific_vocabulary_survives_redaction(self) -> None:
+        prose = (
+            "MYC is a basic helix-loop-helix factor. Set secretion_rate = 10 and "
+            "token_count: 512. Basic Ki67 cycle model. Researcher authorization: "
+            '"approved by the researcher on the reviewed revision". Bearer of the mutation.'
+        )
+        self.assertEqual(MODULE.redact_text(prose), prose)
+        record = {
+            "secretion_rate": 10.0,
+            "authors": ["Kassis", "Agarwal"],
+            "author": "researcher",
+            "authorized_by": "researcher",
+            "token_count": 512,
+            "input_tokens": 9,
+            "cycle_model": "basic Ki67",
+            "authorization": "Use the approved topology of session neko-1",
+            "tokenizer": "wordpiece",
+            "secretory_phenotype": True,
+        }
+        self.assertEqual(MODULE.sanitize_json_value(record), record)
+
+    def test_credential_names_and_shapes_are_still_redacted(self) -> None:
+        record = MODULE.sanitize_json_value({
+            "apiKey": "v1", "API_KEY": "v2", "session-token": "v3", "client_secret": "v4",
+            "Authorization": "Bearer v5", "auth": "v6-single-token", "password": 12345,
+            "x": {"private_key": "v7", "accessKey": "v8", "Cookie": "v9"},
+        })
+        self.assertNotRegex(json.dumps(record), r"v[1-9]|12345")
+        text = MODULE.redact_text(
+            "apiToken=v1 client.secret: 'v2' PASSWORD = v3 "
+            "header Authorization: Basic dXNlcjpwYXNz and bearer abcdefghijklmnop0123 "
+            "Basic dXNlcjpwYXNzd29yZDEyMw== x"
+        )
+        for value in ("v1", "v2", "v3", "dXNlcjpwYXNz", "abcdefghijklmnop0123"):
+            self.assertNotIn(value, text)
+
     def test_no_event_timeout_emits_non_speculative_heartbeat(self) -> None:
         temporary, _, status, result = self.run_streaming_child(
             "import time; time.sleep(0.09)", heartbeat_interval=0.025
@@ -531,6 +567,28 @@ for _ in range(12):
         self.assertIn("session-1", command)
         self.assertNotIn("sh", command)
         self.assertNotIn("bash", command)
+
+    def test_windows_wsl_command_bypasses_the_wsl_shell(self) -> None:
+        config = {
+            "wsl_executable": "wsl.exe",
+            "distribution": "local-distribution",
+            "project_path": "/workspace/project",
+            "python_executable": "python3",
+            "codex_executable": "/tools/codex",
+        }
+        task = 'Use `export_network`; cost is $5 and $(echo INJECTED) "quoted"'
+        command = MODULE.build_wsl_command(
+            config,
+            "network_curator",
+            prompt=task,
+            prompt_file=None,
+            allow_web_search=False,
+            record_session_id=None,
+        )
+        # wsl.exe runs the words after --exec directly; anything else goes through a shell.
+        self.assertEqual(command[command.index("--exec") + 1], "python3")
+        self.assertLess(command.index("--cd"), command.index("--exec"))
+        self.assertEqual(command[command.index("--prompt") + 1], task)
 
     def test_windows_prompt_path_traversal_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "project-relative"):

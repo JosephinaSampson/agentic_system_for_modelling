@@ -1,5 +1,69 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Incremental approval of small topology edits.** Every edit of a reviewed network required both
+  reviewers to run again on the whole network, even for one edge the researcher had just decided on. A
+  new `scripts/network_delta.py` computes the exact difference between the reviewed and the new
+  NeKo-to-MaBoSS export (edges added, removed or sign-changed, and the before/after rule of each changed
+  target), and a new `stage_delta` governance record holds the researcher's approval of that list, with
+  each change citing its own edge report or data approval. The gate then accepts the new export on the
+  earlier review and reports which review it rests on and how many edges changed since. A changed node
+  set, a rule changed without an edge change, an unreviewed parent, or more than 5 changed edges since the
+  last full review still require the full review, as do Boolean rule, readout and rate edits.
+
+### Fixed
+
+- **Credential redaction no longer rewrites scientific text.** The sanitizer applied to
+  every recorded transcript event, report and Codex handoff matched substrings
+  (`secret`, `auth`, `token`, the word "basic"), so `secretion_rate = 10` and "a basic
+  helix-loop-helix factor" were stored as `[REDACTED]` in `report.md`, `task.txt` and
+  `tool_calls.json`. Names are now read as whole words, an authorization scheme needs
+  a header name or a credential's shape, and a researcher's authorization sentence is
+  kept. Records written before this fix may contain such redactions.
+- **The Windows-to-WSL Codex bridge no longer passes the task through a shell.**
+  `wsl.exe` was called without `--exec`, so bash expanded backticks, `$VAR` and
+  `$(...)` in a brief: Markdown code spans were deleted from the task and a quoted
+  `$(...)` was executed. The bridge now uses `wsl.exe --exec`.
+- **The Claude dispatch hook now gates ode-modeler briefs that use a NeKo graph.** It
+  resolved `STAGE_GATE` only for the MaBoSS and PhysiCell specialists, so an ODE brief
+  could point at an unreviewed NeKo export. A first-line `STAGE_GATE` on an ODE brief
+  is now checked (`biomass_ode`), and a brief naming a NeKo source without one is
+  refused. Standalone Text2Model and reaction briefs are unchanged.
+- **A running specialist can no longer be continued with `SendMessage`.** The dispatch
+  hook matched `Agent|Task` only, so a follow-up message could give a specialist a new
+  task that no gate had checked and that its invocation record did not contain.
+  `SendMessage` is now denied in `.claude/settings.json` and refused by the hook.
+- **Guards block when they cannot run.** Claude Code blocks a tool call only when its
+  hook exits 2. A hook whose `python3` was missing or broken (exit 127; the Windows
+  Store stub exits 49) or that crashed (exit 1) let the call through, so the stage
+  gate and the write guards were silently off. Every guard hook command now ends with
+  `|| exit 2`, the literature-reviewer hook uses the same shell form as the others,
+  and `scripts/check_isolation.py` fails when the dispatch gate is not wired to
+  `Agent|Task|SendMessage`, a guard lacks `|| exit 2`, or `disableAllHooks` is set.
+  Re-run setup to regenerate a managed-environment literature hook.
+- **`max_normalized` calibration no longer biases fits when replicates are separate
+  rows.** The data were divided by the largest single fit row, the predictions by the
+  largest simulated point. With replicates the largest row lies above the mean the
+  model is asked to match, so every normalised target was too low (about 9% for
+  replicates of 0.9/1.0/1.1). The data scale is now the largest per-point mean of the
+  fit rows. Results are unchanged without replicates and **change with them**; the
+  bundle `RUNTIME_VERSION` is 3, so jobs built earlier must be rebuilt before import
+  or hold-out scoring.
+- **A stage review must cite recorded reviewer runs.** A `stage_review` accepted any existing file as
+  the scientific-reviewer and reproducibility-auditor reports, so a review could be recorded, and the
+  gate passed, without either reviewer having run, or by reusing reports of another artifact. The
+  invocation recorder now captures reviewer runs under `runs/<reviewer>/<agentId>/`
+  (`recover.py --specialist scientific-reviewer|reproducibility-auditor`), and a review reference must be
+  such a `report.md`, bound by its `invocation.json` to that role, report and brief, with the brief naming
+  the reviewed artifact's sha256. A new `recorder_write_guard.py` hook refuses file-tool writes to
+  reviewer folders and invocation records. **Existing models:** reviews recorded before this change cite
+  files under `runs/orchestrator/reviews/` and no longer pass the gate; re-run `/validate-stage` before
+  the next downstream dispatch. **Codex:** it has no reviewer specialists, so stage reviews must be run
+  from Claude Code. A shell command can still fabricate records; this is not a sandbox.
+
 ## 1.2.0 — 2026-11-18
 
 Tested with `mcp-biomodelling-servers` **2.5.2** (NeKo `nekomata` **1.10.3**); the

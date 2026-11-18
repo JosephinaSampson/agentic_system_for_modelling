@@ -108,6 +108,30 @@ class DataIsolationTests(unittest.TestCase):
         path.write_text(json.dumps(data))
         self.assertTrue(any('data_orchestrator_guard.py' in e for e in self.errors()))
 
+    def test_isolation_flags_unwired_or_fail_open_guards(self):
+        path = self.root / '.claude/settings.json'
+        original = path.read_text()
+        self.assertEqual([e for e in self.errors() if 'guard.py' in e or 'disableAllHooks' in e], [])
+
+        def broken(edit):
+            data = json.loads(original)
+            edit(data)
+            path.write_text(json.dumps(data))
+            return self.errors()
+
+        def gate(data):
+            return next(g for g in data['hooks']['PreToolUse'] if 'stage_gate_guard.py' in g['hooks'][0]['command'])
+
+        self.assertTrue(any('stage_gate_guard.py' in e for e in broken(
+            lambda d: d['hooks']['PreToolUse'].remove(gate(d)))))
+        # the dispatch gate must also see follow-up messages to a running specialist
+        self.assertTrue(any('no PreToolUse Agent|Task|SendMessage hook' in e for e in broken(
+            lambda d: gate(d).update(matcher='Agent|Task'))))
+        # a guard whose interpreter is missing exits 127, which does not block
+        self.assertTrue(any('|| exit 2' in e for e in broken(
+            lambda d: gate(d)['hooks'][0].update(command=gate(d)['hooks'][0]['command'].replace(' || exit 2', '')))))
+        self.assertTrue(any('disableAllHooks' in e for e in broken(lambda d: d.update(disableAllHooks=True))))
+
 
 class PolicyTextTests(unittest.TestCase):
     def test_claude_md_mentions_data_derived_and_delegation(self):

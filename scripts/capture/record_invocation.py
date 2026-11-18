@@ -140,24 +140,52 @@ def materialize_report(project, specialist, session, final_report):
         raise
     return 'written'
 
+# The two independent stage reviewers. They hold no modelling session; each run is recorded on its own
+# under runs/<role>/<agent id>/ and a stage_review record cites that report.md (state.checked_review).
+REVIEWERS = ('scientific-reviewer', 'reproducibility-auditor')
+
+def record_review(project, target, metadata, events, prompts, calls, report):
+    """Record one reviewer run: its brief, its report and what it read, written only by this recorder.
+
+    The report is the reviewer's final message, never text the orchestrator supplies. invocation.json binds
+    the report and the brief by sha256, so a stage_review can prove that this role produced this report
+    from a brief naming the reviewed artifact."""
+    task = ('\n\n'.join(prompts) + '\n').encode('utf-8')
+    metadata = {**metadata, 'record_type': 'review', 'report_sha256': hashlib.sha256(report).hexdigest(),
+                'task_sha256': hashlib.sha256(task).hexdigest()}
+    files = {
+        'transcript.jsonl': ''.join(json.dumps(event) + '\n' for event in events).encode('utf-8'),
+        'task.txt': task,
+        'tool_calls.json': (json.dumps(calls, indent=2) + '\n').encode('utf-8'),
+        'report.md': report,
+        'invocation.json': (json.dumps(metadata, indent=2) + '\n').encode('utf-8'),
+    }
+    publish_invocation(project, target, files)
+    relative = target.relative_to(project).as_posix()
+    return {'status': 'review', 'session_id': None, 'invocation_path': relative,
+            'report': {'path': f'{relative}/report.md', 'sha256': metadata['report_sha256']}}
+
 def record(project, payload):
     if not isinstance(payload, dict): raise ValueError('hook payload must be an object')
     project = project.resolve(strict=True)
     specialist = payload.get('agent_type')
-    if specialist not in SPECIALISTS:
+    review = specialist in REVIEWERS
+    if not review and specialist not in SPECIALISTS:
         return {'status': 'ignored', 'reason': 'not a modelling specialist'}
     invocation = validate_session_id(payload['agent_id'])
     transcript = Path(payload['agent_transcript_path'])
     reject_symlinks(transcript)
     raw = transcript.read_bytes()
     events = [sanitize_json_value(json.loads(line)) for line in raw.splitlines() if line.strip()]
-    sessions = session_ids(transcript, specialist, project)
+    sessions = set() if review else session_ids(transcript, specialist, project)
     if transcript.read_bytes() != raw:
         raise ValueError('transcript changed while recording; preserve source and retry explicitly')
     if len(sessions) > 1:
         raise ValueError('invocation must identify exactly one scientific session; record manually with reviewed attribution')
     session = validate_session_id(sessions.pop()) if sessions else None
-    if session is None:
+    if review:
+        target = project / 'runs' / specialist / invocation
+    elif session is None:
         target = project / 'runs/orchestrator/unbound-invocations' / specialist / invocation
     else:
         target = project / 'runs' / specialist / session / 'invocation' / invocation
@@ -206,6 +234,8 @@ def record(project, payload):
         'credentials_redacted': True, 'usage': usage}
     if integrity is not None: metadata['integrity'] = integrity
     final_bytes = ('\n\n'.join(final) + '\n').encode('utf-8')
+    if review:
+        return record_review(project, target, metadata, events, prompts, calls, final_bytes)
     if session is not None:
         stored_meta = target / 'invocation.json'
         stored_report = None

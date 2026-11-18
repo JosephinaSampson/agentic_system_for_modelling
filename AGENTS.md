@@ -381,7 +381,8 @@ inlined rationale, evidence summary, supporting PMIDs/citations and the exact
 explicit enablement) and `export_configuration_bundle` (packaging, not a run or
 approval). Never let a specialist invent PMIDs, readout rules, rates or units.
 Approval binds to the exact NeKo state or MaBoSS `model_revision` reviewed; any
-later edit supersedes it. MaBoSS ordinary and mutant runs are durable run IDs;
+later edit supersedes it (an edge-only topology edit may carry the review over with a
+`stage_delta`; see `validate-stage`). MaBoSS ordinary and mutant runs are durable run IDs;
 record them. NeKo-to-MaBoSS 2.1 and NeKo-to-BioMASS 2.0 handoffs carry a
 `curation_file` history companion; MaBoSS-to-PhysiCell 2.1 carries the model
 revision and readout definitions. Retain all referenced files with the manifest.
@@ -390,6 +391,10 @@ the recorder's `backend_import_manifest`; the project capture remains the record
 that gates and approvals bind to.
 Marketplace modelling plugins must not be enabled in this project: they would
 expose modelling tools to the orchestrator.
+
+Stage reviews are Claude-only until Codex has reviewer specialists: a `stage_review` must cite recorded
+`scientific-reviewer` and `reproducibility-auditor` runs, which the Codex dispatcher cannot produce. Run
+`validate-stage` from Claude Code; never author a review report yourself.
 
 The `data-analyst` specialist is Claude-only until Codex parity. Codex orchestrators must
 not run vendored scripts under `vendor/scientific-agent-skills` or use `.venv-data`.

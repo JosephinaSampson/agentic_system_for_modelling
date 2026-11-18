@@ -121,7 +121,8 @@ Calibration is a portable job the researcher approves step by step; no specialis
    the same readout and condition (required, non-zero; t0 rows stay, target 1); `relative_to_condition`
    divides by the reference-condition rows of the same readout at the same converted time (required, in
    the rule, non-zero); `max_normalized` divides every row, hold-out rows included, by the max of the
-   rule's FIT rows of the same readout (positive), and the prediction by the simulated max at those fit
+   rule's FIT rows of the same readout (positive; replicate rows of one condition and time are
+   averaged before the max is taken, because the model has one value per point), and the prediction by the simulated max at those fit
    rows, so a hold-out row is scored on the fit's scale (hold-out rows without fit rows of their readout are
    refused); `endpoint_contrast` compares
    the test row with the mean of the reference rows of the same readout and `use` (only the test and

@@ -87,8 +87,9 @@ USES = ("fit", "holdout", "all")
 # The bundle's runtime/compare version, stamped into job.json as "runtime_version" by build.py. Bump it whenever
 # run.py or compare.py change what a bundle computes or accepts; import_results.py and score_holdout.py refuse a
 # job with an older or missing stamp ("rebuild this job"). 2: validate --partial/--nominal, fit-scale
-# max_normalized, divisor rows by use, "trivial" rows.
-RUNTIME_VERSION = 2
+# max_normalized, divisor rows by use, "trivial" rows. 3: max_normalized data scale is the largest per-point mean
+# of the fit rows (replicates averaged), no longer the largest single row.
+RUNTIME_VERSION = 3
 
 
 # ---------------------------------------------------------------- pure helpers (stdlib)

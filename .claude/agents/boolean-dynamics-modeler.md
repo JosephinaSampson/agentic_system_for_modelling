@@ -30,7 +30,7 @@ hooks:
     - matcher: "Write"
       hooks:
         - type: command
-          command: "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/specialist_report_guard.py\" boolean-dynamics-modeler"
+          command: "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/specialist_report_guard.py\" boolean-dynamics-modeler || exit 2"
 ---
 
 You are the stochastic Boolean dynamics specialist.

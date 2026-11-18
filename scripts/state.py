@@ -70,6 +70,128 @@ def checked_artifact(root, item):
     return path
 
 
+REVIEWERS = ("scientific-reviewer", "reproducibility-auditor")
+
+
+def checked_review(root, role, ref, reviewed):
+    """A stage_review's report reference for `role`: the report.md of a recorded run of that reviewer.
+
+    Any existing file used to satisfy a review reference, so a review could be recorded without a reviewer
+    having run. The report must now be `runs/<role>/<agent id>/report.md`, written by the invocation recorder
+    (scripts/capture/record_invocation.py) from the reviewer's own final message, with the invocation.json
+    beside it naming that role and the sha256 of this report and of the recorded brief; and the brief must
+    name the sha256 of `reviewed`, the artifact the record says was reviewed."""
+    path = checked_artifact(root, ref)
+    parts = Path(ref["path"]).parts
+    if len(parts) != 4 or parts[:2] != ("runs", role) or parts[3] != "report.md" or Path(ref["path"]).as_posix() != ref["path"]:
+        raise ValueError(f"{role} report must be runs/{role}/<agent id>/report.md, as written by the invocation "
+                         "recorder (scripts/capture/recover.py after the reviewer finishes)")
+    identifier(parts[2])
+    task = artifact(root, f"runs/{role}/{parts[2]}/task.txt")
+    try:
+        meta = json.loads(artifact(root, f"runs/{role}/{parts[2]}/invocation.json").read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"{role} report has no readable invocation record: {exc}") from exc
+    if not isinstance(meta, dict) or (meta.get("record_type"), meta.get("specialist"), meta.get("invocation_id")) != ("review", role, parts[2]):
+        raise ValueError(f"{role} report is not a recorded run of that reviewer")
+    if meta.get("report_sha256") != ref["sha256"] or meta.get("task_sha256") != digest(task):
+        raise ValueError(f"{role} report or brief differs from its invocation record")
+    if reviewed["sha256"] not in task.read_text(encoding="utf-8"):
+        raise ValueError(f"the recorded {role} brief does not name the reviewed artifact sha256 "
+                         f"{reviewed['sha256']}; give each reviewer the artifact path and sha256")
+    return path
+
+
+# A stage_delta carries a full review over to an edge-only edit of the reviewed network. After this many
+# changed edges since the last full stage_review, the reviewers must read the network again.
+DELTA_REVIEW_LIMIT = 5
+PASSING = {"approved", "approved_with_limitations"}
+DELTA_KEYS = {"id", "kind", "session_id", "stage", "parent", "artifact", "changes", "rules", "approved_by",
+              "authorization"}
+OPPOSITE = {"activation": "inhibition", "inhibition": "activation"}
+
+
+def _delta_evidence(root, change):
+    """One change's support: its own literature report for this edge, or a recorded data approval."""
+    if ("evidence" in change) == ("decision_id" in change):
+        raise ValueError("each delta change cites exactly one of evidence (its edge report) or decision_id "
+                         "(a recorded researcher approval of stage data)")
+    if "decision_id" in change:
+        found = [r for r in records((root / "DECISIONS.md").read_text(encoding="utf-8"))
+                 if r.get("id") == change["decision_id"]]
+        if len(found) != 1 or (found[0].get("kind"), found[0].get("stage")) != ("stage_approval", "data"):
+            raise ValueError(f"delta decision_id {change['decision_id']} is not a recorded stage_approval of stage data")
+        validate_record(root, found[0])
+        return
+    from scripts.evidence_contract import report_identity, validate_footer
+    report = checked_artifact(root, change["evidence"])
+    _, source, target, _, _ = report_identity(root.resolve(), report.resolve())
+    if (source, target) != (change["source"], change["target"]):
+        raise ValueError(f"evidence report {change['evidence']['path']} is not about "
+                         f"{change['source']} -> {change['target']}")
+    footer = validate_footer(report.read_text(encoding="utf-8"), source, target)
+    if change["change"] == "removed":
+        return  # any verdict may motivate a removal; the researcher approves it
+    if footer["verdict"] not in {"supported", "context-dependent"} or footer["interaction_type"] == OPPOSITE[change["sign"]]:
+        raise ValueError(f"evidence report {change['evidence']['path']} ({footer['verdict']}, "
+                         f"{footer['interaction_type']}) does not support {change['sign']} of {target} by {source}; "
+                         "a full stage review is required")
+
+
+def checked_delta(root, item):
+    """A stage_delta: the researcher approves the exact, recomputed edge difference between a reviewed
+    NeKo-to-MaBoSS export (`parent`) and a new export (`artifact`) of the same session, so the earlier
+    review carries over without new reviewer runs. `changes` and `rules` must equal what
+    scripts/network_delta.py computes from the two BNET files now; each change cites its own support."""
+    if set(item) - {"recorded_at"} != DELTA_KEYS:
+        raise ValueError("stage_delta requires exactly: " + ", ".join(sorted(DELTA_KEYS)))
+    if item["stage"] != "topology":
+        raise ValueError("stage_delta applies to the topology stage only")
+    if item.get("approved_by") != "researcher" or not item.get("authorization"):
+        raise ValueError("stage_delta needs the researcher's explicit authorization of the listed changes")
+    from scripts.network_delta import manifest_delta
+    computed = manifest_delta(root, item["parent"], item["artifact"], item["session_id"])
+    changes = item["changes"]
+    if not isinstance(changes, list) or any(not isinstance(c, dict) for c in changes):
+        raise ValueError("stage_delta changes must be a list of objects")
+    stated = [{k: c.get(k) for k in ("change", "source", "target", "sign")} for c in changes]
+    if stated != computed["changes"] or item["rules"] != computed["rules"]:
+        raise ValueError("stage_delta changes or rules differ from the computed difference of the two exports; "
+                         "run scripts/network_delta.py and record its output")
+    for change in changes:
+        if set(change) - {"evidence", "decision_id"} != {"change", "source", "target", "sign"}:
+            raise ValueError("unknown stage_delta change field")
+        _delta_evidence(root, change)
+    return computed
+
+
+def review_basis(root, recs, record):
+    """The full stage_review that `record` (a stage_review or stage_delta in `recs`) rests on, and the number
+    of delta-approved changes since it. Each delta's parent must itself be covered by an earlier passing
+    review or delta, the latest review of a parent must not block, and the total stays within
+    DELTA_REVIEW_LIMIT."""
+    total, current = 0, record
+    index = next((i for i, r in enumerate(recs) if r is record), len(recs))
+    while current.get("kind") == "stage_delta":
+        total += len(current["changes"])
+        if total > DELTA_REVIEW_LIMIT:
+            raise ValueError(f"{total} edges changed since the last full review (limit {DELTA_REVIEW_LIMIT}); "
+                             "a full stage review is required")
+        covers = [(i, r) for i, r in enumerate(recs)
+                  if r.get("kind") in {"stage_review", "stage_delta"} and r.get("stage") == "topology"
+                  and r.get("session_id") == current["session_id"] and r.get("artifact") == current["parent"]]
+        if covers and covers[-1][1]["kind"] == "stage_review" and covers[-1][1].get("outcome") not in PASSING:
+            raise ValueError("the latest review of the delta's parent export blocks it")
+        earlier = [(i, r) for i, r in covers if i < index]
+        if not earlier:
+            raise ValueError("the delta's parent export has no earlier recorded review or approved delta")
+        index, current = earlier[-1]
+        validate_record(root, current)
+    if current.get("outcome") not in PASSING:
+        raise ValueError("the review this export rests on does not approve it")
+    return current, total
+
+
 # Characters a Markdown table cell cannot hold: the delimiter, and every control, line- or
 # paragraph-separator character (str.splitlines breaks on \x0b, \x0c, \x1c-\x1e, \x85, U+2028, U+2029).
 UNSAFE_CELL_CATEGORIES = {"Cc", "Zl", "Zp"}
@@ -156,7 +278,7 @@ def validate_record(root, item):
         raise ValueError("governance record must be an object")
     identifier(item.get("id"))
     kind = item.get("kind")
-    if kind not in {"stage_approval", "stage_review", "conditional_approval", "standalone_approval"}:
+    if kind not in {"stage_approval", "stage_review", "stage_delta", "conditional_approval", "standalone_approval"}:
         raise ValueError("unknown governance record kind")
     if kind != "standalone_approval":
         identifier(item.get("session_id"))
@@ -165,9 +287,11 @@ def validate_record(root, item):
     if kind == "stage_review":
         if item.get("outcome") not in {"approved", "approved_with_limitations", "revision_required", "blocked"}:
             raise ValueError("invalid review outcome")
-        for role in ("scientific-reviewer", "reproducibility-auditor"):
-            checked_artifact(root, item.get(role))
         checked_artifact(root, item.get("artifact"))
+        for role in REVIEWERS:
+            checked_review(root, role, item.get(role), item["artifact"])
+    elif kind == "stage_delta":
+        checked_delta(root, item)
     elif kind in {"stage_approval", "standalone_approval"}:
         if item.get("approved_by") != "researcher" or not item.get("authorization"):
             raise ValueError("explicit researcher authorization quotation/reference required")
@@ -227,6 +351,9 @@ def update(root, operation, item):
             validate_record(root, item)
             if item["id"] in {r["id"] for r in records(text)}:
                 raise ValueError("governance record ID already exists")
+            if item["kind"] == "stage_delta":
+                # refuse an unreviewed parent, or a delta past the limit, when it is recorded
+                review_basis(root, [*records(text), item], item)
             item = {**item, "recorded_at": now()}
             text = text.rstrip() + "\n\n<!-- governance-record -->\n```json\n" + json.dumps(item, indent=2) + "\n```\n"
         elif operation == "registry-add":

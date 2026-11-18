@@ -20,37 +20,46 @@ HEARTBEAT_INTERVAL_SECONDS = 30.0
 LIVE_VALUE_LIMIT = 240
 
 
-SENSITIVE_FIELD_RE = re.compile(
-    r"(?:auth(?:entication|orization)?|credential|cookie|password|passwd|"
-    r"private[_-]?key|secret|session[_-]?token|access[_-]?(?:token|key)|"
-    r"api[_-]?key|token)",
-    re.IGNORECASE,
-)
+# Credential detection works on whole words of a field or variable name, never on
+# substrings: "secretion_rate", "authors", "basic helix-loop-helix" and "token_count"
+# are scientific vocabulary and must survive in the immutable records.
+_NAME_WORD_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+_SECRET_WORDS = frozenset({
+    "password", "passwd", "secret", "secrets", "credential", "credentials",
+    "cookie", "cookies", "token", "apikey",
+})
+_AUTH_WORDS = frozenset({"auth", "authentication", "authorization"})
+_SECRET_PAIRS = frozenset({
+    ("api", "key"), ("access", "key"), ("private", "key"), ("secret", "key"),
+})
+_COUNT_WORDS = frozenset({"count", "counts", "limit", "limits", "usage", "budget", "total"})
+_AUTH_SCHEMES = ("bearer ", "basic ", "digest ", "token ")
 
 
+# name = value / "name": value, in JSON, TOML, shell or prose. The name decides.
 SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r"(?i)((?:\"|')?\b[A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|"
-    r"API[_-]?KEY|ACCESS[_-]?KEY|CREDENTIAL|COOKIE|AUTHORIZATION|"
-    r"AUTHENTICATION)[A-Z0-9_.-]*\b(?:\"|')?"
-    r"\s*[:=]\s*)(?:Bearer\s+\[REDACTED\]|\[REDACTED\]|"
+    r"((?:\"|')?(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9_.-]*)(?:\"|')?"
+    r"\s*[:=]\s*)(Bearer\s+\[REDACTED\]|\[REDACTED\]|"
     r"\"[^\"]*\"|'[^']*'|[^\s,}\]]+)"
 )
 
 
-AUTH_SCHEME_RE = re.compile(r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+# A scheme is a credential after an Authorization header name, or when the value has a
+# credential's shape. The English word "basic" followed by a word is neither.
+AUTH_HEADER_RE = re.compile(
+    r"(?i)(\b(?:proxy-)?authorization(?:\"|')?\s*[:=]\s*(?:\"|')?)"
+    r"(?:Bearer|Basic|Digest|Token)\s+[A-Za-z0-9._~+/=-]+"
+)
+AUTH_SCHEME_RE = re.compile(
+    r"\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{16,}"
+    r"|\b[Bb]asic\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{16,}={0,2}(?![A-Za-z0-9+/=-])"
+)
 
 
 OPENAI_KEY_RE = re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}\b")
 
 
 URL_CREDENTIAL_RE = re.compile(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@")
-
-
-JSON_SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r'''(?i)((?:"|')[^"']*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|'''
-    r'''CREDENTIAL|COOKIE|AUTHORIZATION|AUTHENTICATION)[^"']*(?:"|')'''
-    r'''\s*:\s*)(?:"[^"]*"|'[^']*'|[^\s,}\]]+)'''
-)
 
 
 class StreamResult(NamedTuple):
@@ -62,14 +71,69 @@ class StreamResult(NamedTuple):
     cancelled: bool
 
 
+def _name_words(name: str) -> list[str]:
+    return [word.lower() for part in re.split(r"[^A-Za-z0-9]+", name) for word in _NAME_WORD_RE.findall(part)]
+
+
+def sensitive_name(name: str, *, auth: bool = True) -> bool:
+    """True when a field or variable name, read as whole words, names a credential."""
+
+    words = _name_words(name)
+    if not words:
+        return False
+    if auth and _AUTH_WORDS.intersection(words):
+        return True
+    if any(pair in _SECRET_PAIRS for pair in zip(words, words[1:])):
+        return True
+    hits = _SECRET_WORDS.intersection(words)
+    if hits == {"token"} and words[-1] in _COUNT_WORDS:
+        return False  # token_count, token_limit: usage numbers
+    return bool(hits)
+
+
+def _redact_assignments(text: str) -> str:
+    parts: list[str] = []
+    position = 0
+    while (match := SENSITIVE_ASSIGNMENT_RE.search(text, position)) is not None:
+        name, value = match.group(2), match.group(3)
+        # Authorization in prose is governance vocabulary here ("Researcher authorization:
+        # approved"); its credential forms are handled by AUTH_HEADER_RE.
+        secret = sensitive_name(name, auth=False) and not (
+            "token" in _name_words(name) and re.fullmatch(r"[0-9.]+", value)
+        )
+        if secret:
+            parts.append(text[position:match.end(1)] + '"[REDACTED]"')
+            position = match.end()
+        else:
+            # Resume inside the value: `failed: password=x` holds a second assignment.
+            parts.append(text[position:match.end(1)])
+            position = match.end(1)
+    parts.append(text[position:])
+    return "".join(parts)
+
+
 def redact_text(value: str) -> str:
     """Remove common credential forms before text reaches logs or the console."""
 
+    value = AUTH_HEADER_RE.sub(r"\1[REDACTED]", value)
     value = AUTH_SCHEME_RE.sub("[REDACTED]", value)
     value = URL_CREDENTIAL_RE.sub(r"\1[REDACTED]@", value)
     value = OPENAI_KEY_RE.sub("[REDACTED]", value)
-    value = JSON_SENSITIVE_ASSIGNMENT_RE.sub(r'\1"[REDACTED]"', value)
-    return SENSITIVE_ASSIGNMENT_RE.sub(r'\1"[REDACTED]"', value)
+    return _redact_assignments(value)
+
+
+def _sensitive_field(key: str, value: object) -> bool:
+    if key == "standalone_authorized":
+        return True  # public only as a bool; see _public_ode_decision
+    if sensitive_name(key, auth=False):
+        return True
+    if not sensitive_name(key):
+        return False
+    # An authorization field holds a credential (one token, or a scheme and a token) or a
+    # researcher's sentence. Only the first is redacted.
+    if isinstance(value, str):
+        return not any(c.isspace() for c in value.strip()) or value.strip().lower().startswith(_AUTH_SCHEMES)
+    return True
 
 
 def _public_ode_decision(key: str | None, value: object) -> bool:
@@ -99,8 +163,7 @@ def sanitize_json_value(value: object, *, key: str | None = None) -> object:
 
     if (
         key is not None
-        and not key.lower().replace("-", "_").endswith("_tokens")
-        and SENSITIVE_FIELD_RE.search(key)
+        and _sensitive_field(key, value)
         and not _public_ode_decision(key, value)
     ):
         return "[REDACTED]"

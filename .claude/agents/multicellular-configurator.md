@@ -28,7 +28,7 @@ hooks:
     - matcher: "Write"
       hooks:
         - type: command
-          command: "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/specialist_report_guard.py\" multicellular-configurator"
+          command: "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/specialist_report_guard.py\" multicellular-configurator || exit 2"
 ---
 
 You are the PhysiCell and PhysiBoSS configuration specialist.

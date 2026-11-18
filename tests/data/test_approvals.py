@@ -7,6 +7,7 @@ from pathlib import Path
 
 from scripts import state
 from scripts.data import approvals
+from tests.support.reviews import recorded_reviews
 
 SESSION = "data-20260101T000000Z-abcdef12"
 OTHER = "data-20260101T000000Z-0000beef"
@@ -99,12 +100,8 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(got["sha256"], sha(self.root / got["path"]))
 
     def test_stage_review_refused(self):
-        folder = self.root / "reviews"
-        folder.mkdir()
-        (folder / "r.md").write_text("r")
-        ref = {"path": "reviews/r.md", "sha256": sha(folder / "r.md")}
         self.add({"id": "rev-1", "kind": "stage_review", "stage": "data", "session_id": SESSION,
-                  "outcome": "approved", "scientific-reviewer": ref, "reproducibility-auditor": ref,
+                  "outcome": "approved", **recorded_reviews(self.root, self.ref(), "rev-1"),
                   "artifact": self.ref()})
         with self.assertRaisesRegex(ValueError, "must be a stage_approval"):
             approvals.require_data_approval(self.root, "rev-1", SESSION)
@@ -143,12 +140,8 @@ class ApprovalTests(unittest.TestCase):
         review = {"id": "rev-x", "kind": "stage_review", "stage": "data", "session_id": SESSION, "outputs": ["P1"]}
         with self.assertRaisesRegex(ValueError, "not found"):
             approvals.require_proposal_approved(self.root, review, SESSION, "P1")
-        folder = self.root / "reviews"
-        folder.mkdir()
-        (folder / "r.md").write_text("r")
-        ref = {"path": "reviews/r.md", "sha256": sha(folder / "r.md")}
         self.add({"id": "rev-1", "kind": "stage_review", "stage": "data", "session_id": SESSION,
-                  "outcome": "approved", "scientific-reviewer": ref, "reproducibility-auditor": ref,
+                  "outcome": "approved", **recorded_reviews(self.root, self.ref(), "rev-1"),
                   "artifact": self.ref(), "outputs": ["P1"]})
         with self.assertRaisesRegex(ValueError, "must be a stage_approval"):
             approvals.require_proposal_approved(self.root, approvals.load_record(self.root, "rev-1"), SESSION, "P1")

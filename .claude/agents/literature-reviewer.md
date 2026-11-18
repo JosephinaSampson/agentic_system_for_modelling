@@ -31,9 +31,7 @@ hooks:
     - matcher: "Read|Write"
       hooks:
         - type: command
-          command: "python3"
-          args:
-            - "${CLAUDE_PROJECT_DIR}/.claude/scripts/literature_file_guard.py"
+          command: "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/literature_file_guard.py\" || exit 2"
 color: yellow
 ---
 

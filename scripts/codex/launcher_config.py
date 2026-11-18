@@ -500,6 +500,9 @@ def build_wsl_command(
         config["distribution"],
         "--cd",
         config["project_path"],
+        # Without --exec, wsl.exe joins the arguments and hands them to the default shell,
+        # which expands backticks, $VAR and $(...) inside the task text.
+        "--exec",
         config["python_executable"],
         "scripts/codex/run_specialist.py",
         specialist,
