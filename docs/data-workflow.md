@@ -67,6 +67,18 @@ arch -x86_64 "$CELLPROFILER_ENV/bin/cellprofiler" --version
 The CellProfiler environment reports `x86_64`; it does not change the architecture
 or packages of `.venv-data` or the core modelling environment.
 
+The data-analyst reaches this environment through `scripts/data/cellprofiler_rosetta.sh`,
+a launcher that sets `JAVA_HOME` to the environment's own x86_64 JDK (python-javabridge
+refuses the host's arm64 Java) and forwards every argument to its `cellprofiler` entry
+point. Name the launcher's absolute path in the data brief; the analyst passes it as
+`--executable` to the vendored helper
+`vendor/scientific-agent-skills/cellprofiler/scripts/nuclei_assay.py run`, which spawns
+it. The helper itself runs in `.venv-data`, whose lock includes `tifffile` for TIFF
+validation. `scripts/setup.py --check --with-cellprofiler` still checks only the native
+`.venv-cellprofiler`; a Rosetta environment is verified by running the helper on a
+synthetic image through a data-analyst session (expected: three nuclei, `assay_qc.json`
+status `complete`).
+
 ## Smoke test
 
 ```bash
