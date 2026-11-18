@@ -130,10 +130,22 @@ def data_analyst_errors(root: Path, user_skills: Path | None = None) -> list[str
         if required not in items:
             errors.append(f'{agent}: data-analyst disallowedTools must include {required}')
     path = root/'.claude/settings.json'
-    hooks = read_json(path).get('hooks', {}).get('PreToolUse', []) if path.exists() else []
-    if not any(group.get('matcher') == 'Bash' and any('data_orchestrator_guard.py' in str(h.get('command', ''))
-               for h in group.get('hooks', [])) for group in hooks if isinstance(group, dict)):
-        errors.append(f'{path}: no PreToolUse Bash hook runs data_orchestrator_guard.py')
+    settings = read_json(path) if path.exists() else {}
+    hooks = settings.get('hooks', {}).get('PreToolUse', [])
+    if settings.get('disableAllHooks'):
+        errors.append(f'{path}: disableAllHooks switches off the dispatch and data guards')
+    # Each guard must be wired to every tool it covers, and must block when it cannot run:
+    # Claude Code blocks only on exit 2, so a missing interpreter (exit 127) would allow the call.
+    for tools, script in ((('Bash',), 'data_orchestrator_guard.py'),
+                          (('Agent', 'Task', 'SendMessage'), 'stage_gate_guard.py')):
+        commands = [str(h.get('command', '')) for group in hooks if isinstance(group, dict)
+                    and set(tools) <= set(str(group.get('matcher', '')).split('|'))
+                    for h in group.get('hooks', []) if script in str(h.get('command', ''))]
+        label = '|'.join(tools)
+        if not commands:
+            errors.append(f'{path}: no PreToolUse {label} hook runs {script}')
+        elif not all(command.rstrip().endswith('|| exit 2') for command in commands):
+            errors.append(f'{path}: the {script} hook must end with `|| exit 2` to block when it cannot run')
     return errors
 
 

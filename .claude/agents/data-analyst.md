@@ -23,11 +23,11 @@ hooks:
     - matcher: "Bash"
       hooks:
         - type: command
-          command: "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/data_guard.py\" bash"
+          command: "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/data_guard.py\" bash || exit 2"
     - matcher: "Write"
       hooks:
         - type: command
-          command: "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/data_guard.py\" write"
+          command: "python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/data_guard.py\" write || exit 2"
 ---
 
 You are the data retrieval and analysis specialist.

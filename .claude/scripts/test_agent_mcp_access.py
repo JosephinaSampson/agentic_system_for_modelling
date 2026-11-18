@@ -111,7 +111,8 @@ class SpecialistMcpAccessTests(unittest.TestCase):
                 self.check_transport(frontmatter(rendered[root / ".claude/agents" / filename]), server, executable,
                                      generated=True)
             hook = rendered[root / ".claude/agents/literature-reviewer.md"]
-            self.assertIn('          command: "python3"\n', hook)
+            self.assertIn('          command: "python3 \\"$CLAUDE_PROJECT_DIR/.claude/scripts/'
+                          'literature_file_guard.py\\" || exit 2"\n', hook)
             for path, text in rendered.items():
                 path.write_text(text)
             self.assertEqual(configure_claude.render(root, None, with_biomass=True, plugin=plugin), rendered)
@@ -187,7 +188,7 @@ class DataAnalystAccessTests(unittest.TestCase):
         for matcher, mode in (("Bash", "bash"), ("Write", "write")):
             self.assertIn(f'matcher: "{matcher}"', self.metadata)
             self.assertIn(
-                'python3 \\"$CLAUDE_PROJECT_DIR/.claude/scripts/data_guard.py\\" ' + mode,
+                'python3 \\"$CLAUDE_PROJECT_DIR/.claude/scripts/data_guard.py\\" ' + mode + ' || exit 2"',
                 self.metadata,
             )
 

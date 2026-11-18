@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -151,10 +152,11 @@ class SetupTests(unittest.TestCase):
     def test_literature_hook_is_portable_and_setup_replaces_only_its_interpreter(self):
         path = self.root/'.claude/agents/literature-reviewer.md'
         original = path.read_text()
-        self.assertIn('          command: "python3"\n', original)
+        guard = ' "$CLAUDE_PROJECT_DIR/.claude/scripts/literature_file_guard.py" || exit 2'
+        self.assertIn('          command: '+json.dumps('python3'+guard)+'\n', original)
         rendered = configure_claude.render(self.root, self.prefix)[path]
-        expected = original.replace('          command: "python3"\n',
-            '          command: '+json.dumps(str(self.prefix/'bin/python'))+'\n')
+        expected = original.replace('          command: '+json.dumps('python3'+guard)+'\n',
+            '          command: '+json.dumps(shlex.quote(str(self.prefix/'bin/python'))+guard)+'\n')
         self.assertEqual(rendered, expected)
         path.write_text(rendered)
         self.assertEqual(configure_claude.render(self.root, self.prefix)[path], rendered)

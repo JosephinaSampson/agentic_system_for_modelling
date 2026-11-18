@@ -24,6 +24,14 @@
   hook matched `Agent|Task` only, so a follow-up message could give a specialist a new
   task that no gate had checked and that its invocation record did not contain.
   `SendMessage` is now denied in `.claude/settings.json` and refused by the hook.
+- **Guards block when they cannot run.** Claude Code blocks a tool call only when its
+  hook exits 2. A hook whose `python3` was missing or broken (exit 127; the Windows
+  Store stub exits 49) or that crashed (exit 1) let the call through, so the stage
+  gate and the write guards were silently off. Every guard hook command now ends with
+  `|| exit 2`, the literature-reviewer hook uses the same shell form as the others,
+  and `scripts/check_isolation.py` fails when the dispatch gate is not wired to
+  `Agent|Task|SendMessage`, a guard lacks `|| exit 2`, or `disableAllHooks` is set.
+  Re-run setup to regenerate a managed-environment literature hook.
 
 ## 1.2.0 — 2026-11-18
 

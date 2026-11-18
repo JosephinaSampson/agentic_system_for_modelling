@@ -316,9 +316,9 @@ class OrchestratorGuardTests(unittest.TestCase):
         settings = json.loads(SETTINGS.read_text())
         pre = settings["hooks"]["PreToolUse"]
         commands = {(entry["matcher"], hook["command"]) for entry in pre for hook in entry["hooks"]}
-        self.assertIn(("Bash", 'python3 "$CLAUDE_PROJECT_DIR/.claude/scripts/data_orchestrator_guard.py"'),
+        self.assertIn(("Bash", 'python3 "$CLAUDE_PROJECT_DIR/.claude/scripts/data_orchestrator_guard.py" || exit 2'),
                       commands)
-        self.assertIn(("Agent|Task|SendMessage", 'python3 "$CLAUDE_PROJECT_DIR/.claude/scripts/stage_gate_guard.py"'),
+        self.assertIn(("Agent|Task|SendMessage", 'python3 "$CLAUDE_PROJECT_DIR/.claude/scripts/stage_gate_guard.py" || exit 2'),
                       commands)
         self.assertIn("SubagentStop", settings["hooks"])
 

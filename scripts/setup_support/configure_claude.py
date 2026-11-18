@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from pathlib import Path
 
 from .state import SetupError
@@ -51,6 +52,8 @@ def render(root: Path, prefix: Path | None, *, with_biomass: bool = False,
     if len(re.findall(pattern, text, re.MULTILINE)) != 1:
         raise SetupError("Unsupported literature hook command; expected one Python hook")
     # The guard is standard-library only; plugin mode keeps the portable interpreter.
-    interpreter = "python3" if plugin else str(prefix/"bin/python")
-    outputs[hook] = re.sub(pattern, lambda m: m[1] + json.dumps(interpreter), text, flags=re.MULTILINE)
+    interpreter = "python3" if plugin else shlex.quote(str(prefix/"bin/python"))
+    # `|| exit 2`: a guard that cannot start (no interpreter) must block, and only exit 2 blocks.
+    command = f'{interpreter} "$CLAUDE_PROJECT_DIR/.claude/scripts/literature_file_guard.py" || exit 2'
+    outputs[hook] = re.sub(pattern, lambda m: m[1] + json.dumps(command), text, flags=re.MULTILINE)
     return outputs

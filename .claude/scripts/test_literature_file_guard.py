@@ -224,9 +224,10 @@ class LiteratureReviewerDefinitionTests(unittest.TestCase):
         self.assertIn("  - Write\n", definition)
         self.assertIn('    - matcher: "Read|Write"\n', definition)
         self.assertIn("command:", definition)
+        # The same shell form as every other guard; `|| exit 2` blocks when the guard cannot run.
         self.assertIn(
-            '            - "${CLAUDE_PROJECT_DIR}/.claude/scripts/'
-            'literature_file_guard.py"\n',
+            '          command: "python3 \\"$CLAUDE_PROJECT_DIR/.claude/scripts/'
+            'literature_file_guard.py\\" || exit 2"\n',
             definition,
         )
         self.assertNotIn("jq", definition.lower())
