@@ -1,9 +1,26 @@
 # Changelog
 
-## Unreleased
+## 1.2.1 — 2026-11-18
+
+Tested with `mcp-biomodelling-servers` **2.5.2** (NeKo `nekomata` **1.10.3**); the
+backend pins are unchanged from 1.2.0. A hardening release: the high-priority findings
+of a code audit, incremental approval of small topology edits, macOS as a setup host,
+and a licence.
+
+**Existing models, before the next downstream dispatch:** stage reviews recorded before
+this release no longer pass the gate (re-run `/validate-stage`), calibration jobs built
+with the earlier runtime must be rebuilt, and a data environment needs
+`setup.py --with-data` again. Details are in the entries below.
 
 ### Added
 
+- **Licence.** The repository is released under the GNU General Public License v3.0
+  ([`LICENSE`](LICENSE)), the licence of `mcp-biomodelling-servers`. Vendored
+  third-party skills keep their own licences
+  ([`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)).
+- **PubMed server step in the quick start.** The README now gives the command that
+  registers the `pubmed` server the `literature-reviewer` needs; before, it only said
+  to confirm that the server was present.
 - **Incremental approval of small topology edits.** Every edit of a reviewed network required both
   reviewers to run again on the whole network, even for one edge the researcher had just decided on. A
   new `scripts/network_delta.py` computes the exact difference between the reviewed and the new

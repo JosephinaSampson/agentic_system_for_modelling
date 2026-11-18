@@ -14,7 +14,7 @@ state lives in version-controlled files, not in chat history.
 > [user guide](docs/user-guide.md). It explains what the framework can do for your
 > question, how a session goes, which decisions you make and how to read the results.
 
-Release **1.2.0**, tested with `mcp-biomodelling-servers` **2.5.2** (NeKo
+Release **1.2.1**, tested with `mcp-biomodelling-servers` **2.5.2** (NeKo
 `nekomata` 1.10.3, PhysiCell Settings 0.6.3, bundled cmaboss, BioMASS 0.14). See
 [`CHANGELOG.md`](CHANGELOG.md) for changes and known limitations, and
 [`ROADMAP.md`](ROADMAP.md) for planned releases.
@@ -109,8 +109,13 @@ git clone <repository-url> my-model && cd my-model
 curl -LsSf https://astral.sh/uv/install.sh | sh          # if uv is not installed
 python scripts/setup.py --client claude --environment-mode plugin --with-biomass
 python scripts/check_isolation.py
+claude mcp add --transport http pubmed https://pubmed.mcp.claude.com/mcp
 claude
 ```
+
+The `claude mcp add` line registers the literature server for this project on your
+machine; the name must be exactly `pubmed`. Skip it if `/mcp` already lists a server
+with that name (for example a PubMed connector on your account).
 
 Inside Claude Code, run `/agents` to confirm the agents, and `/mcp` to confirm the
 `pubmed` server. Modelling servers are not connected to the main session: they are
@@ -402,3 +407,9 @@ See [`docs/README.md`](docs/README.md) for every guide and reference contract. M
 This repository configures agents and workflows. The modelling servers are maintained
 separately in
 [mcp-biomodelling-servers](https://github.com/marcorusc/mcp-biomodelling-servers).
+
+## License
+
+GNU General Public License v3.0; see [`LICENSE`](LICENSE). The vendored skills under
+`vendor/scientific-agent-skills/` keep their own licences, listed in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
