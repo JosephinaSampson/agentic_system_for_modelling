@@ -1197,18 +1197,25 @@ class OdeCalibrationInputTests(HoldoutFixture):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn("calibration job", result.stderr)
 
-    def test_ordinary_and_handoff_ode_briefs_pass(self):
+    def test_ordinary_ode_briefs_pass_and_handoff_briefs_are_gated(self):
         handoff = self.root / "runs" / "network-curator" / "neko-1" / "exports" / "a1" / "biomass_handoff.json"
         handoff.parent.mkdir(parents=True)
         handoff.write_text(json.dumps({"handoff_type": "neko-to-biomass", "network": {"nodes": ["A"]}}),
                            encoding="utf-8")
         for prompt in ("Build the model from the reactions; then run a simulation.",
-                       "STAGE_GATE {\"upstream_session_id\": \"neko-1\", \"outputs\": [\"A\"]}\n"
-                       f"Import the NeKo to BioMASS handoff {handoff.relative_to(self.root).as_posix()}.",
                        "Notes are in runs/orchestrator/p1/notes.md; the jobs list is elsewhere."):
             with self.subTest(prompt=prompt):
                 result = self.hook("ode-modeler", prompt)
                 self.assertEqual(result.returncode, 0, result.stderr)
+        # A handoff brief is gated: its STAGE_GATE is resolved against the durable records (none here),
+        # and without the envelope the NeKo source is refused.
+        body = f"Import the NeKo to BioMASS handoff {handoff.relative_to(self.root).as_posix()}."
+        gated = self.hook("ode-modeler", 'STAGE_GATE {"upstream_session_id": "neko-1", "outputs": ["A"]}\n' + body)
+        self.assertEqual(gated.returncode, 2, gated.stderr)
+        self.assertNotIn("without a first-line STAGE_GATE", gated.stderr)
+        bare = self.hook("ode-modeler", body)
+        self.assertEqual(bare.returncode, 2, bare.stderr)
+        self.assertIn("without a first-line STAGE_GATE", bare.stderr)
 
     def test_proposal_mapping_approval_and_job_sha_are_checked(self):
         data = json.loads(self.proposal_path.read_text(encoding="utf-8"))

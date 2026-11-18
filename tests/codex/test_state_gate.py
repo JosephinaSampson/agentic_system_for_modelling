@@ -207,6 +207,30 @@ class StateGateTests(unittest.TestCase):
             self.assertTrue(resolve.called)
             self.assertEqual(events[0]["type"],"stage_gate")
 
+    def test_claude_hook_gates_an_ode_brief_with_a_neko_source(self):
+        import subprocess,sys,os
+        def hook(prompt):
+            event={"tool_name":"Agent","tool_input":{"subagent_type":"ode-modeler","prompt":prompt}}
+            return subprocess.run([sys.executable,str(state.ROOT/".claude/scripts/stage_gate_guard.py")],input=json.dumps(event),text=True,capture_output=True,
+                                  env={**os.environ,"CLAUDE_PROJECT_DIR":str(state.ROOT)})
+        for prompt in ("Import runs/network-curator/session-999/exports/ode_handoff.json and build the ODE model",
+                       "Build the model from runs\\.\\network-curator\\session-999",
+                       "Call import_neko_handoff on the latest export",
+                       "Use the NEKO-TO-BIOMASS manifest of the curator"):
+            result=hook(prompt)
+            self.assertEqual(result.returncode,2,prompt)
+            self.assertIn("without a first-line STAGE_GATE",result.stderr)
+        # a STAGE_GATE the brief carries is resolved against the durable records, never taken on trust
+        result=hook('STAGE_GATE {"upstream_session_id":"session-999","outputs":["A"]}\nImport runs/network-curator/session-999/exports/ode_handoff.json')
+        self.assertEqual(result.returncode,2)
+        self.assertNotIn("without a first-line STAGE_GATE",result.stderr)
+        result=hook('STAGE_GATE {"standalone_decision_id":"missing","outputs":["A"]}\nBuild from the Text2Model source')
+        self.assertEqual(result.returncode,2)
+        # standalone authoring and work on existing BioMASS sessions carry no envelope
+        for prompt in ("Build an ODE model from these authorized reactions: A phosphorylates B",
+                       "List the sessions and inspect the reactions of the current revision"):
+            self.assertEqual(hook(prompt).returncode,0,prompt)
+
     def test_malformed_claude_hook_input_denies_with_blocking_exit_code(self):
         import subprocess,sys,os
         for event in (None,{"tool_name":"Agent","tool_input":[]},{"tool_name":"Agent","tool_input":{"subagent_type":[]}}):

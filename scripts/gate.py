@@ -325,6 +325,27 @@ def check_task(root, specialist, task, design=None):
     raise ValueError("no design handoff has a current approval of the STAGE_GATE outputs: " + "; ".join(refusals))
 
 
+NEKO_SOURCE = re.compile(r"runs[\\/]+(?:\.[\\/]+)*network-curator|neko-to-biomass|import_neko_handoff", re.I)
+ODE_SOURCE_REFUSAL = ("ode-modeler brief names a NeKo source (a runs/network-curator path, a neko-to-biomass handoff "
+                      "or import_neko_handoff) without a first-line STAGE_GATE; run scripts/gate.py check "
+                      "biomass_ode first")
+
+
+def check_ode_source(root, task):
+    """The stage gate of an ode-modeler brief that has no calibration DATA_INPUT.
+
+    A first-line STAGE_GATE is resolved like any other (check_task: the biomass_ode upstream approval or a
+    standalone_approval). A brief without one may not name a NeKo source: an ODE model built from a NeKo graph
+    needs the reviewed, approved and current neko-to-biomass export. Standalone Text2Model and reaction briefs
+    and work on existing BioMASS sessions carry no envelope and stay under docs/ode-contract.md; returns None."""
+    first = task.splitlines()[0] if task else ""
+    if first.startswith("STAGE_GATE "):
+        return check_task(root, "ode_modeler", task)
+    if NEKO_SOURCE.search(_detection_text(task)):
+        raise ValueError(ODE_SOURCE_REFUSAL)
+    return None
+
+
 # Detection runs on a normalised copy of the prompt (see _detection_text); any spelling
 # of DATA_INPUT, data-analyst path or data session ID counts.
 DATA_PATH = re.compile(r"runs[\\/]+data-analyst", re.I)

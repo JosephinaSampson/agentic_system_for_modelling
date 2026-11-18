@@ -15,6 +15,11 @@
   `wsl.exe` was called without `--exec`, so bash expanded backticks, `$VAR` and
   `$(...)` in a brief: Markdown code spans were deleted from the task and a quoted
   `$(...)` was executed. The bridge now uses `wsl.exe --exec`.
+- **The Claude dispatch hook now gates ode-modeler briefs that use a NeKo graph.** It
+  resolved `STAGE_GATE` only for the MaBoSS and PhysiCell specialists, so an ODE brief
+  could point at an unreviewed NeKo export. A first-line `STAGE_GATE` on an ODE brief
+  is now checked (`biomass_ode`), and a brief naming a NeKo source without one is
+  refused. Standalone Text2Model and reaction briefs are unchanged.
 
 ## 1.2.0 — 2026-11-18
 

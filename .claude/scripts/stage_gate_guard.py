@@ -37,14 +37,17 @@ def main():
         # has a DATA_INPUT form; a gated role without one is blocked (it would skip those rules).
         if role not in gate.DATA_INPUT_LINE:
             raise ValueError(f"gated role {role} has no DATA_INPUT form in scripts/gate.py DATA_INPUT_LINE")
-        _, stage_gate = gate.check_data_input_and_stage_gate(ROOT, role, prompt)
-        # ODE authoring has its own source/readiness/whole-model approval contract;
-        # this hook enforces the two sequential Boolean downstream boundaries. The line-1 STAGE_GATE of a
-        # boolean-dynamics-modeler or multicellular-configurator brief is resolved once per dispatch: a
-        # line-2 DATA_INPUT check that binds its artifact to it has already run check_task on this very line
-        # (stage_gate is its result); otherwise it runs here.
+        data_input, stage_gate = gate.check_data_input_and_stage_gate(ROOT, role, prompt)
+        # The line-1 STAGE_GATE of a boolean-dynamics-modeler or multicellular-configurator brief is
+        # resolved once per dispatch: a line-2 DATA_INPUT check that binds its artifact to it has already
+        # run check_task on this very line (stage_gate is its result); otherwise it runs here.
         if role in {"boolean_dynamics_modeler", "multicellular_configurator"} and stage_gate is None:
             gate.check_task(ROOT, role, prompt)
+        # ODE authoring has its own source/readiness/whole-model approval contract (docs/ode-contract.md),
+        # so a brief needs no envelope; but a STAGE_GATE it does carry is resolved, and a NeKo source
+        # is refused without one. A calibration brief has DATA_INPUT on line 1 and was checked above.
+        if role == "ode_modeler" and data_input is None:
+            gate.check_ode_source(ROOT, prompt)
         return 0
     except Exception as exc:  # noqa: BLE001 - see fail-closed note above
         print(f"Downstream stage dispatch blocked: {type(exc).__name__}: {exc}"[:2000], file=sys.stderr)

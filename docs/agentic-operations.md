@@ -92,8 +92,12 @@ python3 scripts/gate.py check biomass_ode FULL_NEKO_SESSION --outputs NODE_ID_1 
 NeKo-to-BioMASS graphs carry no output selection, so for `biomass_ode` the
 approval's `outputs` are every `node_id` in the exported `network_file`: the
 researcher approves the whole graph's species scope. The ODE dispatch itself is
-governed by the [ODE contract](ode-contract.md); the Claude dispatch hook enforces
-`STAGE_GATE` only for the MaBoSS and PhysiCell specialists.
+governed by the [ODE contract](ode-contract.md). The Claude dispatch hook requires
+`STAGE_GATE` on every MaBoSS and PhysiCell dispatch. For the ode-modeler it resolves
+a first-line `STAGE_GATE` when the brief has one, and refuses a brief that names a
+NeKo source (a `runs/network-curator` path, a `neko-to-biomass` handoff or
+`import_neko_handoff`) without one; standalone Text2Model and reaction briefs carry
+no envelope.
 
 The checker requires the expected active upstream row with Handoff exactly
 `exported`, a valid typed handoff and captured dependencies, matching outputs,
